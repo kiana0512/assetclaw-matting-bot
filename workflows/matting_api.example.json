@@ -1,0 +1,30 @@
+{
+  "_comment": "This is a placeholder showing the expected ComfyUI API JSON format.",
+  "_comment2": "Export your real workflow via ComfyUI → Enable Dev Mode → Save (API Format).",
+  "_comment3": "Save the exported file as workflows/matting_api.json (without the _comment keys).",
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "input.png",
+      "upload": "image"
+    }
+  },
+  "2": {
+    "class_type": "BRIA_RMBG_ModelLoader",
+    "inputs": {}
+  },
+  "3": {
+    "class_type": "BRIA_RMBG",
+    "inputs": {
+      "model": ["2", 0],
+      "image": ["1", 0]
+    }
+  },
+  "4": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["3", 0],
+      "filename_prefix": "matting_output"
+    }
+  }
+}

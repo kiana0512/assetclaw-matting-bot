@@ -1,0 +1,18 @@
+# workflows.example.yaml — Register available ComfyUI workflows.
+# Extend this when adding new workflow types.
+
+workflows:
+  matting_v1:
+    description: "Image background removal using BRIA RMBG or similar"
+    api_json: "workflows/matting_api.json"
+    input_node_class: "LoadImage"
+    output_node_class: "SaveImage"
+
+  # Future workflows (not yet implemented):
+  # bg_replace_v1:
+  #   description: "Replace background with a solid colour or another image"
+  #   api_json: "workflows/bg_replace_api.json"
+
+  # hires_fix_v1:
+  #   description: "High-resolution upscaling fix"
+  #   api_json: "workflows/hires_fix_api.json"
