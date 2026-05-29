@@ -1,13 +1,11 @@
-# Run the AssetClaw worker loop
-# The worker polls the gateway for tasks and calls ComfyUI locally.
-
+# Start the AssetClaw Worker (polls gateway, calls ComfyUI)
+# conda env: assetclaw
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path $PSScriptRoot -Parent
 
-Write-Host "Activating conda environment: assetclaw-matting" -ForegroundColor Cyan
-conda activate assetclaw-matting
-
+Write-Host "Activating conda env: assetclaw" -ForegroundColor Cyan
+conda activate assetclaw
 Set-Location $ProjectRoot
 
-Write-Host "Starting worker loop (WORKER_ID=$env:WORKER_ID)..." -ForegroundColor Green
+Write-Host "Starting worker (fake=$env:COMFYUI_FAKE_MODE)..." -ForegroundColor Green
 python -m assetclaw_matting.cli.main worker

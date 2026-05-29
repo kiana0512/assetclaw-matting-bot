@@ -7,17 +7,26 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 
-from assetclaw_matting.skills.auth import verify_skill_token
 from assetclaw_matting.skills.schemas import SkillCallRequest, SkillCallResponse
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/skills/v1", tags=["skills"])
 
 
-@router.get("/manifest", dependencies=[Depends(verify_skill_token)])
+# FastAPI dependency — defined here to keep skills/auth.py free of fastapi imports
+def _verify_skill_token(x_skill_token: str = Header(...)) -> None:
+    from assetclaw_matting.skills.auth import check_skill_token
+    try:
+        check_skill_token(x_skill_token)
+    except PermissionError as exc:
+        code = 503 if "disabled" in str(exc).lower() else 401
+        raise HTTPException(status_code=code, detail=str(exc))
+
+
+@router.get("/manifest", dependencies=[Depends(_verify_skill_token)])
 async def skill_manifest() -> JSONResponse:
     """Return the full skill manifest for this machine.
 
@@ -27,7 +36,7 @@ async def skill_manifest() -> JSONResponse:
     return JSONResponse(get_manifest())
 
 
-@router.post("/call", dependencies=[Depends(verify_skill_token)])
+@router.post("/call", dependencies=[Depends(_verify_skill_token)])
 async def skill_call(body: SkillCallRequest) -> SkillCallResponse:
     """Execute a skill by name.
 
@@ -51,7 +60,7 @@ async def skill_call(body: SkillCallRequest) -> SkillCallResponse:
     )
 
 
-@router.get("/calls", dependencies=[Depends(verify_skill_token)])
+@router.get("/calls", dependencies=[Depends(_verify_skill_token)])
 async def list_skill_calls(limit: int = 50) -> JSONResponse:
     """Return recent skill call audit log."""
     from assetclaw_matting.db.sqlite import get_connection

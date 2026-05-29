@@ -11,8 +11,17 @@ from assetclaw_matting.models.feishu_models import FeishuEventEnvelope
 
 log = logging.getLogger(__name__)
 
-# Re-export for backward compatibility (agent/harness.py imports from here)
+# Re-export for backward compat (agent/harness.py imports from here)
 from assetclaw_matting.feishu.command_runner import execute_command  # noqa: F401
+
+_IMAGE_REPLY = (
+    "当前主流程是目录批量抠图。\n"
+    "请把图片放入输入目录，再创建批次：\n"
+    "  CLI:   python -m assetclaw_matting.cli.main batch-create ...\n"
+    "  API:   POST /admin/batches/create\n"
+    "  Skill: POST /skills/v1/call {\"skill\":\"batch.create\",...}\n"
+    "单图上传将在后续版本支持。"
+)
 
 
 def handle_event(raw: dict[str, Any]) -> dict[str, Any]:
@@ -54,10 +63,12 @@ def handle_event(raw: dict[str, Any]) -> dict[str, Any]:
 
     if msg.message_type == "text":
         _handle_text(message_id, chat_id, sender_id, msg.content)
+    elif msg.message_type == "image":
+        feishu_client.reply_text(message_id, _IMAGE_REPLY)
     else:
         feishu_client.reply_text(
             message_id,
-            "AssetClaw 暂不支持该消息类型。\n发送 help 查看可用命令。",
+            "暂不支持该消息类型。发送 help 查看可用命令。",
         )
 
     return {"ok": True}
@@ -75,16 +86,25 @@ def _handle_text(
     message_id: str, chat_id: str, sender_id: str, content_raw: str
 ) -> None:
     try:
-        content = json.loads(content_raw)
-        text = content.get("text", "").strip()
+        text = json.loads(content_raw).get("text", "").strip()
     except Exception:
         text = content_raw.strip()
 
-    # Route through OpenClaw bridge (handles local commands + cloud agent fallback)
-    from assetclaw_matting.openclaw.bridge import handle_feishu_text_message
-    handle_feishu_text_message(
-        chat_id=chat_id,
-        sender_id=sender_id,
-        message_id=message_id,
+    # Route through Brain Router (pluggable: local_command | llm_proxy | arkclaw | claude | ...)
+    from assetclaw_matting.brain.schemas import BrainMessage
+    from assetclaw_matting.brain import router as brain_router
+
+    msg = BrainMessage(
+        channel="feishu",
+        conversation_id=chat_id,
+        user_id=sender_id,
         text=text,
     )
+    try:
+        response = brain_router.handle_message(msg)
+        reply = response.text or "完成。"
+    except Exception as exc:
+        log.exception("Brain router failed for message_id=%s", message_id)
+        reply = f"处理失败，请稍后重试。（{exc}）"
+
+    feishu_client.reply_text(message_id, reply)

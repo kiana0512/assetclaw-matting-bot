@@ -23,11 +23,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     init_db(db_path)
     create_tables()
     log.info(
-        "AssetClaw started — %s:%s  fake=%s  openclaw=%s  skills=%s",
+        "AssetClaw Win3090 Skill Node — %s:%s  brain=%s  fake=%s  skills=%s",
         settings.gateway_host,
         settings.gateway_port,
+        settings.brain_provider,
         settings.comfyui_fake_mode,
-        settings.openclaw_enabled,
         settings.skill_api_enabled,
     )
     yield
@@ -35,36 +35,45 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(
-    title="AssetClaw Matting Bot",
-    version="0.2.0",
+    title="AssetClaw Win3090 Skill Node",
+    version="0.4.0",
     description=(
-        "ComfyUI Batch Gateway + Feishu Channel + "
-        "OpenClaw Agent Bridge + Skill Gateway"
+        "Feishu Channel + Pluggable Brain Router + Skill Gateway + "
+        "MCP Server + ComfyUI Batch Worker\n\n"
+        "3090 GPU only runs ComfyUI — no local LLM."
     ),
     lifespan=lifespan,
 )
 
-from assetclaw_matting.api.routes_feishu import router as feishu_router    # noqa: E402
-from assetclaw_matting.api.routes_worker import router as worker_router    # noqa: E402
-from assetclaw_matting.api.routes_admin import router as admin_router      # noqa: E402
-from assetclaw_matting.api.routes_skills import router as skills_router    # noqa: E402
-from assetclaw_matting.api.routes_openclaw import router as openclaw_router  # noqa: E402
+from assetclaw_matting.api.routes_feishu import router as feishu_router      # noqa: E402
+from assetclaw_matting.api.routes_worker import router as worker_router      # noqa: E402
+from assetclaw_matting.api.routes_admin import router as admin_router        # noqa: E402
+from assetclaw_matting.api.routes_skills import router as skills_router      # noqa: E402
+from assetclaw_matting.api.routes_arkclaw import router as arkclaw_router    # noqa: E402
+from assetclaw_matting.mcp_server.server import router as mcp_router         # noqa: E402
 
 app.include_router(feishu_router)
 app.include_router(worker_router)
 app.include_router(admin_router)
 app.include_router(skills_router)
-app.include_router(openclaw_router)
+app.include_router(arkclaw_router)
+app.include_router(mcp_router)
+
+try:
+    from assetclaw_matting.api.routes_openclaw import router as openclaw_router  # noqa: E402
+    app.include_router(openclaw_router)
+except ImportError:
+    pass
 
 
 @app.get("/health", tags=["system"])
 async def health() -> dict:
     return {
         "ok": True,
-        "service": "assetclaw-matting-bot",
-        "version": "0.2.0",
+        "service": "assetclaw-win3090-skill-node",
+        "version": "0.4.0",
+        "brain_provider": settings.brain_provider,
         "fake_mode": settings.comfyui_fake_mode,
-        "openclaw_enabled": settings.openclaw_enabled,
         "skill_api_enabled": settings.skill_api_enabled,
         "agent_runs_on_gpu": settings.agent_runs_on_gpu,
     }
