@@ -1,62 +1,54 @@
-# AssetClaw Matting Bot
+# AssetClaw Win3090 Skill Node
 
-> ComfyUI 批量抠图 + 飞书通知 + Agent Harness 预留
+> ArkClaw 企业版中央大脑的本地执行节点
+>
+> Feishu Channel + ArkClaw Bridge + Skill Gateway + ComfyUI Batch Worker
 
 ## 项目定位
 
-**AssetClaw Matting Bot** 是一个面向公共 Windows 3090 机器的 ComfyUI 批处理调度系统。
+**本项目不是普通飞书机器人。**
 
-核心角色：
-- **Gateway / Control Plane** — 接受批次创建、管理任务队列、飞书消息接入、Admin API
-- **Worker / Execution Plane** — 单 Worker 从 Gateway 拉任务、调用本地 ComfyUI、回报结果
-- **Feishu Channel** — 消息入口 + 批次通知 + 状态查询
-- **Agent Harness**（预留）— 通过外部 API 接入大模型，不占用本地 3090 显存
+本项目是 **ArkClaw 企业版**控制 Windows 3090 机器的**本地 Skill Node**。
 
-当前第一阶段 MVP 目标：
+| 组件 | 角色 | 在哪跑 |
+|------|------|-------|
+| 飞书机器人 | 消息入口和通知渠道 | 飞书云 |
+| ArkClaw Enterprise Brain | 超级大脑：自然语言理解、任务规划、记忆 | 公司云 |
+| Skill Gateway | 受控技能接口，ArkClaw 的"遥控器" | 本机 |
+| Batch / Task Control Plane | 任务队列、SQLite、Admin API | 本机 |
+| Worker | 单 Worker 顺序执行 GPU 任务 | 本机（3090） |
+| ComfyUI | 图像处理管线 | 本机（3090 GPU） |
 
-```
-指定输入目录 → 批量抠图 → 结果保存到输出目录
-```
+**关键原则：**
+- 3090 显存只留给 ComfyUI 图像任务，**不跑本地大模型**
+- ArkClaw 在云端做 AI 推理，通过 Skill API 控制本机
+- 飞书只是消息管道，不做业务决策
 
 ---
 
-## 架构图
+## 架构一览
 
 ```
-[飞书 / CLI / Admin API]
-         │
-         ▼
-  ┌─────────────────────┐
-  │  Gateway (FastAPI)  │  ← 任何机器，含内网穿透
-  │  SQLite 任务队列     │
-  │  飞书消息接入        │
-  │  Admin REST API     │
-  └──────────┬──────────┘
-             │ HTTP 轮询 (X-Worker-Token 鉴权)
-             ▼
-  ┌─────────────────────┐
-  │  Worker (本地)       │  ← Windows 3090 机器
-  │  单 Worker 顺序处理  │
-  │  调用本地 ComfyUI   │
-  └──────────┬──────────┘
-             │
-             ▼
-  ┌─────────────────────┐
-  │  ComfyUI API        │  http://127.0.0.1:8188
-  │  (本地 GPU 执行)    │
-  └─────────────────────┘
-
-  ┌─────────────────────┐
-  │  Agent Harness      │  ← 预留，外部 API，不占 GPU
-  │  (AGENT_ENABLED=f)  │
-  └─────────────────────┘
+用户
+ ↓ (飞书自然语言)
+ArkClaw Enterprise Brain  [云端]
+ ↓ POST /skills/v1/call  X-Skill-Token
+Skill Gateway  [本机 :7865]
+ ↓
+Batch / Task Control Plane  [SQLite]
+ ↓ HTTP 轮询
+Single Worker  [本机]
+ ↓
+Local ComfyUI  http://127.0.0.1:8188  [3090 GPU]
+ ↓
+输出目录 / 飞书通知
 ```
 
 ---
 
 ## 快速开始
 
-### 1. 环境安装
+### 1. 安装
 
 ```powershell
 conda create -n assetclaw-matting python=3.11 -y
@@ -65,7 +57,6 @@ pip install -r requirements.txt
 ```
 
 或一键初始化：
-
 ```powershell
 .\scripts\init_project.ps1
 ```
@@ -74,23 +65,18 @@ pip install -r requirements.txt
 
 ```powershell
 Copy-Item .env.example .env
-# 编辑 .env
+# 编辑 .env，填入真实值
 ```
 
 关键配置项：
 
 | 变量 | 说明 | 默认 |
 |------|------|------|
-| `FEISHU_APP_ID` | 飞书应用 ID | — |
-| `FEISHU_APP_SECRET` | 飞书应用 Secret | — |
-| `FEISHU_VERIFICATION_TOKEN` | 飞书事件验证 token | — |
-| `WORKER_TOKEN` | Gateway ↔ Worker 鉴权密钥 | `please_change_me` |
-| `COMFYUI_URL` | ComfyUI 地址 | `http://127.0.0.1:8188` |
-| `COMFYUI_WORKFLOW_PATH` | workflow API JSON 路径 | `workflows/matting_api.json` |
-| `COMFYUI_FAKE_MODE` | 跳过 ComfyUI，用 Pillow mock | **`true`** |
-| `ALLOWED_ROOTS` | 允许的目录前缀（分号分隔） | 见 .env.example |
-
-> **COMFYUI_FAKE_MODE 默认 true**。无 GPU 时可直接测试全链路。
+| `SKILL_API_TOKEN` | Skill Gateway 鉴权 token | `please_change_me` |
+| `WORKER_TOKEN` | Worker 鉴权 token | `please_change_me` |
+| `COMFYUI_FAKE_MODE` | true=Pillow mock（测试用） | **`true`** |
+| `ARKCLAW_ENABLED` | 启用 ArkClaw 云端 AI | `false` |
+| `ALLOWED_ROOTS` | 允许的路径前缀（分号分隔） | 见 .env.example |
 
 ### 3. 初始化数据库
 
@@ -100,103 +86,120 @@ python -m assetclaw_matting.cli.main init-db
 
 ---
 
-## Fake Mode 全链路测试（无 GPU）
+## Fake Mode 批量抠图测试（无 GPU）
 
-确认 `.env` 中 `COMFYUI_FAKE_MODE=true`，然后按以下顺序执行：
+确认 `.env` 中 `COMFYUI_FAKE_MODE=true`：
 
-**终端 1 — 启动 Gateway：**
 ```powershell
-conda activate assetclaw-matting
+# 终端 1 — Gateway
 python -m assetclaw_matting.cli.main gateway
-```
 
-**终端 2 — 创建并启动批次：**
-```powershell
-# 先往 batch_inputs 放几张图片
+# 终端 2 — 创建并启动批次（先往 batch_inputs 放几张图）
 python -m assetclaw_matting.cli.main batch-create `
-    --input-dir E:\assetclaw-matting-bot\storage\batch_inputs `
-    --output-dir E:\assetclaw-matting-bot\storage\batch_outputs `
-    --workflow-type matting_v1
+    --input-dir  E:\assetclaw-matting-bot\storage\batch_inputs `
+    --output-dir E:\assetclaw-matting-bot\storage\batch_outputs
+python -m assetclaw_matting.cli.main batch-start --batch-id BATCH_XXX
 
-python -m assetclaw_matting.cli.main batch-list
-python -m assetclaw_matting.cli.main batch-start --batch-id BATCH_XXXXXXXXXXXX
-```
-
-**终端 3 — 启动 Worker：**
-```powershell
+# 终端 3 — Worker
 python -m assetclaw_matting.cli.main worker
 ```
 
-**预期结果：**
-- `storage/batch_outputs/` 出现 `*_matting.png` 文件
-- `python -m assetclaw_matting.cli.main batch-status --batch-id BATCH_XXX` 显示 `SUCCEEDED`
-- `logs/worker.log` 有处理记录
+**预期：**
+- `storage/batch_outputs/*.png` 出现结果文件
+- `batch-status` 显示 `SUCCEEDED`
 
 ---
 
-## 真实 ComfyUI 测试
-
-### 启动 ComfyUI
+## Skill Gateway 测试
 
 ```powershell
-cd E:\ComfyUI
-python main.py --listen 127.0.0.1 --port 8188
+# 获取技能清单
+curl -H "X-Skill-Token: please_change_me" http://127.0.0.1:7865/skills/v1/manifest
+
+# 调用 queue.status
+curl -X POST http://127.0.0.1:7865/skills/v1/call `
+  -H "X-Skill-Token: please_change_me" `
+  -H "Content-Type: application/json" `
+  -d '{"skill":"queue.status","arguments":{}}'
+
+# 通过 Skill API 创建批次
+curl -X POST http://127.0.0.1:7865/skills/v1/call `
+  -H "X-Skill-Token: please_change_me" `
+  -H "Content-Type: application/json" `
+  -d '{"skill":"batch.create","arguments":{"input_dir":"E:\\storage\\batch_inputs","output_dir":"E:\\storage\\batch_outputs"}}'
 ```
-
-### 导出 Workflow
-
-1. ComfyUI 界面：Settings → Enable Dev Mode Options → 打开
-2. 搭好抠图工作流，确保含 **LoadImage** 和 **SaveImage** 节点
-3. 点击 **Save (API Format)** → 保存为 `workflows/matting_api.json`
-
-参考格式：`workflows/matting_api.example.json`
-
-### 修改 .env
-
-```
-COMFYUI_FAKE_MODE=false
-COMFYUI_WORKFLOW_PATH=E:\assetclaw-matting-bot\workflows\matting_api.json
-```
-
-然后按照 Fake Mode 流程启动 Gateway → 创建批次 → 启动 Worker。
 
 ---
 
-## 飞书接入
+## 当前可用 Skills（12 个已实现）
 
-### 启动 cloudflared 内网穿透
+| Skill | 用途 | 风险 |
+|-------|------|------|
+| `batch.create` | 创建批量抠图任务 | 中 |
+| `batch.start` | 启动已创建批次 | 低 |
+| `batch.status` | 查看批次进度 | 低 |
+| `batch.list` | 列出最近批次 | 低 |
+| `batch.cancel` | 取消排队任务 | 中 |
+| `queue.status` | 全局队列统计 | 低 |
+| `task.status` | 任务详情 | 低 |
+| `task.list_failed` | 失败任务列表 | 低 |
+| `worker.status` | Worker 活动 | 低 |
+| `comfyui.status` | ComfyUI 在线状态 | 低 |
+| `file.list_allowed` | 列出允许路径文件（仅元数据） | 低 |
+| `log.tail` | 查看最近日志（脱敏） | 低 |
 
-```powershell
-cloudflared tunnel --url http://127.0.0.1:7865
-# 记录输出的 https://xxxx.trycloudflare.com 地址
-```
+预留 4 个（未实现）：`frame.extract` `model3d.generate` `texture.apply` `workflow.run`
 
-> cloudflared 每次重启地址会变，需更新飞书回调 URL。
+---
 
-### 飞书回调配置
-
-1. 开放平台 → 应用 → 事件与回调
-2. 回调 URL：`https://xxxx.trycloudflare.com/feishu/events`
-3. 订阅事件：`im.message.receive_v1`
-
-所需权限：
-- 读取单聊 / 群聊消息
-- 以机器人身份发送消息
-
-### 飞书命令
+## 飞书命令（本地硬命令，无需 ArkClaw）
 
 | 命令 | 说明 |
 |------|------|
 | `help` | 查看帮助 |
-| `queue` | 查看当前队列 |
-| `batch list` | 最近 10 个批次 |
-| `batch status <batch_id>` | 批次详情 |
-| `batch cancel <batch_id>` | 取消批次 |
-| `task status <task_id>` | 任务详情 |
+| `queue` | 队列状态 |
+| `batch list` | 最近批次 |
+| `batch status <id>` | 批次详情 |
+| `batch cancel <id>` | 取消批次 |
+| `task status <id>` | 任务详情 |
 
 ---
 
-## CLI 命令速查
+## ArkClaw 接入
+
+```env
+# .env
+ARKCLAW_ENABLED=true
+ARKCLAW_BASE_URL=https://your.arkclaw.api
+ARKCLAW_API_KEY=your_key
+ARKCLAW_MESSAGE_MODE=local_command_first
+```
+
+配合 cloudflared 暴露 Skill API：
+```powershell
+cloudflared tunnel --url http://127.0.0.1:7865
+# ArkClaw Skill Node URL: https://xxxx.trycloudflare.com
+```
+
+详细接入文档：[docs/ARKCLAW_INTEGRATION.md](docs/ARKCLAW_INTEGRATION.md)
+
+---
+
+## 真实 ComfyUI 接入
+
+1. 启动 ComfyUI：
+   ```powershell
+   cd E:\ComfyUI && python main.py --listen 127.0.0.1 --port 8188
+   ```
+2. 导出 workflow：Settings → Enable Dev Mode → Save (API Format) → `workflows/matting_api.json`
+3. 修改 `.env`：`COMFYUI_FAKE_MODE=false`
+4. 确保 workflow 有 `LoadImage` 和 `SaveImage` 节点
+
+详细说明：[docs/COMFYUI_WORKFLOW.md](docs/COMFYUI_WORKFLOW.md)
+
+---
+
+## CLI 速查
 
 ```powershell
 python -m assetclaw_matting.cli.main init-db
@@ -204,7 +207,7 @@ python -m assetclaw_matting.cli.main gateway
 python -m assetclaw_matting.cli.main worker
 python -m assetclaw_matting.cli.main batch-create --input-dir X --output-dir Y
 python -m assetclaw_matting.cli.main batch-start  --batch-id BATCH_XXX
-python -m assetclaw_matting.cli.main batch-list   [--limit 20]
+python -m assetclaw_matting.cli.main batch-list
 python -m assetclaw_matting.cli.main batch-status --batch-id BATCH_XXX
 python -m assetclaw_matting.cli.main task-list    [--batch-id X] [--status FAILED]
 python -m assetclaw_matting.cli.main queue
@@ -212,106 +215,30 @@ python -m assetclaw_matting.cli.main queue
 
 ---
 
-## Admin API 速查
+## 文档目录
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/health` | 健康检查 |
-| GET | `/admin/queue` | 队列状态 |
-| GET | `/admin/batches` | 批次列表 |
-| GET | `/admin/batches/{id}` | 批次详情 |
-| POST | `/admin/batches/create` | 创建批次 |
-| POST | `/admin/batches/{id}/start` | 启动批次 |
-| POST | `/admin/batches/{id}/cancel` | 取消批次 |
-| GET | `/admin/tasks` | 任务列表 |
-| GET | `/admin/tasks/{id}` | 任务详情 |
-| GET | `/admin/worker/status` | Worker 状态 |
-| GET | `/admin/comfyui/status` | ComfyUI 状态 |
-
----
-
-## Worker API（内部）
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/worker/tasks/next` | 拉取下一个任务 |
-| POST | `/worker/tasks/{id}/started` | 标记开始 |
-| GET | `/worker/tasks/{id}/input` | 下载输入文件（远程 Worker） |
-| POST | `/worker/tasks/{id}/succeeded` | 上报成功 + 输出路径 |
-| POST | `/worker/tasks/{id}/failed` | 上报失败 |
-
-所有 Worker 接口需要 Header：`X-Worker-Token: <WORKER_TOKEN>`
-
----
-
-## Agent Harness（预留）
-
-```
-AGENT_ENABLED=false   # 默认：走确定性命令解析
-AGENT_ENABLED=true    # 接外部 LLM API（不占 3090 显存）
-```
-
-当 `AGENT_ENABLED=true` 时：
-- 通过 `AGENT_LLM_BASE_URL` 调用 OpenAI-compatible API
-- LLM 通过白名单工具控制系统
-- **不执行 shell，不访问任意路径，不删除文件**
-
-已注册工具：
-`batch_create / batch_start / batch_status / batch_list / batch_cancel /
-queue_status / worker_status / comfyui_status / task_list_failed`
-
----
-
-## 目录结构
-
-```
-assetclaw-matting-bot/
-├── src/assetclaw_matting/
-│   ├── config.py               所有配置项（pydantic-settings）
-│   ├── logging_setup.py
-│   ├── db/                     SQLite 层（sqlite / schema / task_repo / batch_repo）
-│   ├── models/                 Pydantic 数据模型
-│   ├── services/               业务逻辑（batch / task / file_store / notification）
-│   ├── feishu/                 飞书 client + 事件处理 + 命令解析
-│   ├── comfyui/                ComfyUI client + workflow patch
-│   ├── api/                    FastAPI 路由（feishu / worker / admin）
-│   ├── worker/                 Worker 轮询 + lock
-│   ├── agent/                  Agent Harness（harness / llm_client / tools / ...）
-│   └── cli/                    CLI 入口
-├── storage/
-│   ├── batch_inputs/           默认输入目录
-│   ├── batch_outputs/          默认输出目录
-│   ├── tasks/                  每任务元数据（task.json, 调试文件）
-│   ├── batches/                批次级文件（预留）
-│   └── debug/                  ComfyUI history 调试文件
-├── workflows/                  ComfyUI API JSON 文件
-├── data/                       SQLite 数据库
-├── logs/                       gateway.log / worker.log
-└── scripts/                    PowerShell 启动脚本
-```
+| 文档 | 内容 |
+|------|------|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 总体架构和数据流 |
+| [docs/ARKCLAW_INTEGRATION.md](docs/ARKCLAW_INTEGRATION.md) | ArkClaw 接入完整指南 |
+| [docs/SKILLS.md](docs/SKILLS.md) | Skill 参考手册 |
+| [docs/SECURITY.md](docs/SECURITY.md) | 安全模型 |
+| [docs/BATCH_MATTING_SOP.md](docs/BATCH_MATTING_SOP.md) | 批量抠图 SOP（供 ArkClaw 学习） |
+| [docs/FEISHU_SETUP.md](docs/FEISHU_SETUP.md) | 飞书配置指南 |
+| [docs/COMFYUI_WORKFLOW.md](docs/COMFYUI_WORKFLOW.md) | ComfyUI workflow 接入 |
+| [docs/FUTURE_SKILLS.md](docs/FUTURE_SKILLS.md) | 后续技能路线图 |
+| [docs/OPENCLAW_INTEGRATION.md](docs/OPENCLAW_INTEGRATION.md) | ~~OpenClaw~~ 历史兼容说明 |
 
 ---
 
 ## 常见问题
 
-| 问题 | 解决方案 |
-|------|----------|
-| cloudflared 地址变了 | 重新填写飞书回调 URL |
-| 飞书收不到消息 | 检查应用是否发布、权限是否开通 |
-| `invalid token` | `FEISHU_VERIFICATION_TOKEN` 与飞书控制台不一致 |
-| ComfyUI 连不上 | 确认 ComfyUI 在 `COMFYUI_URL` 地址运行 |
-| `No LoadImage node` | 检查 workflow JSON，确保用 API Format 导出 |
-| `No SaveImage outputs` | 查看 `storage/debug/history_*.json` 调试 |
-| worker.lock 导致无法启动 | 删除项目根目录下的 `worker.lock` |
-| 显存不足 | 降低输入分辨率，重启 ComfyUI |
-| 路径不在 allowed_roots | 在 `.env` 的 `ALLOWED_ROOTS` 里添加路径 |
-
----
-
-## 后续扩展路线
-
-- **新增 workflow_type**：在 `configs/workflows.example.yaml` 添加，Worker 按 `workflow_type` 分发
-- **新增 ComfyUI workflow**：导出 JSON → `workflows/` → 更新 `.env`
-- **接入 Agent**：设置 `AGENT_ENABLED=true` + `AGENT_LLM_BASE_URL`，接 Claude / GPT-4 等
-- **多 Worker**：多台机器独立 `WORKER_ID`，队列天然支持多 Worker 并发
-- **Web 管理后台**：基于 Admin API 扩展前端
+| 问题 | 解决 |
+|------|------|
+| Skill API 返回 401 | 检查 `SKILL_API_TOKEN` |
+| Worker 不拉任务 | 确认 batch 已 start（`batch-status`） |
+| ComfyUI 超时 | 检查 VRAM 使用；重启 ComfyUI |
+| `No LoadImage node` | 确认用 API Format 导出 workflow |
+| worker.lock 卡住 | 删除项目根目录的 `worker.lock` |
+| 路径拒绝 | 把路径加入 `ALLOWED_ROOTS` |
+| ArkClaw 无响应 | 检查 `ARKCLAW_BASE_URL` 和 `ARKCLAW_API_KEY` |
