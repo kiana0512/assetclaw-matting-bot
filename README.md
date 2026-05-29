@@ -8,8 +8,9 @@
 
 ## 目录
 
-1. [项目结构](#项目结构)
-2. [快速开始](#快速开始)
+1. [最小闭环：飞书 → Brain → File Skills](#最小闭环飞书--brain--file-skills)
+2. [项目结构](#项目结构)
+3. [快速开始](#快速开始)
 3. [配置说明](#配置说明env)
 4. [批量抠图完整流程](#批量抠图完整流程)
 5. [Skill API 使用](#skill-api-使用)
@@ -20,6 +21,130 @@
 10. [Admin API 速查](#admin-api-速查)
 11. [CLI 命令速查](#cli-命令速查)
 12. [常见问题](#常见问题)
+
+---
+
+---
+
+## 最小闭环：飞书 → Brain → File Skills
+
+> 目标：飞书里说"看看 E 盘有哪些文件"或"把 A 复制到 B"，机器人直接响应。
+
+### 第一步：配置 .env
+
+```powershell
+Copy-Item .env.example .env
+# 用编辑器打开 .env，至少填写以下字段：
+```
+
+必填字段：
+
+| 字段 | 说明 |
+|------|------|
+| `LLM_PROXY_API_KEY` | 公司 LLM Proxy key（Atlas Helper 申请） |
+| `LLM_PROXY_MODEL` | 模型名，如 `claude-sonnet-4-6` |
+| `FEISHU_APP_ID` | 飞书开放平台 → 应用 → 凭证与基础信息 |
+| `FEISHU_APP_SECRET` | 同上 |
+| `FEISHU_VERIFICATION_TOKEN` | 飞书 → 事件与回调 → 验证 Token |
+| `SKILL_API_TOKEN` | 随机字符串（`python -c "import secrets; print(secrets.token_hex(24))"` 生成） |
+
+### 第二步：初始化并启动 Gateway
+
+```powershell
+conda activate assetclaw
+python -m assetclaw_matting.cli.main init-db
+
+# 启动 Gateway（保持此窗口开着）
+powershell -ExecutionPolicy Bypass -File scripts\run_gateway.ps1
+```
+
+验证 Gateway 正常：
+
+```powershell
+curl http://127.0.0.1:7865/health
+```
+
+### 第三步：启动 cloudflared 获取公网 URL
+
+新开一个 PowerShell 窗口：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\expose_gateway_cloudflared.ps1
+```
+
+脚本会自动：
+- 启动 `cloudflared tunnel --url http://127.0.0.1:7865`
+- 捕获生成的 `https://xxxx.trycloudflare.com` URL
+- 写入 `.env` 的 `PUBLIC_BASE_URL`
+- 写入 `logs\public_url.txt`
+- 打印飞书回调地址并复制到剪贴板
+
+输出示例：
+
+```
+==============================================================
+  AssetClaw Gateway 隧道已建立
+==============================================================
+
+  Public URL:
+  https://abc-def-123.trycloudflare.com
+
+  飞书开放平台 > 开发配置 > 事件与回调 > 请求地址：
+  https://abc-def-123.trycloudflare.com/feishu/events
+
+  [已复制到剪贴板]
+==============================================================
+```
+
+> **注意：cloudflared quick tunnel 每次重启 URL 都会变化。**
+> 重启后必须重新在飞书后台填写新的回调地址。
+
+### 第四步：填写飞书开放平台
+
+1. 打开[飞书开放平台](https://open.feishu.cn/app)→ 你的应用 → **开发配置 → 事件与回调**
+2. 事件配置 → 请求地址 → 填入：
+   ```
+   https://xxxx.trycloudflare.com/feishu/events
+   ```
+3. 点"验证"（脚本已配置 `url_verification` 响应，应立即通过）
+4. 添加事件：`im.message.receive_v1`
+5. 版本管理 → 创建版本 → 发布（企业自建应用自审）
+
+### 第五步：本地验证
+
+```powershell
+# 健康检查（包含 brain test、skill manifest、public URL）
+powershell -ExecutionPolicy Bypass -File scripts\health_check.ps1
+
+# 测试 file.list_allowed（列目录）
+curl -X POST http://127.0.0.1:7865/skills/v1/call `
+  -H "Content-Type: application/json" `
+  -H "X-Skill-Token: <your_token>" `
+  -d '{"skill":"file.list_allowed","arguments":{"path":"E:\\","max_items":20}}'
+
+# 测试 file.copy（复制文件）
+curl -X POST http://127.0.0.1:7865/skills/v1/call `
+  -H "Content-Type: application/json" `
+  -H "X-Skill-Token: <your_token>" `
+  -d '{"skill":"file.copy","arguments":{"src_path":"E:\\assetclaw-matting-bot\\README.md","dst_path":"E:\\assetclaw-matting-bot\\storage\\README_copy.md","overwrite":true}}'
+
+# 测试 Brain（不经过飞书，直接测 LLM Proxy -> skills）
+curl -X POST http://127.0.0.1:7865/brain/test `
+  -H "Content-Type: application/json" `
+  -d '{"text":"看看 E 盘有哪些文件"}'
+```
+
+### 第六步：飞书测试话术
+
+发这些消息给机器人：
+
+```
+看看 E 盘有哪些文件
+```
+
+```
+把 E:\assetclaw-matting-bot\README.md 复制到 E:\assetclaw-matting-bot\storage\README_copy.md
+```
 
 ---
 

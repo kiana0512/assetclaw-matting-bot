@@ -63,17 +63,25 @@ class Settings(BaseSettings):
         "E:/assetclaw-matting-bot/storage/batch_outputs"
     )
 
+    # Runtime env
+    app_env: str = "dev"
+
     # Security
-    allowed_roots: str = "E:"
+    allowed_roots: str = "E:\\"
     deny_path_patterns: str = (
         ".ssh;.env;AppData;Windows;Program Files;ProgramData;"
         "$Recycle.Bin;System Volume Information"
     )
     allow_file_list: bool = True
+    allow_file_copy: bool = True
     allow_file_read_metadata: bool = True
     allow_file_read_content: bool = False
     allow_file_delete: bool = False
     allow_shell_exec: bool = False
+    max_list_items: int = 100
+
+    # Feishu callback path (documentation reference)
+    feishu_callback_path: str = "/feishu/events"
 
     # ── Brain Router ─────────────────────────────────────────────────────────
     brain_provider: str = "llm_proxy"

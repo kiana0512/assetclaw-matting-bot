@@ -42,6 +42,7 @@ SKILL_CATALOG: list[dict[str, Any]] = [
     _f("comfyui.status",  "Check ComfyUI availability",                             "low",  False, True,  comfyui_skills.comfyui_status),
     # ── File / Log ────────────────────────────────────────────────────────────
     _f("file.list_allowed", "List files under allowed root (metadata only)",        "low",  False, True,  file_skills.file_list_allowed),
+    _f("file.copy",         "Copy a file to a new location (both paths must be under allowed root)", "medium", False, True, file_skills.file_copy),
     _f("log.tail",          "Read last N lines of gateway or worker log (sanitised)","low", False, True,  log_skills.log_tail),
     # ── Video / Frame (future) ────────────────────────────────────────────────
     _f("video.download_or_import", "Import video for processing",           "medium", False, False, future_skills.video_download_or_import),

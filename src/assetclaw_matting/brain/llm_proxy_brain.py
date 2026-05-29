@@ -124,7 +124,11 @@ class LLMProxyBrain(BrainProvider):
         import requests
         from assetclaw_matting.config import settings
 
-        url = f"{settings.llm_proxy_base_url.rstrip('/')}/chat/completions"
+        base = settings.llm_proxy_base_url.rstrip("/")
+        if base.endswith("/chat/completions"):
+            url = base
+        else:
+            url = f"{base}/chat/completions"
         headers = {
             "Authorization": f"Bearer {settings.llm_proxy_api_key}",
             "Content-Type": "application/json",

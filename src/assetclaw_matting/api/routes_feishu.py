@@ -32,7 +32,10 @@ async def feishu_events(
     # URL verification must be synchronous
     if raw.get("type") == "url_verification":
         from assetclaw_matting.feishu.event_handler import _handle_url_verification
-        return JSONResponse(content=_handle_url_verification(raw))
+        result = _handle_url_verification(raw)
+        if "error" in result:
+            return JSONResponse(status_code=403, content=result)
+        return JSONResponse(content=result)
 
     # All real events are processed in the background
     background_tasks.add_task(_process_event, raw)

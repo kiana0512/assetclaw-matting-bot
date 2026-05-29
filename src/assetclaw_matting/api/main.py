@@ -50,6 +50,7 @@ from assetclaw_matting.api.routes_worker import router as worker_router      # n
 from assetclaw_matting.api.routes_admin import router as admin_router        # noqa: E402
 from assetclaw_matting.api.routes_skills import router as skills_router      # noqa: E402
 from assetclaw_matting.api.routes_arkclaw import router as arkclaw_router    # noqa: E402
+from assetclaw_matting.api.routes_brain import router as brain_router        # noqa: E402
 from assetclaw_matting.mcp_server.server import router as mcp_router         # noqa: E402
 
 app.include_router(feishu_router)
@@ -57,6 +58,7 @@ app.include_router(worker_router)
 app.include_router(admin_router)
 app.include_router(skills_router)
 app.include_router(arkclaw_router)
+app.include_router(brain_router)
 app.include_router(mcp_router)
 
 try:
