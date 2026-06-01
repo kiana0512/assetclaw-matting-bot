@@ -1,129 +1,713 @@
-"""Skill Registry — central catalog and dispatcher for the Skill Gateway."""
 from __future__ import annotations
 
+import json
 import logging
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from assetclaw_matting.skills import (
-    batch_skills,
-    comfyui_skills,
+    bot_skills,
     file_skills,
+    file_extra_skills,
     future_skills,
-    log_skills,
+    matting_skills,
+    media_skills,
+    memory_skills,
+    workspace_skills,
     queue_skills,
-    worker_skills,
+    status_skills,
 )
+from assetclaw_matting.skills.security import redact_secrets
 
 log = logging.getLogger(__name__)
 
+_ALLOWED_ROOTS = ["D:\\", "E:\\", "F:\\"]
+_DENY_PATTERNS = [".env", ".ssh", "AppData", "Windows", "Program Files", "ProgramData", "$Recycle.Bin", "System Volume Information"]
 
-def _f(name: str, desc: str, danger: str, confirm: bool, impl: bool, fn: Any) -> dict[str, Any]:
+
+def _skill(
+    name: str,
+    description: str,
+    implemented: bool,
+    fn: Callable[..., dict[str, Any]],
+    parameters: dict[str, Any] | None = None,
+    partial: bool = False,
+    domain: str = "other",
+    risk_level: str = "readonly",
+    requires_confirmation: bool = False,
+    examples: list[dict] | None = None,
+    natural_language_examples: list[str] | None = None,
+) -> dict[str, Any]:
     return {
-        "name": name, "description": desc,
-        "danger_level": danger, "requires_confirmation": confirm,
-        "implemented": impl, "fn": fn,
+        "name": name,
+        "domain": domain,
+        "description": description,
+        "implemented": implemented,
+        "partial": partial,
+        "risk_level": risk_level,
+        "requires_confirmation": requires_confirmation,
+        "parameters": parameters or {},
+        "allowed_roots": _ALLOWED_ROOTS,
+        "deny_patterns": _DENY_PATTERNS,
+        "examples": examples or [],
+        "natural_language_examples": natural_language_examples or [],
+        "fn": fn,
     }
 
 
-SKILL_CATALOG: list[dict[str, Any]] = [
-    # ── Batch management ──────────────────────────────────────────────────────
-    _f("batch.create",    "Create a ComfyUI batch job from a directory",            "medium", False, True,  batch_skills.batch_create),
-    _f("batch.start",     "Start a CREATED batch",                                  "low",    False, True,  batch_skills.batch_start),
-    _f("batch.status",    "Get batch progress and status",                           "low",    False, True,  batch_skills.batch_status),
-    _f("batch.list",      "List recent batches",                                     "low",    False, True,  batch_skills.batch_list),
-    _f("batch.cancel",    "Cancel all QUEUED tasks in a batch",                      "medium", True,  True,  batch_skills.batch_cancel),
-    # ── Queue / Worker ────────────────────────────────────────────────────────
-    _f("queue.status",        "Global queue statistics",                             "low",  False, True,  queue_skills.queue_status),
-    _f("task.status",         "Get details of a specific task",                      "low",  False, True,  worker_skills.task_status),
-    _f("task.list_failed",    "List failed tasks (optionally by batch)",             "low",  False, True,  worker_skills.task_list_failed),
-    _f("worker.status",       "Worker activity summary",                             "low",  False, True,  worker_skills.worker_status),
-    # ── ComfyUI ───────────────────────────────────────────────────────────────
-    _f("comfyui.status",  "Check ComfyUI availability",                             "low",  False, True,  comfyui_skills.comfyui_status),
-    # ── File / Log ────────────────────────────────────────────────────────────
-    _f("file.list_allowed", "List files under allowed root (metadata only)",        "low",  False, True,  file_skills.file_list_allowed),
-    _f("file.copy",         "Copy a file to a new location (both paths must be under allowed root)", "medium", False, True, file_skills.file_copy),
-    _f("log.tail",          "Read last N lines of gateway or worker log (sanitised)","low", False, True,  log_skills.log_tail),
-    # ── Video / Frame (future) ────────────────────────────────────────────────
-    _f("video.download_or_import", "Import video for processing",           "medium", False, False, future_skills.video_download_or_import),
-    _f("video.extract_frames",     "Extract image sequence from video",     "medium", False, False, future_skills.video_extract_frames),
-    _f("frames.rename_from_table", "Rename frames from spreadsheet",        "medium", False, False, future_skills.frames_rename_from_table),
-    _f("frames.delete_bad_frames", "Delete rejected frames",                "high",   True,  False, future_skills.frames_delete_bad_frames),
-    _f("frames.dedupe_similar",    "Remove near-duplicate frames",          "medium", True,  False, future_skills.frames_dedupe_similar),
-    # ── Image post-process (future) ───────────────────────────────────────────
-    _f("noise.cleanup",        "Clean up noise artefacts",                  "medium", False, False, future_skills.noise_cleanup),
-    _f("image.package_review", "Package images for review",                 "low",    False, False, future_skills.image_package_review),
-    # ── 3D / Animation (future) ───────────────────────────────────────────────
-    _f("model3d.generate",               "Generate 3D model from images",            "high",   True,  False, future_skills.model3d_generate),
-    _f("texture.apply",                  "Apply texture to a 3D asset",              "medium", True,  False, future_skills.texture_apply),
-    _f("animation.state_machine.create", "Create animation state machine",           "medium", False, False, future_skills.animation_state_machine_create),
-    _f("animation.kframe.create",        "Create animation keyframes",               "medium", False, False, future_skills.animation_kframe_create),
-    _f("qa.review_effects",              "QA review of animation effects",           "low",    False, False, future_skills.qa_review_effects),
-    # ── Engine / Pipeline (future) ────────────────────────────────────────────
-    _f("asset.import_engine", "Import asset into game engine",             "high",   True,  False, future_skills.asset_import_engine),
-    _f("resource.cleanup",    "Clean up intermediate resource files",      "high",   True,  False, future_skills.resource_cleanup),
-    _f("p4.submit",           "Submit changelist to Perforce",             "high",   True,  False, future_skills.p4_submit),
-    # ── Workflow ──────────────────────────────────────────────────────────────
-    _f("workflow.run",  "Run arbitrary ComfyUI workflow by name",          "high",   True,  False, future_skills.workflow_run),
+SKILLS: list[dict[str, Any]] = [
+    # ---- bot/system skills ------------------------------------------------
+    _skill(
+        "bot.help",
+        "Show bot capabilities, usage examples, and current limitations.",
+        True,
+        bot_skills.bot_help,
+        {},
+        domain="bot",
+        risk_level="readonly",
+        natural_language_examples=["你会做什么", "帮助", "help", "怎么用", "使用说明"],
+    ),
+    _skill(
+        "bot.skills",
+        "List all registered skills with their status and risk level.",
+        True,
+        bot_skills.bot_skills,
+        {},
+        domain="bot",
+        risk_level="readonly",
+        natural_language_examples=["查看技能列表", "技能列表", "skill list"],
+    ),
+    _skill(
+        "bot.permissions",
+        "Show allowed paths, denied patterns, and security boundaries.",
+        True,
+        bot_skills.bot_permissions,
+        {},
+        domain="bot",
+        risk_level="readonly",
+        natural_language_examples=["查看权限说明", "权限说明", "安全边界", "查看安全边界"],
+    ),
+    _skill(
+        "bot.status",
+        "Show current system status: Gateway, LLM Proxy, DB, ComfyUI mode, skill count.",
+        True,
+        bot_skills.bot_status,
+        {},
+        domain="bot",
+        risk_level="readonly",
+        natural_language_examples=["查看当前系统状态", "系统状态", "bot status"],
+    ),
+    _skill(
+        "bot.errors",
+        "Show the last 10 error records from the audit log.",
+        True,
+        bot_skills.bot_errors,
+        {},
+        domain="bot",
+        risk_level="readonly",
+        natural_language_examples=["查看最近错误", "最近错误", "recent errors"],
+    ),
+    # ---- file skills -------------------------------------------------------
+    _skill(
+        "file.list_allowed",
+        "List files and directories under an allowed path. Metadata only.",
+        True,
+        file_skills.file_list_allowed,
+        {"path": "string", "max_items": "integer optional"},
+        domain="file",
+        risk_level="readonly",
+        examples=[{"skill": "file.list_allowed", "arguments": {"path": "E:\\", "max_items": 20}}],
+        natural_language_examples=["看看 E 盘有哪些文件", "列出 E:\\assetclaw-matting-bot 下的文件"],
+    ),
+    _skill(
+        "file.copy",
+        "Copy one file under allowed roots to another allowed path.",
+        True,
+        file_skills.file_copy,
+        {"src_path": "string", "dst_path": "string", "overwrite": "boolean"},
+        domain="file",
+        risk_level="write_safe",
+        examples=[{
+            "skill": "file.copy",
+            "arguments": {
+                "src_path": "E:\\assetclaw-matting-bot\\README.md",
+                "dst_path": "E:\\assetclaw-matting-bot\\storage\\README_copy.md",
+                "overwrite": False,
+            },
+        }],
+        natural_language_examples=[
+            "把 E:\\assetclaw-matting-bot\\README.md 复制到 E:\\assetclaw-matting-bot\\storage\\README_copy.md",
+        ],
+    ),
+    _skill(
+        "file.move",
+        "Move or rename one file or directory under allowed roots.",
+        True,
+        file_skills.file_move,
+        {"src_path": "string", "dst_path": "string", "overwrite": "boolean"},
+        domain="file",
+        risk_level="write_caution",
+        requires_confirmation=True,
+        examples=[{
+            "skill": "file.move",
+            "arguments": {
+                "src_path": "E:\\assetclaw-matting-bot\\storage\\README_copy.md",
+                "dst_path": "E:\\assetclaw-matting-bot\\storage\\README_moved.md",
+                "overwrite": False,
+            },
+        }],
+        natural_language_examples=[
+            "把 E:\\assetclaw-matting-bot\\storage\\README_copy.md 移动到 E:\\assetclaw-matting-bot\\storage\\README_moved.md",
+        ],
+    ),
+    _skill(
+        "file.mkdir",
+        "Create a directory under allowed roots.",
+        True,
+        file_skills.file_mkdir,
+        {"path": "string", "parents": "boolean", "exist_ok": "boolean"},
+        domain="file",
+        risk_level="write_safe",
+        examples=[{"skill": "file.mkdir", "arguments": {"path": "E:\\assetclaw-matting-bot\\storage\\new_folder"}}],
+        natural_language_examples=["创建目录 E:\\assetclaw-matting-bot\\storage\\feishu_test"],
+    ),
+    _skill(
+        "file.exists",
+        "Check whether a file or directory exists under allowed roots.",
+        True,
+        file_skills.file_exists,
+        {"path": "string"},
+        domain="file",
+        risk_level="readonly",
+        examples=[{"skill": "file.exists", "arguments": {"path": "E:\\assetclaw-matting-bot\\README.md"}}],
+        natural_language_examples=["E:\\assetclaw-matting-bot\\README.md 是否存在"],
+    ),
+    _skill(
+        "file.info",
+        "Get metadata (size, mtime, type) of a file or directory. Does not read content.",
+        True,
+        file_extra_skills.file_info,
+        {"path": "string"},
+        domain="file",
+        risk_level="readonly",
+        examples=[{"skill": "file.info", "arguments": {"path": "E:\\assetclaw-matting-bot\\README.md"}}],
+        natural_language_examples=["查看 E:\\assetclaw-matting-bot\\README.md 的信息"],
+    ),
+    _skill(
+        "file.find_name",
+        "Search for files or directories by name pattern within allowed roots.",
+        True,
+        file_extra_skills.file_find_name,
+        {"name_pattern": "string", "search_root": "string optional", "max_results": "integer optional", "max_depth": "integer optional"},
+        domain="file",
+        risk_level="readonly",
+        examples=[{"skill": "file.find_name", "arguments": {"name_pattern": ".ps1", "max_results": 20}}],
+        natural_language_examples=["搜索文件名包含 batch 的文件"],
+    ),
+    _skill(
+        "file.tree",
+        "List a directory tree with depth and item limits. No file content.",
+        True,
+        file_extra_skills.file_tree,
+        {"path": "string", "max_depth": "integer optional", "max_items": "integer optional"},
+        domain="file",
+        risk_level="readonly",
+        examples=[{"skill": "file.tree", "arguments": {"path": "E:\\assetclaw-matting-bot\\scripts", "max_depth": 2}}],
+        natural_language_examples=["显示 E:\\assetclaw-matting-bot 目录树"],
+    ),
+    _skill(
+        "file.recent",
+        "List recently modified files within allowed roots.",
+        True,
+        file_extra_skills.file_recent,
+        {"hours": "integer optional", "search_root": "string optional", "max_results": "integer optional"},
+        domain="file",
+        risk_level="readonly",
+        examples=[{"skill": "file.recent", "arguments": {"hours": 24, "max_results": 20}}],
+        natural_language_examples=["查看最近 24 小时内修改的文件"],
+    ),
+    _skill(
+        "file.list_by_type",
+        "List files by extension/category such as image, video, table, archive.",
+        True,
+        media_skills.file_list_by_type,
+        {"path": "string", "kind": "string optional", "extensions": "list optional", "recursive": "boolean optional", "max_results": "integer optional"},
+        domain="file",
+        risk_level="readonly",
+        natural_language_examples=["列出 E:\\ 下面的图片文件", "找出 E:\\assetclaw-matting-bot 里的表格文件"],
+    ),
+    _skill(
+        "file.copy_as",
+        "Copy a file to a chosen directory with a new file name.",
+        True,
+        media_skills.file_copy_as,
+        {"src_path": "string", "new_name": "string", "dst_dir": "string optional", "overwrite": "boolean optional"},
+        domain="file",
+        risk_level="write_safe",
+        natural_language_examples=["把 E:\\a.png 复制一份到原目录并改名为 a_backup.png"],
+    ),
+    _skill(
+        "file.duplicate_same_dir",
+        "Duplicate a file in the same directory using a suffix.",
+        True,
+        media_skills.file_duplicate_same_dir,
+        {"src_path": "string", "suffix": "string optional", "overwrite": "boolean optional"},
+        domain="file",
+        risk_level="write_safe",
+        natural_language_examples=["把 E:\\a.png 在原路径复制一份，后缀加 _bak"],
+    ),
+    _skill(
+        "file.zip_paths",
+        "Create a zip archive from selected files/directories under allowed roots.",
+        True,
+        media_skills.file_zip_paths,
+        {"paths": "list[string]", "zip_path": "string", "overwrite": "boolean optional"},
+        domain="file",
+        risk_level="write_caution",
+        requires_confirmation=True,
+        natural_language_examples=["把 E:\\assetclaw-matting-bot\\storage\\batch_outputs 打包成 zip"],
+    ),
+    _skill(
+        "workspace.roots",
+        "Show allowed workspace roots. C drive is intentionally excluded.",
+        True,
+        workspace_skills.workspace_roots,
+        {},
+        domain="workspace",
+        risk_level="readonly",
+        natural_language_examples=["查看允许访问的磁盘", "哪些盘可以操作"],
+    ),
+    _skill(
+        "workspace.disk_usage",
+        "Show free/used/total space for allowed workspace roots.",
+        True,
+        workspace_skills.workspace_disk_usage,
+        {},
+        domain="workspace",
+        risk_level="readonly",
+        natural_language_examples=["查看 D E F 盘空间", "磁盘空间状态"],
+    ),
+    _skill(
+        "file.read_text",
+        "Read a small text file from allowed roots. Denied paths and binary extensions are blocked.",
+        True,
+        workspace_skills.file_read_text,
+        {"path": "string", "max_chars": "integer optional", "encoding": "string optional"},
+        domain="file",
+        risk_level="readonly",
+        natural_language_examples=["读取 D:\\project\\README.md 前 2000 个字符"],
+    ),
+    _skill(
+        "file.write_text",
+        "Create or overwrite a text file under allowed roots.",
+        True,
+        workspace_skills.file_write_text,
+        {"path": "string", "content": "string", "overwrite": "boolean optional", "encoding": "string optional"},
+        domain="file",
+        risk_level="write_safe",
+        natural_language_examples=["在 F:\\notes\\todo.md 写入一段文本"],
+    ),
+    _skill(
+        "file.append_text",
+        "Append text to an allowed text file.",
+        True,
+        workspace_skills.file_append_text,
+        {"path": "string", "content": "string", "encoding": "string optional", "create": "boolean optional"},
+        domain="file",
+        risk_level="write_safe",
+        natural_language_examples=["往 E:\\log.txt 追加一行"],
+    ),
+    _skill(
+        "file.hash",
+        "Calculate a file hash for integrity checks.",
+        True,
+        workspace_skills.file_hash,
+        {"path": "string", "algorithm": "sha256 or md5 optional"},
+        domain="file",
+        risk_level="readonly",
+        natural_language_examples=["计算 D:\\asset.zip 的 sha256"],
+    ),
+    _skill(
+        "file.batch_info",
+        "Get metadata for a batch of paths.",
+        True,
+        workspace_skills.file_batch_info,
+        {"paths": "list[string]"},
+        domain="file",
+        risk_level="readonly",
+        natural_language_examples=["批量检查这些文件是否存在"],
+    ),
+    _skill(
+        "file.copy_tree",
+        "Copy a directory tree across allowed roots with file-count limit.",
+        True,
+        workspace_skills.file_copy_tree,
+        {"src_path": "string", "dst_path": "string", "overwrite": "boolean optional", "max_files": "integer optional"},
+        domain="file",
+        risk_level="write_safe",
+        natural_language_examples=["把 D:\\assets 复制到 F:\\backup\\assets"],
+    ),
+    _skill(
+        "file.copy_many",
+        "Copy many files in one call.",
+        True,
+        workspace_skills.file_copy_many,
+        {"items": "list[{src_path:string,dst_path:string}]", "overwrite": "boolean optional"},
+        domain="file",
+        risk_level="write_safe",
+        natural_language_examples=["把这几个文件分别复制到 F:\\backup"],
+    ),
+    _skill(
+        "file.move_many",
+        "Move many files in one call. Requires confirmation.",
+        True,
+        workspace_skills.file_move_many,
+        {"items": "list[{src_path:string,dst_path:string}]", "overwrite": "boolean optional"},
+        domain="file",
+        risk_level="write_caution",
+        requires_confirmation=True,
+        natural_language_examples=["把这几个文件批量移动到 F:\\archive"],
+    ),
+    _skill(
+        "file.mkdir_many",
+        "Create many directories in one call.",
+        True,
+        workspace_skills.file_mkdir_many,
+        {"paths": "list[string]", "parents": "boolean optional", "exist_ok": "boolean optional"},
+        domain="file",
+        risk_level="write_safe",
+        natural_language_examples=["创建 project 的 input output temp 三个目录"],
+    ),
+    _skill(
+        "file.rename_many",
+        "Rename files using explicit source/destination pairs. Requires confirmation.",
+        True,
+        workspace_skills.file_rename_many,
+        {"items": "list[{src_path:string,dst_path:string}]", "overwrite": "boolean optional"},
+        domain="file",
+        risk_level="write_caution",
+        requires_confirmation=True,
+        natural_language_examples=["把这些文件分别改成指定的新名字"],
+    ),
+    _skill(
+        "file.rename_sequence",
+        "Rename selected files in order to 1, 2, 3... while preserving extensions. Requires confirmation.",
+        True,
+        workspace_skills.file_rename_sequence,
+        {"paths": "list[string]", "start": "integer optional", "padding": "integer optional", "preserve_extension": "boolean optional", "overwrite": "boolean optional"},
+        domain="file",
+        risk_level="write_caution",
+        requires_confirmation=True,
+        natural_language_examples=["把刚才列出的图片按顺序改名为 1 2 3 4 5"],
+    ),
+    _skill(
+        "file.unzip",
+        "Extract a zip archive into an allowed directory.",
+        True,
+        workspace_skills.file_unzip,
+        {"zip_path": "string", "dst_dir": "string", "overwrite": "boolean optional", "max_files": "integer optional"},
+        domain="file",
+        risk_level="write_caution",
+        requires_confirmation=True,
+        natural_language_examples=["把 F:\\assets.zip 解压到 F:\\assets"],
+    ),
+    _skill(
+        "file.delete",
+        "Delete one allowed file or directory. Requires confirmation.",
+        True,
+        workspace_skills.file_delete,
+        {"path": "string", "recursive": "boolean optional"},
+        domain="file",
+        risk_level="danger_confirm",
+        requires_confirmation=True,
+        natural_language_examples=["删除 F:\\temp\\old.png"],
+    ),
+    _skill(
+        "file.empty_dir",
+        "Empty an allowed directory. Requires confirmation.",
+        True,
+        workspace_skills.file_empty_dir,
+        {"path": "string"},
+        domain="file",
+        risk_level="danger_confirm",
+        requires_confirmation=True,
+        natural_language_examples=["清空 F:\\temp"],
+    ),
+    # ---- image/media skills ------------------------------------------------
+    _skill(
+        "image.list",
+        "List image files under an allowed directory.",
+        True,
+        media_skills.image_list,
+        {"path": "string", "recursive": "boolean optional", "max_results": "integer optional", "max_depth": "integer optional"},
+        domain="image",
+        risk_level="readonly",
+        natural_language_examples=["列出 E 盘的图片文件", "递归查看 E:\\assetclaw-matting-bot 里的图片"],
+    ),
+    _skill(
+        "image.info",
+        "Read image metadata: width, height, format, mode, file size. Does not modify content.",
+        True,
+        media_skills.image_info,
+        {"path": "string"},
+        domain="image",
+        risk_level="readonly",
+        natural_language_examples=["查看 E:\\a.png 的图片尺寸"],
+    ),
+    _skill(
+        "image.batch_info",
+        "Read metadata for many images.",
+        True,
+        media_skills.image_batch_info,
+        {"paths": "list[string]"},
+        domain="image",
+        risk_level="readonly",
+        natural_language_examples=["批量查看这些图片的尺寸"],
+    ),
+    _skill(
+        "image.convert_format",
+        "Convert one image to another format/path.",
+        True,
+        media_skills.image_convert_format,
+        {"src_path": "string", "dst_path": "string", "format": "string optional", "overwrite": "boolean optional"},
+        domain="image",
+        risk_level="write_safe",
+        natural_language_examples=["把 E:\\a.png 转成 E:\\a.jpg"],
+    ),
+    _skill(
+        "image.resize",
+        "Resize one image to exact width and height.",
+        True,
+        media_skills.image_resize,
+        {"src_path": "string", "dst_path": "string", "width": "integer", "height": "integer", "overwrite": "boolean optional"},
+        domain="image",
+        risk_level="write_safe",
+        natural_language_examples=["把 E:\\a.png 缩放成 1024x1024"],
+    ),
+    # ---- feishu delivery skills -------------------------------------------
+    _skill(
+        "feishu.send_file",
+        "Upload an allowed local file and send it to the current Feishu chat.",
+        True,
+        media_skills.feishu_send_file,
+        {"path": "string", "file_name": "string optional"},
+        domain="feishu",
+        risk_level="egress_caution",
+        natural_language_examples=["把 E:\\assetclaw-matting-bot\\README.md 通过飞书发给我"],
+    ),
+    _skill(
+        "feishu.send_file_by_name",
+        "Find one allowed local file by name or shortened name, then send it to the current Feishu chat.",
+        True,
+        media_skills.feishu_send_file_by_name,
+        {"name_pattern": "string", "search_root": "string optional", "file_name": "string optional", "max_depth": "integer optional"},
+        domain="feishu",
+        risk_level="egress_caution",
+        natural_language_examples=["把 E 盘里 img_v3_02125_53d2b164...608g.png 这个文件发给我"],
+    ),
+    # ---- memory skills -----------------------------------------------------
+    _skill(
+        "memory.remember",
+        "Store a user-approved memory note in local SQLite.",
+        True,
+        memory_skills.memory_remember,
+        {"key": "string", "value": "string", "scope": "string optional", "source": "string optional"},
+        domain="memory",
+        risk_level="write_safe",
+        natural_language_examples=["记住：项目名称是 AssetClaw"],
+    ),
+    _skill(
+        "memory.list",
+        "List local SQLite memory notes.",
+        True,
+        memory_skills.memory_list,
+        {"scope": "string optional", "limit": "integer optional"},
+        domain="memory",
+        risk_level="readonly",
+        natural_language_examples=["查看记忆列表"],
+    ),
+    # ---- matting skills ----------------------------------------------------
+    _skill(
+        "matting.batch_create",
+        "Create a ComfyUI matting batch in local SQLite. Fake mode: counts images, no GPU.",
+        True,
+        matting_skills.batch_create,
+        {"input_dir": "string", "output_dir": "string optional", "note": "string optional"},
+        partial=True,
+        domain="matting",
+        risk_level="write_safe",
+        examples=[{
+            "skill": "matting.batch_create",
+            "arguments": {"input_dir": "E:\\assetclaw-matting-bot\\storage\\batch_inputs"},
+        }],
+        natural_language_examples=["用 E:\\assetclaw-matting-bot\\storage\\batch_inputs 创建一个抠图批次"],
+    ),
+    _skill(
+        "matting.batch_start",
+        "Start a matting batch. Fake mode: changes status only, no GPU.",
+        True,
+        matting_skills.batch_start,
+        {"batch_id": "string"},
+        partial=True,
+        domain="matting",
+        risk_level="write_safe",
+        natural_language_examples=["启动批次 BATCH_XXXX"],
+    ),
+    _skill(
+        "matting.batch_status",
+        "Check matting batch status.",
+        True,
+        matting_skills.batch_status,
+        {"batch_id": "string"},
+        partial=True,
+        domain="matting",
+        risk_level="readonly",
+        natural_language_examples=["查看批次 BATCH_XXXX 的状态"],
+    ),
+    _skill(
+        "matting.batch_list",
+        "List recent matting batches from DB.",
+        True,
+        matting_skills.batch_list,
+        {"limit": "integer optional"},
+        partial=True,
+        domain="matting",
+        risk_level="readonly",
+        natural_language_examples=["列出所有抠图批次", "查看最近创建的批次"],
+    ),
+    _skill(
+        "matting.batch_detail",
+        "Get detail of a matting batch including image count.",
+        True,
+        matting_skills.batch_detail,
+        {"batch_id": "string"},
+        partial=True,
+        domain="matting",
+        risk_level="readonly",
+        natural_language_examples=["查看批次 BATCH_XXXX 的详情"],
+    ),
+    _skill(
+        "matting.batch_pause",
+        "Pause a matting batch. Fake mode: changes status only.",
+        True,
+        matting_skills.batch_pause,
+        {"batch_id": "string"},
+        partial=True,
+        domain="matting",
+        risk_level="write_safe",
+    ),
+    _skill(
+        "matting.batch_resume",
+        "Resume a matting batch. Fake mode: changes status only.",
+        True,
+        matting_skills.batch_resume,
+        {"batch_id": "string"},
+        partial=True,
+        domain="matting",
+        risk_level="write_safe",
+    ),
+    _skill(
+        "matting.batch_cancel",
+        "Cancel a matting batch. Fake mode: changes status only.",
+        True,
+        matting_skills.batch_cancel,
+        {"batch_id": "string"},
+        partial=True,
+        domain="matting",
+        risk_level="write_safe",
+    ),
+    # ---- queue / comfyui stubs --------------------------------------------
+    _skill(
+        "queue.status",
+        "Return queue status stub.",
+        True,
+        queue_skills.queue_status,
+        partial=True,
+        domain="queue",
+        risk_level="readonly",
+    ),
+    _skill(
+        "comfyui.status",
+        "Check ComfyUI configured URL, fake mode, workflow path, and /system_stats reachability.",
+        True,
+        status_skills.comfyui_status,
+        domain="comfyui",
+        risk_level="readonly",
+        natural_language_examples=["ComfyUI 状态", "查看 ComfyUI 是否在线", "现在显卡使用情况怎么样"],
+    ),
+    _skill(
+        "system.gpu_status",
+        "Read GPU status through nvidia-smi: memory, utilization, temperature, power.",
+        True,
+        status_skills.gpu_status,
+        {},
+        domain="system",
+        risk_level="readonly",
+        natural_language_examples=["现在显卡使用情况怎么样", "nvidia-smi 结果", "GPU 显存占用"],
+    ),
+    _skill(
+        "system.process_status",
+        "List matching local processes. Read-only status check.",
+        True,
+        status_skills.process_status,
+        {"names": "list[string] optional"},
+        domain="system",
+        risk_level="readonly",
+        natural_language_examples=["看看 ComfyUI 进程在不在", "查看 python 进程"],
+    ),
+    # ---- reserved / not implemented ----------------------------------------
+    _skill(
+        "log.tail",
+        "Reserved sanitized log tail skill. Not yet implemented.",
+        False,
+        future_skills.not_implemented,
+        domain="logs",
+        risk_level="readonly",
+    ),
 ]
 
-_SKILL_MAP: dict[str, dict[str, Any]] = {s["name"]: s for s in SKILL_CATALOG}
+_MAP = {item["name"]: item for item in SKILLS}
+
+
+def get_skill_meta(skill_name: str) -> dict[str, Any] | None:
+    item = _MAP.get(skill_name)
+    if not item:
+        return None
+    return {k: v for k, v in item.items() if k != "fn"}
 
 
 def get_manifest() -> dict[str, Any]:
     from assetclaw_matting.config import settings
+
     return {
-        "node_name": "AssetClaw Win3090 Skill Node",
-        "machine_id": settings.worker_id,
-        "runtime": "windows",
-        "gpu": "RTX 3090 24GB",
+        "name": "AssetClaw Win3090 Animation Butler",
+        "worker_id": settings.worker_id,
         "agent_runs_on_gpu": settings.agent_runs_on_gpu,
-        "gpu_task_concurrency": settings.gpu_task_concurrency,
-        "comfyui_fake_mode": settings.comfyui_fake_mode,
-        "available_workflows": ["matting_v1"],
-        "available_skills": [
-            {k: s[k] for k in ("name", "description", "danger_level",
-                                "requires_confirmation", "implemented")}
-            for s in SKILL_CATALOG
-        ],
+        "skills": [{k: v for k, v in item.items() if k != "fn"} for item in SKILLS],
     }
 
 
-def call_skill(
-    name: str,
-    arguments: dict[str, Any],
-    requested_by: str = "api",
-    request_id: str = "",
-) -> dict[str, Any]:
-    from assetclaw_matting.skills.auth import log_skill_call
+def call_skill(skill_name: str, arguments: dict[str, Any], requested_by: str = "brain") -> dict[str, Any]:
+    from assetclaw_matting.db.repos import insert_skill_call
 
-    if not request_id:
-        request_id = str(uuid.uuid4())[:8]
-
-    skill_info = _SKILL_MAP.get(name)
-    if skill_info is None:
-        err = f"Unknown skill: {name!r}. Available: {sorted(_SKILL_MAP)}"
-        log_skill_call(request_id, name, arguments, None, False, err, requested_by)
-        return {"ok": False, "skill": name, "error": err, "message": err}
-
-    if not skill_info["implemented"]:
-        result = skill_info["fn"](**arguments) if arguments else skill_info["fn"]()
-        log_skill_call(request_id, name, arguments, result, True, None, requested_by)
-        return {"ok": True, "skill": name, "result": result, "message": "not_implemented"}
+    request_id = str(uuid.uuid4())
+    item = _MAP.get(skill_name)
+    if not item:
+        result = {"ok": False, "skill": skill_name, "error": f"unknown skill: {skill_name}"}
+        insert_skill_call(request_id, skill_name, arguments, result, False, result["error"], requested_by)
+        return result
 
     try:
-        result = skill_info["fn"](**arguments)
-        log.info("Skill %s by=%s req=%s", name, requested_by, request_id)
-        log_skill_call(request_id, name, arguments, result, True, None, requested_by)
-        return {"ok": True, "skill": name, "result": result,
-                "message": f"Skill {name} executed successfully"}
-    except (ValueError, PermissionError) as exc:
-        err = str(exc)
-        log.warning("Skill %s rejected: %s", name, err)
-        log_skill_call(request_id, name, arguments, None, False, err, requested_by)
-        return {"ok": False, "skill": name, "error": err, "message": err}
+        if not item["implemented"]:
+            result = {"ok": False, "skill": skill_name, "error": "not implemented", "implemented": False}
+        else:
+            payload = item["fn"](**(arguments or {}))
+            result = {"ok": True, "skill": skill_name, "result": payload}
+        insert_skill_call(request_id, skill_name, arguments, result, bool(result.get("ok")), result.get("error"), requested_by)
+        return result
     except Exception as exc:
-        err = str(exc)
-        log.exception("Skill %s unexpected error", name)
-        log_skill_call(request_id, name, arguments, None, False, err, requested_by)
-        return {"ok": False, "skill": name, "error": err, "message": f"Internal error: {err}"}
+        error = redact_secrets(exc)
+        log.warning("skill %s failed: %s", skill_name, error)
+        result = {"ok": False, "skill": skill_name, "error": error}
+        insert_skill_call(request_id, skill_name, arguments, result, False, error, requested_by)
+        return result

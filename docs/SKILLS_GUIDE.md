@@ -1,248 +1,102 @@
-# Skill 开发指南
+# Skills Guide
 
-如何新增一个 Skill，让 AI Brain 和 Skill API 都能调用它。
+机器人只能通过 skills 操作本机。默认允许路径来自 `ALLOWED_ROOTS`，当前默认是 `D:`、`E:`、`F:`。`C:` 不开放。`.env`、`.ssh`、`Windows`、`AppData`、`Program Files`、`ProgramData`、`$Recycle.Bin`、`System Volume Information` 永久拒绝访问。
 
----
+## 回复风格
 
-## 一个 Skill 是什么
+- 飞书里只发关键结果，不刷长解释。
+- 本地 log 仍记录完整链路、工具入参和结果。
+- 需要二次确认的操作会明确给确认码。
+- 对话记忆会自动压缩：保留近期原文，旧对话写入摘要并清掉旧原文，避免上下文越来越大；飞书里会有一条简短提示。
 
-Skill 是一个受控的、可审计的 Python 函数，对外暴露为：
-- `POST /skills/v1/call {"skill": "xxx.yyy", "arguments": {...}}`
-- Brain Router 的 `tool_calls`
-- MCP 工具（自动同步，无需额外代码）
+## 已实现 Skills
 
-所有 Skill 调用都会写入 `skill_calls` 审计表。
+| Skill | 用途 | 风险 |
+|---|---|---|
+| `bot.help` | 简短帮助 | readonly |
+| `bot.skills` | 查看技能清单 | readonly |
+| `bot.permissions` | 查看安全边界 | readonly |
+| `bot.status` | 查看系统状态 | readonly |
+| `bot.errors` | 查看最近错误 | readonly |
+| `file.list_allowed` | 列目录 | readonly |
+| `file.exists` | 检查路径是否存在 | readonly |
+| `file.info` | 查看文件/目录元信息 | readonly |
+| `file.find_name` | 按文件名搜索 | readonly |
+| `file.tree` | 查看目录树 | readonly |
+| `file.recent` | 查看最近修改文件 | readonly |
+| `file.list_by_type` | 按类型列文件：图片、视频、表格、压缩包 | readonly |
+| `file.copy` | 复制文件到指定路径 | write_safe |
+| `file.copy_as` | 复制文件并指定新文件名 | write_safe |
+| `file.duplicate_same_dir` | 在原目录复制一份并加后缀 | write_safe |
+| `file.mkdir` | 创建目录 | write_safe |
+| `file.move` | 移动或重命名 | write_caution，需确认 |
+| `file.zip_paths` | 打包 zip | write_caution，需确认 |
+| `workspace.roots` | 查看允许访问的工作盘 | readonly |
+| `workspace.disk_usage` | 查看 D/E/F 磁盘空间 | readonly |
+| `file.read_text` | 读取允许路径内的小文本文件 | readonly |
+| `file.write_text` | 写入文本文件 | write_safe |
+| `file.append_text` | 追加文本 | write_safe |
+| `file.hash` | 计算文件 hash | readonly |
+| `file.batch_info` | 批量查询路径元信息 | readonly |
+| `file.copy_tree` | 复制整个目录树 | write_safe |
+| `file.copy_many` | 批量复制文件 | write_safe |
+| `file.move_many` | 批量移动文件 | write_caution，需确认 |
+| `file.mkdir_many` | 批量创建目录 | write_safe |
+| `file.rename_many` | 按明确映射批量重命名 | write_caution，需确认 |
+| `file.rename_sequence` | 按顺序批量重命名文件 | write_caution，需确认 |
+| `file.unzip` | 解压 zip 到指定目录 | write_caution，需确认 |
+| `file.delete` | 删除文件/目录 | danger_confirm，需确认 |
+| `file.empty_dir` | 清空目录 | danger_confirm，需确认 |
+| `image.list` | 列图片文件 | readonly |
+| `image.info` | 查看图片尺寸/格式 | readonly |
+| `image.batch_info` | 批量查看图片尺寸/格式 | readonly |
+| `image.convert_format` | 图片格式转换 | write_safe |
+| `image.resize` | 图片缩放 | write_safe |
+| `feishu.send_file` | 把本地文件发到当前飞书会话 | egress_caution |
+| `feishu.send_file_by_name` | 按文件名或省略名查找并发到当前飞书会话 | egress_caution |
+| `memory.remember` | 保存本地记忆 | write_safe |
+| `memory.list` | 查看本地记忆 | readonly |
+| `matting.batch_create` | 创建抠图批次（fake mode） | write_safe |
+| `matting.batch_start` | 启动批次（fake mode） | write_safe |
+| `matting.batch_status` | 查看批次状态 | readonly |
+| `matting.batch_list` | 列批次 | readonly |
+| `matting.batch_detail` | 查看批次详情 | readonly |
+| `matting.batch_pause` | 暂停批次（fake mode） | write_safe |
+| `matting.batch_resume` | 恢复批次（fake mode） | write_safe |
+| `matting.batch_cancel` | 取消批次（fake mode） | write_safe |
+| `queue.status` | 队列状态 stub | readonly |
+| `comfyui.status` | ComfyUI fake/real mode、URL、工作流、连通性 | readonly |
+| `system.gpu_status` | 查询 nvidia-smi GPU 显存/利用率/温度/功耗 | readonly |
+| `system.process_status` | 查询匹配进程状态 | readonly |
 
----
+## 常用说法
 
-## 新增 Skill 的完整步骤
-
-### 第一步：实现函数
-
-在 `src/assetclaw_matting/skills/` 找到合适的文件，或新建一个：
-
-```python
-# src/assetclaw_matting/skills/your_module.py
-
-from __future__ import annotations
-from typing import Any
-
-
-def your_skill_name(
-    required_param: str,
-    optional_param: int = 10,
-) -> dict[str, Any]:
-    """简短描述这个 skill 做什么。"""
-    # 如果需要路径验证：
-    from assetclaw_matting.skills.auth import validate_skill_path
-    path = validate_skill_path(required_param)  # 自动检查 ALLOWED_ROOTS 和 DENY_PATH_PATTERNS
-    
-    # 业务逻辑
-    result = do_something(path, optional_param)
-    
-    # 返回 dict，key 名字自由定义
-    return {
-        "param": str(path),
-        "count": result,
-    }
+```text
+看看 E 盘有哪些文件
+看看 E 盘有哪些图片
+递归查看 E:\assetclaw-matting-bot 里的图片
+找出 E:\assetclaw-matting-bot 里的表格文件
+搜索文件名包含 batch 的文件
+查看 E:\assetclaw-matting-bot\README.md 的信息
+查看 D E F 盘空间
+把 D:\assets 复制到 F:\backup\assets
+把这几个文件批量复制到 F:\backup
+把刚才列出的图片按顺序改名为 1 2 3 4 5
+把 E:\a.png 转成 jpg
+把 E:\a.png 缩放成 1024x1024
+把 F:\assets.zip 解压到 F:\assets
+计算 F:\package.zip 的 sha256
+读取 D:\project\README.md 前 2000 个字符
+把 E:\a.png 复制一份并改名为 a_bak.png
+把 E:\a.png 在原路径复制一份，后缀加 _bak
+把 E:\assetclaw-matting-bot\README.md 通过飞书发给我
+把 E 盘里 img_v3_02125_53d2b164...608g.png 发给我
+用 E:\assetclaw-matting-bot\storage\batch_inputs 创建一个抠图批次
+查看当前系统状态
+现在显卡使用情况怎么样
+ComfyUI 状态
 ```
 
-**规则：**
-- 函数参数直接对应 Skill 的 `arguments` 字段（会做 `fn(**arguments)` 调用）
-- 返回 `dict`，不要抛异常（用 `raise ValueError("描述")` 表示用户输入错误）
-- 路径参数必须用 `validate_skill_path()` 验证
-- 不允许执行 shell：`ALLOW_SHELL_EXEC=false`
-- 不允许删除文件：`ALLOW_FILE_DELETE=false`
+## 暂不实现
 
-### 第二步：在 registry.py 里注册
-
-打开 `src/assetclaw_matting/skills/registry.py`，在 `SKILL_CATALOG` 列表里加一条：
-
-```python
-# registry.py 顶部 import 里加上你的模块
-from assetclaw_matting.skills import your_module
-
-# SKILL_CATALOG 列表里加一条（用 _f 辅助函数）
-_f(
-    "your.skill_name",            # skill 名称（用点分隔）
-    "描述这个 skill 做什么",       # description（AI Brain 会看这个）
-    "low",                        # danger_level: low / medium / high
-    False,                        # requires_confirmation: 中高风险操作改成 True
-    True,                         # implemented: True 表示已实现
-    your_module.your_skill_name,  # 函数引用
-),
-```
-
-`_f` 函数签名：
-```python
-def _f(name, description, danger_level, requires_confirmation, implemented, fn) -> dict
-```
-
-危险级别说明：
-- `low` — 只读操作，直接执行
-- `medium` — 会修改数据（创建批次、取消等），建议 AI Brain 确认后执行
-- `high` — 不可逆操作（删除文件、P4 提交等），**必须** `requires_confirmation=True`
-
-### 第三步：验证
-
-重启 Gateway 后检查：
-
-```bash
-# 看新 skill 是否出现在清单里
-curl -H "X-Skill-Token: your_token" http://127.0.0.1:7865/skills/v1/manifest \
-  | python -m json.tool | grep "your.skill"
-
-# 直接调用测试
-curl -X POST http://127.0.0.1:7865/skills/v1/call \
-  -H "X-Skill-Token: your_token" \
-  -H "Content-Type: application/json" \
-  -d '{"skill":"your.skill_name","arguments":{"required_param":"E:\\test"}}'
-```
-
-### 第四步：更新 skills_pack 文档
-
-在 `skills_pack/assetclaw_win3090/SKILL.md` 里加上新技能的说明和示例，让 AI Brain 知道怎么用它。
-
----
-
-## 完整示例：新增 `image.resize` Skill
-
-**需求：** 批量缩放某个目录的图片，输出到另一个目录。
-
-### 实现函数（新建 `skills/image_skills.py`）
-
-```python
-# src/assetclaw_matting/skills/image_skills.py
-
-from __future__ import annotations
-from pathlib import Path
-from typing import Any
-
-
-def image_resize(
-    input_dir: str,
-    output_dir: str,
-    max_width: int = 1920,
-    max_height: int = 1080,
-) -> dict[str, Any]:
-    """Resize images in a directory to fit within max dimensions."""
-    from assetclaw_matting.skills.auth import validate_skill_path
-    from PIL import Image
-
-    src = validate_skill_path(input_dir)
-    dst = validate_skill_path(output_dir)
-    dst.mkdir(parents=True, exist_ok=True)
-
-    exts = {".png", ".jpg", ".jpeg", ".webp"}
-    files = [f for f in src.iterdir() if f.suffix.lower() in exts]
-
-    processed = 0
-    for f in files:
-        with Image.open(f) as img:
-            img.thumbnail((max_width, max_height), Image.LANCZOS)
-            img.save(dst / f.name)
-            processed += 1
-
-    return {
-        "input_dir": str(src),
-        "output_dir": str(dst),
-        "processed": processed,
-    }
-```
-
-### 注册到 registry.py
-
-```python
-# 顶部 import 加上
-from assetclaw_matting.skills import image_skills
-
-# SKILL_CATALOG 列表里加
-_f("image.resize",
-   "Resize images in a directory to fit within given dimensions",
-   "medium", False, True, image_skills.image_resize),
-```
-
-### 调用
-
-```bash
-curl -X POST http://127.0.0.1:7865/skills/v1/call \
-  -H "X-Skill-Token: your_token" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "skill": "image.resize",
-    "arguments": {
-      "input_dir": "E:\\source_images",
-      "output_dir": "E:\\resized_images",
-      "max_width": 1280,
-      "max_height": 720
-    }
-  }'
-```
-
----
-
-## 实现已规划的 Future Skill
-
-`SKILL_CATALOG` 里已经有 16 个 `implemented: False` 的 future skill，比如 `video.extract_frames`。
-
-实现步骤：
-1. 在 `skills/future_skills.py` 找到对应函数（目前返回 `_nyi(...)`）
-2. 改成真实实现，或新建一个专门的模块
-3. 把 `registry.py` 里对应条目的 `implemented` 改成 `True`，`fn` 改成新函数引用
-
-例如激活 `video.extract_frames`：
-
-```python
-# registry.py 里找到这条，把 False 改 True，fn 指向新实现
-_f("video.extract_frames", "Extract image sequence from video",
-   "medium", False, True,   # ← implemented 改 True
-   video_skills.extract_frames),  # ← fn 指向真实实现
-```
-
----
-
-## 路径安全辅助函数
-
-所有涉及文件路径的 skill 必须用：
-
-```python
-from assetclaw_matting.skills.auth import validate_skill_path
-
-# 会检查：
-# 1. path 是否在 ALLOWED_ROOTS 内
-# 2. path 是否包含 DENY_PATH_PATTERNS 中的字符串
-# 3. 没有路径穿越（../）
-# 返回 resolved Path，失败则 raise ValueError
-path = validate_skill_path(user_input_path)
-```
-
-检查文件名（日志类）：
-```python
-from assetclaw_matting.skills.auth import validate_log_name
-name = validate_log_name("worker")  # 只允许 gateway/worker/app
-```
-
-脱敏日志行：
-```python
-from assetclaw_matting.skills.security import sanitize_log_line, sanitize_log_lines
-clean_lines = sanitize_log_lines(raw_lines)  # 自动去掉 token=xxx 等敏感值
-```
-
----
-
-## 文件命名约定
-
-| 文件 | 内容 |
-|------|------|
-| `skills/batch_skills.py` | 批次管理相关 |
-| `skills/worker_skills.py` | Worker 和任务相关 |
-| `skills/queue_skills.py` | 队列统计 |
-| `skills/comfyui_skills.py` | ComfyUI 状态 |
-| `skills/file_skills.py` | 文件列表 |
-| `skills/log_skills.py` | 日志查看 |
-| `skills/future_skills.py` | 未实现的占位 |
-| `skills/image_skills.py` | 图像处理（示例，待创建） |
-| `skills/video_skills.py` | 视频处理（待创建） |
-| `skills/animation_skills.py` | 动画相关（待创建） |
-
-新模块放在 `skills/` 下，文件名 `{领域}_skills.py`，函数名 `{动作}_{名词}`。
+任意 shell、格式化磁盘、分区、改盘符、访问 C 盘、访问密钥文件、内网穿透暂不接入。删除和清空目录已接入，但必须二次确认。真实 GPU / P4 后续接入时默认走二次确认。

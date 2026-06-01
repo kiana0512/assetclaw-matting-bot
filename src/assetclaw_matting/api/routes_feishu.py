@@ -1,49 +1,16 @@
 from __future__ import annotations
 
-import logging
-from typing import Any
-
-from fastapi import APIRouter, BackgroundTasks, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, HTTPException, Request
 
 from assetclaw_matting.feishu.event_handler import handle_event
 
-log = logging.getLogger(__name__)
 router = APIRouter(prefix="/feishu", tags=["feishu"])
 
 
 @router.post("/events")
-async def feishu_events(
-    request: Request,
-    background_tasks: BackgroundTasks,
-) -> JSONResponse:
-    """Receive Feishu event callbacks.
-
-    Must return quickly: URL-verification and challenge are handled synchronously;
-    all other processing is delegated to a background task so the 3-second Feishu
-    timeout is never hit.
-    """
-    try:
-        raw: dict[str, Any] = await request.json()
-    except Exception:
-        log.warning("Failed to parse Feishu event body")
-        return JSONResponse(status_code=400, content={"error": "bad json"})
-
-    # URL verification must be synchronous
-    if raw.get("type") == "url_verification":
-        from assetclaw_matting.feishu.event_handler import _handle_url_verification
-        result = _handle_url_verification(raw)
-        if "error" in result:
-            return JSONResponse(status_code=403, content=result)
-        return JSONResponse(content=result)
-
-    # All real events are processed in the background
-    background_tasks.add_task(_process_event, raw)
-    return JSONResponse(content={"ok": True})
-
-
-def _process_event(raw: dict[str, Any]) -> None:
-    try:
-        handle_event(raw)
-    except Exception:
-        log.exception("Error processing Feishu event")
+async def feishu_events(request: Request) -> dict:
+    body = await request.json()
+    result = handle_event(body)
+    if result.get("error") == "invalid token":
+        raise HTTPException(status_code=403, detail="invalid token")
+    return result
