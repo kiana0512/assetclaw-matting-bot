@@ -1,102 +1,107 @@
-"""Skill implementations for controlled file system access.
-
-Security constraints:
-- Only paths under ALLOWED_ROOTS are accessible.
-- DENY_PATH_PATTERNS are always blocked.
-- File content is never returned.
-- File deletion is never permitted via skills.
-"""
 from __future__ import annotations
 
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from assetclaw_matting.skills.auth import validate_skill_path
+from assetclaw_matting.skills.security import has_denied_pattern, validate_path
 
 
-def file_list_allowed(
-    path: str,
-    max_items: int = 100,
-) -> dict[str, Any]:
-    """List files and directories under an allowed path.
+def _iso_mtime(path: Path) -> str:
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
 
-    Returns file metadata only (name, size, mtime, is_dir).
-    Never returns file content.
-    """
+
+def file_list_allowed(path: str, max_items: int | None = None) -> dict[str, Any]:
     from assetclaw_matting.config import settings
+
     if not settings.allow_file_list:
-        raise PermissionError("file.list_allowed is disabled (ALLOW_FILE_LIST=false)")
-
-    resolved = validate_skill_path(path)
-
-    if not resolved.exists():
-        raise ValueError(f"Path does not exist: {resolved}")
-    if not resolved.is_dir():
-        raise ValueError(f"Path is not a directory: {resolved}")
-
-    max_items = min(int(max_items), 500)
-    entries = []
-    for item in sorted(resolved.iterdir()):
+        raise PermissionError("file.list_allowed is disabled")
+    target = validate_path(path, must_exist=True)
+    if not target.is_dir():
+        raise ValueError("path must be a directory")
+    limit = min(int(max_items or settings.max_list_items), settings.max_list_items)
+    items: list[dict[str, Any]] = []
+    for child in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+        if has_denied_pattern(child):
+            continue
         try:
-            stat = item.stat()
-            entries.append({
-                "name": item.name,
-                "is_dir": item.is_dir(),
-                "size": stat.st_size if not item.is_dir() else None,
-                "modified": stat.st_mtime,
-                "suffix": item.suffix.lower() if not item.is_dir() else None,
-            })
+            stat = child.stat()
+            items.append(
+                {
+                    "name": child.name,
+                    "path": str(child),
+                    "is_dir": child.is_dir(),
+                    "size": None if child.is_dir() else stat.st_size,
+                    "modified_at": _iso_mtime(child),
+                }
+            )
         except OSError:
             continue
-        if len(entries) >= max_items:
+        if len(items) >= limit:
             break
+    return {"ok": True, "path": str(target), "items": items}
 
+
+def file_copy(src_path: str, dst_path: str, overwrite: bool = False) -> dict[str, Any]:
+    from assetclaw_matting.config import settings
+
+    if not settings.allow_file_copy:
+        raise PermissionError("file.copy is disabled")
+    src = validate_path(src_path, must_exist=True)
+    dst = validate_path(dst_path, must_exist=False)
+    if src.is_dir():
+        raise ValueError("file.copy only supports files")
+    if dst.exists() and not overwrite:
+        raise FileExistsError("destination already exists")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return {"ok": True, "src_path": str(src), "dst_path": str(dst), "size": dst.stat().st_size}
+
+
+def file_move(src_path: str, dst_path: str, overwrite: bool = False) -> dict[str, Any]:
+    from assetclaw_matting.config import settings
+
+    if not settings.allow_file_move:
+        raise PermissionError("file.move is disabled")
+    src = validate_path(src_path, must_exist=True)
+    dst = validate_path(dst_path, must_exist=False)
+    if dst.exists() and not overwrite:
+        raise FileExistsError("destination already exists")
+    if dst.exists() and overwrite:
+        if dst.is_dir():
+            raise ValueError("cannot overwrite an existing directory")
+        dst.unlink()
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    moved = shutil.move(str(src), str(dst))
+    target = Path(moved)
     return {
-        "path": str(resolved),
-        "count": len(entries),
-        "truncated": len(entries) >= max_items,
-        "entries": entries,
+        "ok": True,
+        "src_path": str(src),
+        "dst_path": str(target),
+        "is_dir": target.is_dir(),
+        "size": None if target.is_dir() else target.stat().st_size,
     }
 
 
-def file_copy(
-    src_path: str,
-    dst_path: str,
-    overwrite: bool = False,
-) -> dict[str, Any]:
-    """Copy a single file to a new location.
-
-    - src and dst must both be under ALLOWED_ROOTS
-    - DENY_PATH_PATTERNS are blocked for both paths
-    - Parent directories of dst are created automatically
-    - overwrite=false raises an error if dst already exists
-    - Directories are not supported; use src_path pointing to a file
-    """
+def file_mkdir(path: str, parents: bool = True, exist_ok: bool = True) -> dict[str, Any]:
     from assetclaw_matting.config import settings
-    if not settings.allow_file_copy:
-        raise PermissionError("file.copy is disabled (ALLOW_FILE_COPY=false)")
 
-    src = validate_skill_path(src_path)
-    dst = validate_skill_path(dst_path)
+    if not settings.allow_file_mkdir:
+        raise PermissionError("file.mkdir is disabled")
+    target = validate_path(path, must_exist=False)
+    target.mkdir(parents=parents, exist_ok=exist_ok)
+    return {"ok": True, "path": str(target), "exists": target.exists(), "is_dir": target.is_dir()}
 
-    if not src.exists():
-        raise ValueError(f"Source does not exist: {src}")
-    if src.is_dir():
-        raise ValueError(f"Source is a directory; only files are supported: {src}")
 
-    dst_existed = dst.exists()
-    if dst_existed and not overwrite:
-        raise ValueError(
-            f"Destination already exists: {dst}. Set overwrite=true to replace."
-        )
-
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(str(src), str(dst))
-
+def file_exists(path: str) -> dict[str, Any]:
+    target = validate_path(path, must_exist=False)
+    exists = target.exists()
     return {
-        "src": str(src),
-        "dst": str(dst),
-        "size": dst.stat().st_size,
-        "overwritten": dst_existed,
+        "ok": True,
+        "path": str(target),
+        "exists": exists,
+        "is_dir": target.is_dir() if exists else False,
+        "is_file": target.is_file() if exists else False,
+        "size": target.stat().st_size if exists and target.is_file() else None,
     }

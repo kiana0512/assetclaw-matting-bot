@@ -1,44 +1,28 @@
-"""Brain Router shared data models."""
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class BrainMessage(BaseModel):
-    channel: str = "feishu"          # feishu | api | cli
+    channel: str = "feishu"
     conversation_id: str = ""
     user_id: str = ""
     text: str = ""
-    attachments: list[dict[str, Any]] = []
+    attachments: list[dict[str, Any]] = Field(default_factory=list)
 
 
-class BrainContext(BaseModel):
-    machine_id: str = ""
-    gpu: str = "RTX 3090 24GB"
-    agent_runs_on_gpu: bool = False
-    queue_summary: str = ""
-    comfyui_status: str = ""
-    worker_status: str = ""
-    allowed_roots: list[str] = []
-    available_workflows: list[str] = ["matting_v1"]
-    skills_manifest: dict[str, Any] = {}
-    recent_batches: list[dict[str, Any]] = []
-    security_policy_summary: str = ""
-
-
-class BrainToolCall(BaseModel):
+class ToolCall(BaseModel):
     skill: str
-    arguments: dict[str, Any] = {}
-    requires_confirmation: bool = False
-    call_id: str = ""
+    arguments: dict[str, Any] = Field(default_factory=dict)
 
 
 class BrainResponse(BaseModel):
     text: str = ""
-    tool_calls: list[BrainToolCall] = []
-    attachments: list[dict[str, Any]] = []
-    requires_confirmation: bool = False
-    raw: dict[str, Any] = {}
+    tool_calls: list[ToolCall] = Field(default_factory=list)
+    raw: dict[str, Any] = Field(default_factory=dict)
     provider: str = ""
+
+
+BrainToolCall = ToolCall

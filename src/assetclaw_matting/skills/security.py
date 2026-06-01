@@ -1,65 +1,62 @@
-"""Skill Gateway path and content security utilities.
-
-Centralises all security checks used across skill implementations:
-- Path validation against ALLOWED_ROOTS and DENY_PATH_PATTERNS
-- Log line sanitisation (strip secrets before returning to callers)
-- Sensitive string detection
-"""
 from __future__ import annotations
 
-import re
 from pathlib import Path
+import re
 
-# ── Log sanitisation ──────────────────────────────────────────────────────────
 
-# Patterns that may contain secrets in log lines
-_SECRET_RE = re.compile(
-    r"""((?:token|key|secret|password|api_key|bearer|authorization|credential)
-         [\s=:]+)[^\s"',;]+""",
-    re.IGNORECASE | re.VERBOSE,
+SECRET_RE = re.compile(
+    r"((?:token|secret|api[_-]?key|authorization|bearer|password)\s*[:=]\s*)[^\s,;]+",
+    re.IGNORECASE,
 )
 
 
-def sanitize_log_line(line: str) -> str:
-    """Replace secret values with [REDACTED] in a log line."""
-    return _SECRET_RE.sub(r"\1[REDACTED]", line)
+def normalize_path(path: str | Path) -> Path:
+    raw = str(path).strip().strip('"')
+    if not raw:
+        raise ValueError("path is required")
+    if ".." in Path(raw).parts:
+        raise ValueError("path traversal is not allowed")
+    return Path(raw).expanduser().resolve()
 
 
-def sanitize_log_lines(lines: list[str]) -> list[str]:
-    return [sanitize_log_line(l) for l in lines]
-
-
-# ── Path helpers ──────────────────────────────────────────────────────────────
-
-def is_path_safe(path: str | Path) -> tuple[bool, str]:
-    """Check a path without raising. Returns (ok, reason)."""
+def has_denied_pattern(path: str | Path) -> bool:
     from assetclaw_matting.config import settings
-    from assetclaw_matting.services.file_store import validate_allowed_path
 
-    try:
-        resolved = Path(str(path)).resolve()
-    except Exception as exc:
-        return False, f"Cannot resolve path: {exc}"
-
-    if ".." in Path(str(path)).parts:
-        return False, "Path traversal not allowed"
-
-    path_str = str(resolved)
-    for pattern in settings.deny_path_patterns_list:
-        if pattern.lower() in path_str.lower():
-            return False, f"Path contains denied pattern: {pattern!r}"
-
-    try:
-        validate_allowed_path(resolved)
-    except ValueError as exc:
-        return False, str(exc)
-
-    return True, ""
+    normalized = str(path).replace("/", "\\").lower()
+    return any(pattern.lower() in normalized for pattern in settings.deny_path_patterns_list)
 
 
-def check_path_or_raise(path: str | Path) -> Path:
-    """Validate a path and return it resolved, or raise ValueError."""
-    ok, reason = is_path_safe(path)
-    if not ok:
-        raise ValueError(reason)
-    return Path(str(path)).resolve()
+def is_under_allowed_roots(path: str | Path) -> bool:
+    from assetclaw_matting.config import settings
+
+    normalized = str(Path(path).resolve()).replace("/", "\\").lower()
+    for root in settings.allowed_roots_list:
+        root_path = _normalize_allowed_root(root)
+        if normalized == root_path or normalized.startswith(root_path.rstrip("\\") + "\\"):
+            return True
+    return False
+
+
+def _normalize_allowed_root(root: str) -> str:
+    value = root.strip().replace("/", "\\")
+    if re.fullmatch(r"[A-Za-z]:", value):
+        value = value + "\\"
+    return str(Path(value).resolve()).replace("/", "\\").lower()
+
+
+def validate_path(path: str | Path, must_exist: bool = False) -> Path:
+    resolved = normalize_path(path)
+    if has_denied_pattern(resolved):
+        raise PermissionError(f"path is denied: {redact_secrets(str(path))}")
+    if not is_under_allowed_roots(resolved):
+        raise PermissionError(f"path is outside ALLOWED_ROOTS: {redact_secrets(str(path))}")
+    if must_exist and not resolved.exists():
+        raise FileNotFoundError(f"path does not exist: {redact_secrets(str(path))}")
+    return resolved
+
+
+def redact_secrets(text: object) -> str:
+    return SECRET_RE.sub(r"\1[REDACTED]", str(text))
+
+
+sanitize_log_line = redact_secrets
