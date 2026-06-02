@@ -54,12 +54,20 @@ class BrainProvider(ABC):
                     skill=tool_call.skill,
                     arguments=args,
                 )
+                message = f"需要确认：{tool_call.skill}\n回复：确认执行 {confirmation_id}"
+                if tool_call.skill == "comfyui.run_start":
+                    try:
+                        from assetclaw_matting.skills.comfyui_skills import preview_run_start_confirmation
+
+                        message = preview_run_start_confirmation(args, confirmation_id)
+                    except Exception:
+                        pass
                 result = {
                     "ok": False,
                     "skill": tool_call.skill,
                     "needs_confirmation": True,
                     "confirmation_id": confirmation_id,
-                    "message": f"需要确认：{tool_call.skill}\n回复：确认执行 {confirmation_id}",
+                    "message": message,
                 }
                 trace(
                     "skill.confirmation_required",

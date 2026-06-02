@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import logging
 import re
+import time
+from datetime import datetime
+from pathlib import Path
 
 from assetclaw_matting.errors import classify_exception
 from assetclaw_matting.feishu.models import FeishuMessageEvent, FeishuProcessResult
@@ -39,7 +42,6 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
         open_id=event.open_id,
         text=event.text,
     )
-
     # --- dedup ---------------------------------------------------------------
     is_new = try_insert_event_dedup(
         dedup_key, event.message_id, event.chat_id, event.open_id or "", trace_id
@@ -47,6 +49,11 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
     if not is_new:
         log.info("DEDUP HIT trace_id=%s key=%s", trace_id, dedup_key)
         return FeishuProcessResult(ok=True, trace_id=trace_id)
+
+    if _is_stale_event(event):
+        log.warning("ignore stale feishu event trace_id=%s message_id=%s", trace_id, event.message_id)
+        update_event_dedup_status(dedup_key, "ignored_stale")
+        return FeishuProcessResult(ok=True, trace_id=trace_id, reply_text="")
 
     # --- permission check ----------------------------------------------------
     if settings.feishu_allowed_chat_ids_list and event.chat_id not in settings.feishu_allowed_chat_ids_list:
@@ -64,6 +71,9 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
     confirmation_result = _try_handle_confirmation(event, conversation_id, user_key, trace_id, dedup_key)
     if confirmation_result is not None:
         return confirmation_result
+
+    event.attachments = _prepare_attachments(event, conversation_id)
+    _remember_recent_attachments(conversation_id, event.attachments)
 
     if _is_simple_greeting(event.text):
         text_out = "你好。"
@@ -102,6 +112,7 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
                     conversation_id=conversation_id,
                     user_id=event.open_id or "",
                     text=event.text,
+                    attachments=event.attachments,
                 )
             )
         finally:
@@ -142,57 +153,71 @@ def _try_handle_confirmation(
     dedup_key: str,
 ) -> FeishuProcessResult | None:
     text = event.text.strip()
-    match = re.fullmatch(r"(确认执行|确认|yes|y)\s*([a-fA-F0-9]{6,})?", text, re.IGNORECASE)
-    cancel = re.fullmatch(r"(取消|取消执行|cancel|no|n)\s*([a-fA-F0-9]{6,})?", text, re.IGNORECASE)
-    if not match and not cancel:
+    confirm_like = re.search(r"\b(?:yes|y)\b|确认(?:执行)?", text, re.IGNORECASE)
+    cancel_like = re.search(r"\b(?:cancel|no|n)\b|取消(?:执行)?", text, re.IGNORECASE)
+    if not confirm_like and not cancel_like:
         return None
 
     from assetclaw_matting.db.repos import (
+        get_pending_confirmation_by_id,
         get_latest_pending_confirmation,
         mark_pending_confirmation,
         update_event_dedup_status,
     )
 
-    pending = get_latest_pending_confirmation(conversation_id, user_key)
-    if not pending:
+    provided_ids = re.findall(r"\b[a-fA-F0-9]{6,}\b", text)
+    if provided_ids:
+        pending_items = []
+        missing = []
+        for provided_id in provided_ids:
+            pending = get_pending_confirmation_by_id(provided_id, conversation_id, user_key)
+            if pending:
+                pending_items.append(pending)
+            else:
+                missing.append(provided_id)
+        if not pending_items:
+            text_out = "这些确认码当前都不可用，可能已执行、过期或不属于这个会话。"
+            _try_reply(event.message_id, event.chat_id, text_out)
+            update_event_dedup_status(dedup_key, "success")
+            return FeishuProcessResult(ok=True, trace_id=trace_id, reply_text=text_out)
+    else:
+        pending = get_latest_pending_confirmation(conversation_id, user_key)
+        pending_items = [pending] if pending else []
+        missing = []
+
+    if not pending_items:
         text_out = "当前没有等待你确认的操作。"
         _try_reply(event.message_id, event.chat_id, text_out)
         update_event_dedup_status(dedup_key, "success")
         return FeishuProcessResult(ok=True, trace_id=trace_id, reply_text=text_out)
 
-    expected_id = pending["id"]
-    provided_id = (match or cancel).group(2)
-    if provided_id and provided_id != expected_id:
-        text_out = f"确认码不匹配。当前待确认操作的确认码是：{expected_id}"
+    if cancel_like and not confirm_like:
+        lines = []
+        for pending in pending_items:
+            mark_pending_confirmation(pending["id"], "cancelled")
+            lines.append(f"已取消：{pending['skill']}（{pending['id']}）")
+        if missing:
+            lines.append("未找到：" + "、".join(missing))
+        text_out = "\n".join(lines)
         _try_reply(event.message_id, event.chat_id, text_out)
-        update_event_dedup_status(dedup_key, "success")
-        return FeishuProcessResult(ok=True, trace_id=trace_id, reply_text=text_out)
-
-    if cancel:
-        mark_pending_confirmation(expected_id, "cancelled")
-        text_out = f"已取消待确认操作：{pending['skill']}（{expected_id}）"
-        _try_reply(event.message_id, event.chat_id, text_out)
-        trace(
-            "skill.confirmation_cancelled",
-            trace_id=trace_id,
-            conversation_id=conversation_id,
-            confirmation_id=expected_id,
-        )
+        for pending in pending_items:
+            trace(
+                "skill.confirmation_cancelled",
+                trace_id=trace_id,
+                conversation_id=conversation_id,
+                confirmation_id=pending["id"],
+            )
         update_event_dedup_status(dedup_key, "success")
         return FeishuProcessResult(ok=True, trace_id=trace_id, reply_text=text_out)
 
     from assetclaw_matting.brain.result_formatter import format_skill_results
     from assetclaw_matting.skills.registry import call_skill
 
-    _try_reply(event.message_id, event.chat_id, f"确认收到，正在执行：{pending['skill']}（{expected_id}）")
-    trace(
-        "skill.confirmed_execute",
-        trace_id=trace_id,
-        conversation_id=conversation_id,
-        confirmation_id=expected_id,
-        skill=pending["skill"],
-        arguments=pending["arguments"],
-    )
+    if len(pending_items) == 1:
+        pending_text = f"确认收到，正在执行：{pending_items[0]['skill']}（{pending_items[0]['id']}）"
+    else:
+        pending_text = f"确认收到，正在执行 {len(pending_items)} 个操作。"
+    _try_reply(event.message_id, event.chat_id, pending_text)
     context_token = set_runtime_context(
         channel="feishu",
         chat_id=event.chat_id,
@@ -201,13 +226,26 @@ def _try_handle_confirmation(
         conversation_id=conversation_id,
         trace_id=trace_id,
     )
+    results = []
     try:
-        result = call_skill(pending["skill"], pending["arguments"], requested_by="feishu_confirmed")
+        for pending in pending_items:
+            trace(
+                "skill.confirmed_execute",
+                trace_id=trace_id,
+                conversation_id=conversation_id,
+                confirmation_id=pending["id"],
+                skill=pending["skill"],
+                arguments=pending["arguments"],
+            )
+            result = call_skill(pending["skill"], pending["arguments"], requested_by="feishu_confirmed")
+            mark_pending_confirmation(pending["id"], "executed" if result.get("ok") else "failed")
+            results.append(result)
     finally:
         reset_runtime_context(context_token)
-    mark_pending_confirmation(expected_id, "executed" if result.get("ok") else "failed")
-    update_event_dedup_status(dedup_key, "success" if result.get("ok") else "failed")
-    text_out = format_skill_results([result])
+    update_event_dedup_status(dedup_key, "success" if all(result.get("ok") for result in results) else "failed")
+    text_out = format_skill_results(results)
+    if missing:
+        text_out = text_out + "\n未找到：" + "、".join(missing)
     _try_send_chat(event.chat_id, text_out)
     trace(
         "feishu.reply",
@@ -217,7 +255,7 @@ def _try_handle_confirmation(
         open_id=event.open_id,
         text=text_out,
     )
-    return FeishuProcessResult(ok=bool(result.get("ok")), trace_id=trace_id, reply_text=text_out)
+    return FeishuProcessResult(ok=all(bool(result.get("ok")) for result in results), trace_id=trace_id, reply_text=text_out)
 
 
 def _try_reply(message_id: str, chat_id: str, text: str) -> None:
@@ -242,6 +280,95 @@ def _try_send_chat(chat_id: str, text: str) -> None:
         feishu_client.send_text_to_chat(chat_id, text)
     except Exception as exc:
         log.error("send to chat failed: %s", redact_secrets(str(exc)))
+
+
+def _prepare_attachments(event: FeishuMessageEvent, conversation_id: str) -> list[dict[str, object]]:
+    if not event.attachments:
+        return []
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.feishu.client import feishu_client
+
+    safe_conversation = re.sub(r"[^a-zA-Z0-9_.-]+", "_", conversation_id)[-80:]
+    day = datetime.now().strftime("%Y%m%d")
+    inbox = settings.storage_dir / "feishu_inbox" / day / safe_conversation
+    prepared: list[dict[str, object]] = []
+    for index, attachment in enumerate(event.attachments, start=1):
+        item = dict(attachment)
+        name = _safe_attachment_name(str(item.get("file_name") or f"attachment_{index}.bin"))
+        target = _unique_path(inbox / name)
+        resource_type = _download_resource_type(str(item.get("type") or "file"))
+        try:
+            feishu_client.download_message_resource(
+                event.message_id,
+                str(item.get("resource_key") or ""),
+                target,
+                resource_type=resource_type,  # type: ignore[arg-type]
+            )
+            item["local_path"] = str(target)
+            item["file_name"] = target.name
+            item["size"] = target.stat().st_size
+            item["downloaded"] = True
+        except Exception as exc:
+            log.error("download feishu attachment failed: %s", redact_secrets(str(exc)))
+            item["downloaded"] = False
+            item["error"] = str(exc)
+            trace(
+                "feishu.attachment_download_failed",
+                trace_id=event.trace_id,
+                conversation_id=conversation_id,
+                message_id=event.message_id,
+                resource_type=resource_type,
+                error=redact_secrets(str(exc)),
+            )
+        prepared.append(item)
+    return prepared
+
+
+def _download_resource_type(raw_type: str) -> str:
+    if raw_type in {"image", "file", "video", "audio", "media"}:
+        return raw_type
+    return "file"
+
+
+def _is_stale_event(event: FeishuMessageEvent) -> bool:
+    from assetclaw_matting.config import settings
+
+    threshold = max(0, int(settings.feishu_ignore_events_older_than_seconds or 0))
+    if threshold <= 0 or not event.message_create_time:
+        return False
+    created = event.message_create_time / (1000 if event.message_create_time > 10_000_000_000 else 1)
+    return time.time() - created > threshold
+
+
+def _remember_recent_attachments(conversation_id: str, attachments: list[dict[str, object]]) -> None:
+    if not attachments:
+        return
+    from assetclaw_matting.db.repos import upsert_memory_note
+    from assetclaw_matting.skills.media_skills import IMAGE_EXTS
+
+    for item in reversed(attachments):
+        path = str(item.get("local_path") or "")
+        if path and Path(path).suffix.lower() in IMAGE_EXTS:
+            upsert_memory_note(conversation_id, "last_image_path", path, source="feishu_attachment")
+            upsert_memory_note(conversation_id, "last_image_name", str(item.get("file_name") or Path(path).name), source="feishu_attachment")
+            return
+
+
+def _safe_attachment_name(name: str) -> str:
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", name).strip(". ")
+    return cleaned or "feishu_attachment.bin"
+
+
+def _unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    for i in range(2, 1000):
+        candidate = path.with_name(f"{stem}_{i}{suffix}")
+        if not candidate.exists():
+            return candidate
+    raise FileExistsError(f"too many duplicate attachment names: {path}")
 
 
 def _is_simple_greeting(text: str) -> bool:

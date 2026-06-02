@@ -58,8 +58,8 @@ def try_insert_event_dedup(
 def update_event_dedup_status(event_id: str, status: str) -> None:
     with get_connection() as conn:
         conn.execute(
-            "UPDATE feishu_event_dedup SET status = ?, updated_at = ? WHERE event_id = ?",
-            (status, _now(), event_id),
+            "UPDATE feishu_event_dedup SET status = ?, updated_at = ? WHERE event_id = ? OR message_id = ?",
+            (status, _now(), event_id, event_id),
         )
 
 
@@ -348,6 +348,32 @@ def get_latest_pending_confirmation(conversation_id: str, user_id: str) -> dict[
             LIMIT 1
             """,
             (conversation_id, user_id),
+        ).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    item["arguments"] = json.loads(item.pop("arguments_json") or "{}")
+    return item
+
+
+def get_pending_confirmation_by_id(
+    confirmation_id: str,
+    conversation_id: str,
+    user_id: str,
+) -> dict[str, Any] | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT id, conversation_id, user_id, skill, arguments_json, created_at, expires_at
+            FROM pending_confirmations
+            WHERE id = ?
+              AND conversation_id = ?
+              AND user_id = ?
+              AND status = 'pending'
+              AND datetime(expires_at) > datetime('now')
+            LIMIT 1
+            """,
+            (confirmation_id, conversation_id, user_id),
         ).fetchone()
     if not row:
         return None

@@ -15,6 +15,28 @@
 - 如果重复，优先查看飞书是否重发了不同 `event_id`，或本地 WS Receiver 是否启动了多个进程
 - 可查看 `data/assetclaw.db` 中的 `feishu_event_dedup` 表确认
 
+## 飞书图片没有下载到本地
+
+如果日志里出现：
+
+```text
+download_message_resource failed: 400 ... code 99991672 ... Access denied
+```
+
+这不是 `storage` 目录问题，而是飞书应用缺少消息资源读取权限。需要在飞书开放平台给应用开通以下任意一个权限，并重新发布/重启机器人：
+
+```text
+im:message:readonly
+im:message.history:readonly
+im:message
+```
+
+开通后，图片会保存到：
+
+```text
+storage\feishu_inbox\日期\会话\
+```
+
 ## LLM Proxy 401 / 403
 
 1. 检查 `.env` 中 `LLM_PROXY_API_KEY` 是否有效
@@ -51,7 +73,7 @@
 
 ## 路径被拒绝 (PermissionDenied)
 
-- 路径必须在 `ALLOWED_ROOTS`（默认 `D:`、`E:`、`F:`）下，`C:` 不开放
+- 路径必须在 `ALLOWED_ROOTS`（默认 `D:`、`E:`、`F:`、`Z:`、指定共享盘 UNC）下，`C:` 不开放
 - 路径不能包含：`.env`、`.ssh`、`AppData`、`Windows`、`Program Files`、`ProgramData`
 - 发送"查看权限说明"可在飞书内查看完整安全边界
 

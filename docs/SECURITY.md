@@ -26,7 +26,7 @@ Win3090 -> 出向 wss://open.feishu.cn -> 接收消息 -> 处理 -> 回复
 
 ### 允许路径
 
-- `ALLOWED_ROOTS=D:;E:;F:` 默认允许 D/E/F 工作盘下的受控操作，C 盘不开放
+- `ALLOWED_ROOTS=D:;E:;F:;Z:;\\audioshare.lilith.com\AIart\公共机共享\抠图` 默认允许 D/E/F 工作盘、Z 盘共享盘和指定 UNC 共享路径下的受控操作，C 盘不开放
 
 ### 永久禁止访问
 

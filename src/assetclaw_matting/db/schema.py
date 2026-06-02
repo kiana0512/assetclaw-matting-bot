@@ -93,6 +93,39 @@ CREATE TABLE IF NOT EXISTS pending_confirmations (
     created_at TEXT,
     expires_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS comfyui_runs (
+    id TEXT PRIMARY KEY,
+    status TEXT,
+    workflow_path TEXT,
+    input_dir TEXT,
+    output_dir TEXT,
+    total INTEGER,
+    files_json TEXT,
+    prompt_ids_json TEXT,
+    options_json TEXT,
+    created_at TEXT,
+    updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS shared_matting_runs (
+    id TEXT PRIMARY KEY,
+    status TEXT,
+    workflow_path TEXT,
+    shared_input_dir TEXT,
+    shared_output_dir TEXT,
+    local_input_dir TEXT,
+    local_output_dir TEXT,
+    comfyui_run_id TEXT,
+    total INTEGER,
+    copied_in INTEGER,
+    synced_out INTEGER,
+    chat_id TEXT,
+    notify_interval_seconds INTEGER,
+    error TEXT,
+    created_at TEXT,
+    updated_at TEXT
+);
 """
 
 # Columns added after initial table creation — applied via migration

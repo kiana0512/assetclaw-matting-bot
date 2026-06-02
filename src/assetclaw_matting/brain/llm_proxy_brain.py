@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import base64
+from pathlib import Path
 import re
 from typing import Any
 
@@ -12,12 +14,15 @@ from assetclaw_matting.brain.base import BrainProvider
 from assetclaw_matting.brain.conversation_recall import answer_recent_question
 from assetclaw_matting.brain.context_builder import build_memory_prompt, build_skill_manifest_prompt
 from assetclaw_matting.brain.file_task_planner import plan_file_task
+from assetclaw_matting.brain.multimodal_planner import answer_recent_image_question, plan_multimodal_task
 from assetclaw_matting.brain.prompts import SYSTEM_PROMPT
 from assetclaw_matting.brain.result_formatter import format_skill_results
 from assetclaw_matting.brain.schemas import BrainMessage, BrainResponse, ToolCall
+from assetclaw_matting.brain.translation_planner import plan_translation_task
 from assetclaw_matting.ops_trace import trace
 from assetclaw_matting.progress import notify_progress
 from assetclaw_matting.skills.security import redact_secrets
+from assetclaw_matting.skills.translation_skills import _image_mime
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +36,59 @@ class LLMProxyBrain(BrainProvider):
         return bool(settings.llm_proxy_enabled and settings.llm_proxy_base_url and settings.llm_proxy_api_key)
 
     def handle_message(self, message: BrainMessage) -> BrainResponse:
+        image_answer = answer_recent_image_question(message)
+        if image_answer:
+            response = BrainResponse(text=image_answer, provider=self.name)
+            self.log_message(message, response)
+            return response
+
+        translated = plan_translation_task(message)
+        if translated:
+            tool_calls, text = translated
+            if not tool_calls:
+                response = BrainResponse(text=text, provider=self.name)
+                self.log_message(message, response)
+                return response
+            results = self.execute_tool_calls(
+                tool_calls,
+                conversation_id=message.conversation_id,
+                user_id=message.user_id,
+            )
+            response = BrainResponse(
+                text=format_skill_results(results),
+                tool_calls=tool_calls,
+                raw={"deterministic_plan": text, "skill_results": results},
+                provider=self.name,
+            )
+            self.log_message(message, response)
+            return response
+
+        multimodal = plan_multimodal_task(message)
+        if multimodal:
+            tool_calls, text = multimodal
+            if not tool_calls:
+                response = BrainResponse(text=text, provider=self.name)
+                self.log_message(message, response)
+                return response
+            results = self.execute_tool_calls(
+                tool_calls,
+                conversation_id=message.conversation_id,
+                user_id=message.user_id,
+            )
+            response = BrainResponse(
+                text=format_skill_results(results),
+                tool_calls=tool_calls,
+                raw={"deterministic_plan": text, "skill_results": results},
+                provider=self.name,
+            )
+            self.log_message(message, response)
+            return response
+
+        if message.attachments and _asks_for_visual_analysis(message.text):
+            response = self._analyze_attachments(message)
+            self.log_message(message, response)
+            return response
+
         recalled = answer_recent_question(message.text, message.conversation_id)
         if recalled:
             response = BrainResponse(text=recalled, provider=self.name)
@@ -53,6 +111,14 @@ class LLMProxyBrain(BrainProvider):
                 text=format_skill_results(results),
                 tool_calls=tool_calls,
                 raw={"deterministic_plan": text, "skill_results": results},
+                provider=self.name,
+            )
+            self.log_message(message, response)
+            return response
+
+        if not message.text.strip():
+            response = BrainResponse(
+                text="我收到了空消息。可以直接发文字指令，或发图片后说明要提取文字、翻译还是保存。",
                 provider=self.name,
             )
             self.log_message(message, response)
@@ -113,13 +179,17 @@ class LLMProxyBrain(BrainProvider):
                 self.log_message(message, response)
                 return response
             except Exception as repair_error:
-                response = BrainResponse(
-                    text=f"LLM Proxy 没有返回合法 JSON，已停止执行。错误：{repair_error}",
-                    raw={"first_error": str(first_error), "repair_error": str(repair_error)},
-                    provider=self.name,
-                )
-                self.log_message(message, response)
-                return response
+                from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
+
+                fallback = LocalCommandBrain().handle_message(message)
+                fallback.provider = self.name
+                fallback.raw = {
+                    "fallback": "local_command_after_invalid_json",
+                    "first_error": str(first_error),
+                    "repair_error": str(repair_error),
+                }
+                self.log_message(message, fallback)
+                return fallback
 
         tool_calls = [ToolCall(**item) for item in parsed.get("tool_calls", [])]
         if not tool_calls:
@@ -185,7 +255,7 @@ class LLMProxyBrain(BrainProvider):
             return base
         return f"{base}/chat/completions"
 
-    def _complete(self, messages: list[dict[str, str]], model_kind: str) -> str:
+    def _complete(self, messages: list[dict[str, Any]], model_kind: str) -> str:
         from assetclaw_matting.config import settings
 
         model = settings.llm_proxy_model
@@ -295,7 +365,62 @@ class LLMProxyBrain(BrainProvider):
     def _summarize(self, user_text: str, results: list[dict[str, Any]]) -> str:
         return format_skill_results(results)
 
+    def _analyze_attachments(self, message: BrainMessage) -> BrainResponse:
+        if not self.is_available():
+            return BrainResponse(text="我已经收到附件，但当前 LLM Proxy 没配置，暂时不能做视觉理解。", provider=self.name)
+        image_paths = [
+            Path(str(item["local_path"]))
+            for item in message.attachments
+            if item.get("local_path") and Path(str(item["local_path"])).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+        ]
+        if not image_paths:
+            return BrainResponse(text="我已经收到附件。目前只支持把图片交给 LLM 分析，视频先支持保存、查看信息和发回。", provider=self.name)
+        try:
+            text = self._complete_multimodal(message.text or "请简要描述这张图片。", image_paths[:4])
+            return BrainResponse(text=text or "没有识别到有效内容。", provider=self.name)
+        except Exception as exc:
+            return BrainResponse(text=f"图片分析失败：{self._format_http_error(exc) if isinstance(exc, HTTPError) else exc}", provider=self.name)
+
+    def _complete_multimodal(self, prompt: str, image_paths: list[Path]) -> str:
+        from assetclaw_matting.config import settings
+
+        if settings.llm_proxy_openai_compatible:
+            content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+            for path in image_paths:
+                mime = _image_mime(path)
+                data = base64.b64encode(path.read_bytes()).decode("ascii")
+                content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}})
+            payload = {
+                "model": settings.llm_proxy_complex_model or settings.llm_proxy_model,
+                "messages": [{"role": "user", "content": content}],
+                "temperature": 0,
+            }
+            response = self._post_chat_completion(payload, auth_header="bearer")
+            if response.status_code == 401:
+                response = self._post_chat_completion(payload, auth_header="x-api-key")
+            response.raise_for_status()
+            return response.json()["choices"][0]["message"]["content"]
+
+        content = [{"type": "text", "text": prompt}]
+        for path in image_paths:
+            mime = _image_mime(path)
+            data = base64.b64encode(path.read_bytes()).decode("ascii")
+            content.append({"type": "image", "source": {"type": "base64", "media_type": mime, "data": data}})
+        payload = {
+            "model": settings.llm_proxy_complex_model or settings.llm_proxy_model,
+            "max_tokens": 1200,
+            "temperature": 0,
+            "messages": [{"role": "user", "content": content}],
+        }
+        response = self._post_anthropic_messages(payload)
+        response.raise_for_status()
+        return self._extract_anthropic_text(response.json())
+
 
 def _is_empty_understanding(text: str) -> bool:
     normalized = re.sub(r"[\s。.!！]+", "", text.strip().lower())
     return normalized in {"我理解了", "理解了", "明白了", "好的", "ok", "收到"}
+
+
+def _asks_for_visual_analysis(text: str) -> bool:
+    return any(kw in text for kw in ("分析", "理解", "识别", "看看图", "图里", "画面", "描述", "是什么"))

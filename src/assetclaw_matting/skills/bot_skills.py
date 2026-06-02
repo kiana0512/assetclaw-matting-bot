@@ -7,19 +7,36 @@ _HELP_TEXT = """\
 AssetClaw Win3090 自动化执行节点
 
 我现在能做这些：
-- 在 D/E/F 工作盘列目录、查文件、找图片/视频/表格/压缩包
+- 在 D/E/F 工作盘、Z 盘共享盘和指定 UNC 共享路径列目录、查文件、找图片/视频/表格/压缩包
 - 跨盘复制文件/目录、复制并改名、创建目录
 - 批量复制/移动/重命名/建目录，按顺序改名
 - 读取/写入安全文本文件、计算 hash、查看磁盘空间
 - 图片批量查尺寸、转格式、缩放
+- 接收飞书图片/视频/文件，保存到本地后继续处理
+- 翻译文字；识别图片里的文字并翻译
+- ComfyUI 工作流选择、批量抠图、队列、管线进度、ETA、GPU 状态查询
+- 共享盘抠图：先同步到本地跑，再同步结果回共享盘
 - 删除/清空/移动这类高风险动作会先二次确认
-- 把本地文件通过飞书发回当前会话
+- 把本地文件通过飞书发回当前会话，图片可直接预览显示
 - 管理抠图批次（当前 fake mode，不跑 GPU）
 - 保存 / 查询本地记忆
 
 可以直接说：
 看看 E 盘有哪些图片
+看看 Z 盘有哪些文件
+看看共享盘抠图目录有哪些文件
 把 E:\\a.png 复制一份并改名为 a_bak.png
+把刚刚那张图保存到 E:\\images
+把 E:\\1.png 用图片形式发给我
+把共享盘 input 文件夹压缩成 zip 并发送给我
+选择 C:\\Users\\lilithgames\\Downloads\\ComfyUI-aki-v3\\ComfyUI\\user\\default\\workflows\\软边缘测试-动画批量.json 作为抠图工作流
+开始批量抠图（默认 E:\\input -> E:\\output，保留目录结构）
+现在 ComfyUI 跑到多少张了
+暂停当前抠图任务
+继续当前抠图任务
+终止当前抠图任务
+把这句话翻译成英文：今天辛苦了
+把刚刚那张图里的文字翻译成中文
 把 E:\\assetclaw-matting-bot\\README.md 通过飞书发给我
 查看技能列表"""
 
@@ -46,6 +63,7 @@ def bot_skills(**_: Any) -> dict[str, Any]:
         "comfyui": "ComfyUI",
         "logs": "日志",
         "system": "系统状态",
+        "translate": "翻译",
         "other": "其他",
     }
 
@@ -76,7 +94,7 @@ def bot_permissions(**_: Any) -> dict[str, Any]:
     allowed_str = "、".join(allowed) if allowed else "（未配置）"
     deny_str = "、".join(deny_patterns) if deny_patterns else "（无）"
 
-    text = f"""\
+    text = rf"""\
 权限说明 & 安全边界
 
 允许访问路径：
@@ -87,20 +105,22 @@ def bot_permissions(**_: Any) -> dict[str, Any]:
 
 禁止的操作：
   - 任意 shell 执行
-  - 删除文件 / 目录
+  - 格式化、分区、操作系统目录破坏
   - 读取文件内容（内容读取默认关闭）
   - 越权访问 Windows 系统目录、AppData、ProgramData 等
   - 访问 .env、.ssh 等配置密钥文件
 
 写操作说明：
   - file.copy、file.mkdir、memory.remember、matting.batch_create 属于写操作，会写入审计日志
-  - file.move 属于中风险写操作，需要二次确认
+  - file.move、file.delete、file.empty_dir、批量重命名等高风险动作需要二次确认
   - 如配置了 FEISHU_ALLOWED_OPEN_IDS，只有名单内用户可执行写操作
   - 多用户隔离：飞书上下文按 chat_id + open_id 存储，同一群内不同用户不会混用记忆
+  - 共享盘可以访问和复制；抠图任务不会直接在共享盘上计算，会先 staging 到本地再同步结果回去
+  - Z:\ 是共享盘映射；等价 UNC 路径是 \\audioshare.lilith.com\AIart
 
 高风险操作：
-  - 目前删除类、shell 执行类操作不提供，永久禁止
-  - 后续如果新增删除、覆盖批量文件、真实 GPU 批处理等高风险动作，默认必须走二次确认
+  - 删除、移动、清空目录、批量重命名默认必须走二次确认
+  - shell、格式化、分区、C 盘系统目录操作永久禁止
 
 二次确认格式：
   机器人会返回确认码，例如 abc123def0

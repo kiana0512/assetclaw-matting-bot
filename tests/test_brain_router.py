@@ -192,3 +192,66 @@ def test_plan_rename_recent_images_sequence() -> None:
     assert tool_calls
     assert tool_calls[0].skill == "file.rename_sequence"
     assert tool_calls[0].arguments["paths"] == ["E:\\img_a.png", "E:\\img_b.jpg", "E:\\img_c.webp"]
+
+
+def test_plan_zip_recent_input_and_send() -> None:
+    from assetclaw_matting.brain.file_task_planner import plan_file_task
+    from assetclaw_matting.db.repos import insert_brain_message
+
+    conversation_id = "zip-recent-input-plan-test"
+    insert_brain_message(
+        provider="test",
+        channel="feishu",
+        conversation_id=conversation_id,
+        user_id="user",
+        message_text="列出共享盘抠图目录有哪些文件",
+        response_text="\n".join([
+            "Z:\\公共机共享\\抠图：18 项",
+            "- input\\",
+            "- output\\",
+        ]),
+        tool_calls_json="[]",
+        raw_json="{}",
+    )
+
+    planned = plan_file_task(
+        BrainMessage(
+            conversation_id=conversation_id,
+            user_id="user",
+            text="可以把这个input文件夹压缩为zip并且发送给我吗",
+        )
+    )
+
+    assert planned is not None
+    tool_calls, _ = planned
+    assert tool_calls[0].skill == "feishu.zip_and_send"
+    assert tool_calls[0].arguments["paths"] == ["Z:\\公共机共享\\抠图\\input"]
+
+
+def test_local_command_shared_drive_permission_question(monkeypatch) -> None:
+    from assetclaw_matting.config import settings
+
+    monkeypatch.setattr(settings, "brain_provider", "local_command")
+    response = handle_message(BrainMessage(text="你可以查看共享盘的文件吗"))
+
+    assert response.text
+
+
+def test_local_command_shared_drive_list(monkeypatch) -> None:
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
+
+    monkeypatch.setattr(settings, "brain_provider", "local_command")
+    tool_calls = LocalCommandBrain()._infer_tool_calls("列出共享盘有哪些文件")
+
+    assert tool_calls[0].skill == "file.list_allowed"
+    assert tool_calls[0].arguments["path"] == settings.shared_matting_root
+
+
+def test_local_command_z_drive_list() -> None:
+    from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
+
+    tool_calls = LocalCommandBrain()._infer_tool_calls("列出 Z 盘有哪些文件")
+
+    assert tool_calls[0].skill == "file.list_allowed"
+    assert tool_calls[0].arguments["path"] == "Z:\\"

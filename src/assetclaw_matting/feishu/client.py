@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 import threading
 import time
+from typing import Literal
 
 import requests
 
@@ -104,6 +105,91 @@ class FeishuClient:
         data = response.json()
         if data.get("code") != 0:
             raise RuntimeError(f"send_file_to_chat failed: {data.get('msg')}")
+
+    def download_message_resource(
+        self,
+        message_id: str,
+        resource_key: str,
+        target_path: Path,
+        resource_type: Literal["image", "file", "video", "audio", "media"] = "file",
+    ) -> None:
+        if not message_id or not resource_key:
+            raise ValueError("message_id and resource_key are required")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        response = requests.get(
+            f"{FEISHU_BASE}/im/v1/messages/{message_id}/resources/{resource_key}",
+            headers=self._headers(),
+            params={"type": resource_type},
+            stream=True,
+            timeout=60,
+        )
+        self._write_download_response(response, target_path, error_label="download_message_resource")
+
+    def download_image(self, image_key: str, target_path: Path) -> None:
+        if not image_key:
+            raise ValueError("image_key is required")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        response = requests.get(
+            f"{FEISHU_BASE}/im/v1/images/{image_key}",
+            headers=self._headers(),
+            params={"image_type": "message"},
+            stream=True,
+            timeout=60,
+        )
+        self._write_download_response(response, target_path, error_label="download_image")
+
+    def _write_download_response(self, response: requests.Response, target_path: Path, error_label: str) -> None:
+        self._raise_for_download_error(response, error_label)
+        content_type = response.headers.get("Content-Type", "")
+        if "json" in content_type.lower():
+            data = response.json()
+            if data.get("code") != 0:
+                raise RuntimeError(f"{error_label} failed: {data.get('msg') or data}")
+            raise RuntimeError(f"{error_label} returned json instead of binary data")
+        with target_path.open("wb") as f:
+            for chunk in response.iter_content(chunk_size=1024 * 256):
+                if chunk:
+                    f.write(chunk)
+
+    def _raise_for_download_error(self, response: requests.Response, error_label: str) -> None:
+        if response.status_code < 400:
+            return
+        detail = response.text[:1200] if response.text else response.reason
+        message = f"{error_label} failed: {response.status_code} {detail}"
+        raise requests.HTTPError(message, response=response)
+
+    def upload_image(self, path: Path) -> str:
+        with path.open("rb") as f:
+            response = requests.post(
+                f"{FEISHU_BASE}/im/v1/images",
+                headers=self._headers(),
+                data={"image_type": "message"},
+                files={"image": (path.name, f)},
+                timeout=60,
+            )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"upload_image failed: {data.get('msg')}")
+        return data["data"]["image_key"]
+
+    def send_image_to_chat(self, chat_id: str, path: Path) -> None:
+        image_key = self.upload_image(path)
+        payload = {
+            "receive_id": chat_id,
+            "msg_type": "image",
+            "content": json.dumps({"image_key": image_key}, ensure_ascii=False),
+        }
+        response = requests.post(
+            f"{FEISHU_BASE}/im/v1/messages?receive_id_type=chat_id",
+            headers=self._headers(),
+            json=payload,
+            timeout=15,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"send_image_to_chat failed: {data.get('msg')}")
 
 
 feishu_client = FeishuClient()

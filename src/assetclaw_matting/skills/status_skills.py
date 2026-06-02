@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import subprocess
 from io import StringIO
+from pathlib import Path
 from typing import Any
 
 
@@ -17,6 +18,13 @@ def comfyui_status() -> dict[str, Any]:
         "url": settings.comfyui_url,
         "workflow_path": str(settings.comfyui_workflow_path),
         "workflow_exists": settings.comfyui_workflow_path.exists(),
+        "aki_root": str(settings.comfyui_aki_root),
+        "aki_root_exists": settings.comfyui_aki_root.exists(),
+        "comfyui_dir": str(settings.comfyui_dir),
+        "comfyui_dir_exists": settings.comfyui_dir.exists(),
+        "comfyui_python_dir": str(settings.comfyui_python_dir),
+        "comfyui_python_dir_exists": settings.comfyui_python_dir.exists(),
+        "comfyui_version": _read_comfyui_version(settings.comfyui_dir),
     }
     if settings.comfyui_fake_mode:
         result.update({"reachable": False, "mode_note": "fake mode enabled; GPU/ComfyUI is not used"})
@@ -26,6 +34,10 @@ def comfyui_status() -> dict[str, Any]:
         result.update({"reachable": True, "system_stats": stats})
     except Exception as exc:
         result.update({"reachable": False, "error": str(exc)})
+    try:
+        result["processes"] = process_status(["ComfyUI", "python", "绘世"])
+    except Exception as exc:
+        result["processes"] = {"ok": False, "error": str(exc)}
     return result
 
 
@@ -96,3 +108,20 @@ def _to_number(value: str) -> float | int | str:
     except ValueError:
         return value
     return int(number) if number.is_integer() else number
+
+
+def _read_comfyui_version(comfyui_dir: Path) -> str:
+    version_file = comfyui_dir / "comfyui_version.py"
+    if not version_file.exists():
+        return ""
+    try:
+        text = version_file.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+    for line in text.splitlines():
+        if "__version__" not in line:
+            continue
+        parts = line.split("=", 1)
+        if len(parts) == 2:
+            return parts[1].strip().strip('"').strip("'")
+    return ""

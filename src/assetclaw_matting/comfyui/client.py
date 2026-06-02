@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from requests import HTTPError
 
 from assetclaw_matting.config import settings
 from assetclaw_matting.comfyui.workflow_patch import patch_load_image
@@ -27,6 +28,26 @@ class ComfyUIClient:
 
     def check_health(self) -> dict[str, Any]:
         resp = requests.get(f"{self._base}/system_stats", timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_queue(self) -> dict[str, Any]:
+        resp = requests.get(f"{self._base}/queue", timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    def interrupt(self) -> None:
+        resp = requests.post(f"{self._base}/interrupt", timeout=10)
+        resp.raise_for_status()
+
+    def delete_from_queue(self, prompt_ids: list[str]) -> None:
+        if not prompt_ids:
+            return
+        resp = requests.post(f"{self._base}/queue", json={"delete": prompt_ids}, timeout=10)
+        resp.raise_for_status()
+
+    def get_object_info(self) -> dict[str, Any]:
+        resp = requests.get(f"{self._base}/object_info", timeout=20)
         resp.raise_for_status()
         return resp.json()
 
@@ -50,13 +71,18 @@ class ComfyUIClient:
 
     # ── Prompt ────────────────────────────────────────────────────────────────
 
-    def submit_prompt(self, workflow: dict[str, Any]) -> str:
+    def submit_prompt(self, workflow: dict[str, Any], client_id: str | None = None) -> str:
+        payload: dict[str, Any] = {"prompt": workflow}
+        if client_id:
+            payload["client_id"] = client_id
         resp = requests.post(
             f"{self._base}/prompt",
-            json={"prompt": workflow},
+            json=payload,
             timeout=30,
         )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            detail = resp.text[:2000] if resp.text else resp.reason
+            raise HTTPError(f"{resp.status_code} ComfyUI /prompt failed: {detail}", response=resp)
         data = resp.json()
         prompt_id = data.get("prompt_id")
         if not prompt_id:
@@ -68,6 +94,11 @@ class ComfyUIClient:
 
     def get_history(self, prompt_id: str) -> dict[str, Any]:
         resp = requests.get(f"{self._base}/history/{prompt_id}", timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_all_history(self, max_items: int = 20) -> dict[str, Any]:
+        resp = requests.get(f"{self._base}/history", params={"max_items": max_items}, timeout=15)
         resp.raise_for_status()
         return resp.json()
 

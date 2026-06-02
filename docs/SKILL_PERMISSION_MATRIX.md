@@ -13,7 +13,7 @@
 
 ## 允许/禁止路径
 
-- **允许根路径**：`ALLOWED_ROOTS`（默认 `D:\`、`E:\`、`F:\`）
+- **允许根路径**：`ALLOWED_ROOTS`（默认 `D:\`、`E:\`、`F:\`、`Z:\`、`\\audioshare.lilith.com\AIart\公共机共享\抠图`）
 - **禁止根路径**：`C:\`
 - **永久禁止关键词**：`.env`、`.ssh`、`AppData`、`Windows`、`Program Files`、`ProgramData`、`$Recycle.Bin`、`System Volume Information`
 
@@ -57,7 +57,7 @@
 | `file.duplicate_same_dir` | file | write_safe | Yes | No | No | 在原目录复制一份 |
 | `file.move` | file | write_caution | Yes | No | Yes | 移动/重命名文件 |
 | `file.mkdir` | file | write_safe | Yes | No | No | 创建目录 |
-| `file.zip_paths` | file | write_caution | Yes | No | Yes | 打包 zip |
+| `file.zip_paths` | file | write_caution | Yes | No | No | 打包 zip |
 | `file.read_text` | file | readonly | Yes | No | No | 读取小文本文件 |
 | `file.write_text` | file | write_safe | Yes | No | No | 写入文本文件 |
 | `file.append_text` | file | write_safe | Yes | No | No | 追加文本 |
@@ -70,10 +70,17 @@
 | `file.rename_many` | file | write_caution | Yes | No | Yes | 按明确映射批量重命名 |
 | `file.rename_sequence` | file | write_caution | Yes | No | Yes | 按顺序批量重命名文件 |
 | `file.unzip` | file | write_caution | Yes | No | Yes | 解压 zip |
+| `file.search_text` | file | readonly | Yes | No | No | 搜索允许目录内文本内容 |
+| `file.preview` | file | readonly | Yes | No | No | 预览文本或二进制文件头 |
+| `file.count` | file | readonly | Yes | No | No | 统计目录文件类型 |
+| `file.manifest` | file | write_safe | Yes | No | No | 导出目录文件清单 |
+| `archive.list` | archive | readonly | Yes | No | No | 查看 zip 内容，不解压 |
+| `json.query` | file | readonly | Yes | No | No | 查询 JSON 内容 |
+| `csv.summary` | file | readonly | Yes | No | No | 预览 CSV/TSV 列和样例行 |
 | `file.delete` | file | danger_confirm | Yes | No | Yes | 删除文件/目录 |
 | `file.empty_dir` | file | danger_confirm | Yes | No | Yes | 清空目录 |
 
-**Allowed roots**：`ALLOWED_ROOTS=D:;E:;F:`  
+**Allowed roots**：`ALLOWED_ROOTS=D:;E:;F:;Z:;\\audioshare.lilith.com\AIart\公共机共享\抠图`  
 **Denied patterns**：`.env`, `.ssh`, `AppData`, `Windows`, `Program Files`, `ProgramData`, `$Recycle.Bin`, `System Volume Information`
 
 **自然语言示例**：
@@ -116,10 +123,16 @@ E:\assetclaw-matting-bot\README.md 是否存在
 | `image.list` | image | readonly | Yes | No | No | 列图片文件 |
 | `image.info` | image | readonly | Yes | No | No | 查看图片尺寸、格式、模式 |
 | `image.batch_info` | image | readonly | Yes | No | No | 批量图片元信息 |
+| `image.ocr` | image | readonly | Yes | No | No | 提取图片中文字 |
 | `image.convert_format` | image | write_safe | Yes | No | No | 图片格式转换 |
 | `image.resize` | image | write_safe | Yes | No | No | 图片缩放 |
 | `feishu.send_file` | feishu | egress_caution | Yes | No | No | 上传允许路径内的本地文件并发送到当前飞书会话 |
 | `feishu.send_file_by_name` | feishu | egress_caution | Yes | No | No | 按文件名或省略名查找并发送到当前飞书会话 |
+| `feishu.send_image` | feishu | egress_caution | Yes | No | No | 上传允许路径内的本地图片并以图片形式发送 |
+| `feishu.send_image_by_name` | feishu | egress_caution | Yes | No | No | 按文件名查找图片并以图片形式发送 |
+| `feishu.zip_and_send` | feishu | egress_caution | Yes | No | No | 打包允许路径内的文件/目录并发送到当前飞书会话 |
+| `translate.text` | translate | readonly | Yes | No | No | 翻译文本，返回自然语言译文 |
+| `translate.image_text` | translate | readonly | Yes | No | No | 识别图片中文字并翻译 |
 
 **自然语言示例**：
 ```
@@ -127,6 +140,7 @@ E:\assetclaw-matting-bot\README.md 是否存在
 查看 E:\a.png 的图片尺寸
 把 E:\assetclaw-matting-bot\README.md 通过飞书发给我
 把 E 盘里 img_v3_02125_53d2b164...608g.png 发给我
+把共享盘 input 文件夹压缩成 zip 并发送给我
 ```
 
 ---
@@ -160,6 +174,9 @@ E:\assetclaw-matting-bot\README.md 是否存在
 | `matting.batch_pause` | matting | write_safe | Yes | Yes | No | 暂停批次 |
 | `matting.batch_resume` | matting | write_safe | Yes | Yes | No | 恢复批次 |
 | `matting.batch_cancel` | matting | write_safe | Yes | Yes | No | 取消批次 |
+| `matting.shared_start` | matting | write_safe | Yes | No | No | 共享盘输入同步到本地，跑 ComfyUI，再同步输出回共享盘 |
+| `matting.shared_status` | matting | readonly | Yes | No | No | 查询共享盘抠图任务进度、目录、ETA、GPU |
+| `matting.shared_sync_outputs` | matting | write_safe | Yes | No | No | 手动同步本地输出回共享盘 |
 
 **自然语言示例**：
 ```
@@ -177,6 +194,20 @@ E:\assetclaw-matting-bot\README.md 是否存在
 |-------|--------|------|------|------|---------|------|
 | `queue.status` | queue | readonly | Yes (stub) | Yes | No | 队列状态 stub |
 | `comfyui.status` | comfyui | readonly | Yes | No | No | ComfyUI fake/real mode、URL、工作流、连通性 |
+| `comfyui.workflows` | comfyui | readonly | Yes | No | No | 列出 workflow json |
+| `comfyui.workflow_info` | comfyui | readonly | Yes | No | No | 查看 workflow 节点和输入输出节点 |
+| `comfyui.workflow_select` | comfyui | write_safe | Yes | No | No | 为当前对话选择默认 workflow |
+| `comfyui.run_preview` | comfyui | readonly | Yes | No | No | 启动前预览 workflow、输入输出目录、图片总数和关键节点 |
+| `comfyui.queue_status` | comfyui | readonly | Yes | No | No | 查询 ComfyUI 原生 `/queue` |
+| `comfyui.run_start` | comfyui | write_safe | Yes | No | Yes | 指定 workflow/input/output 递归启动图片管线并推送进度 |
+| `comfyui.run_status` | comfyui | readonly | Yes | No | No | 查看管线进度、ETA、输入输出、GPU |
+| `comfyui.run_list` | comfyui | readonly | Yes | No | No | 查看当前活跃任务；可按参数包含历史任务 |
+| `comfyui.run_update` | comfyui | write_safe | Yes | No | No | 修改排队或暂停任务的 workflow/input/output |
+| `comfyui.run_pause` | comfyui | write_safe | Yes | No | No | 暂停后续图片提交 |
+| `comfyui.run_resume` | comfyui | write_safe | Yes | No | No | 继续暂停的任务 |
+| `comfyui.run_cancel` | comfyui | write_caution | Yes | No | Yes | 终止任务并尝试中断 ComfyUI 队列 |
+| `comfyui.run_delete` | comfyui | write_safe | Yes | No | No | 删除/归档已结束、失败、已取消的任务记录 |
+| `comfyui.run_sync_outputs` | comfyui | write_safe | Yes | No | No | 下载完成输出到指定输出目录 |
 | `system.gpu_status` | system | readonly | Yes | No | No | nvidia-smi GPU 显存/利用率/温度/功耗 |
 | `system.process_status` | system | readonly | Yes | No | No | 查询匹配进程状态 |
 

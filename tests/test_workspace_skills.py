@@ -33,7 +33,8 @@ def test_workspace_roots_include_def_not_c() -> None:
     assert "D:" in root_text
     assert "E:" in root_text
     assert "F:" in root_text
-    assert "C:" not in root_text
+    assert "C:\\Windows" not in root_text
+    assert "C:\\Users\\lilithgames\\Downloads\\ComfyUI-aki-v3" in root_text
 
 
 def test_text_write_read_append_hash_and_batch_info() -> None:

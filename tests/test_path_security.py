@@ -14,6 +14,11 @@ def test_work_drives_allowed(path: str) -> None:
     assert str(validate_path(path)).startswith(path[:2])
 
 
+def test_z_shared_drive_allowed() -> None:
+    resolved = str(validate_path("Z:\\公共机共享\\抠图")).replace("/", "\\")
+    assert resolved.startswith("Z:") or resolved.startswith("\\\\audioshare.lilith.com\\")
+
+
 def test_c_drive_denied() -> None:
     with pytest.raises(PermissionError):
         validate_path("C:\\")
