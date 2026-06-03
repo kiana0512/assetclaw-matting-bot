@@ -208,6 +208,24 @@ E:\assetclaw-matting-bot\README.md 是否存在
 | `comfyui.run_cancel` | comfyui | write_caution | Yes | No | Yes | 终止任务并尝试中断 ComfyUI 队列 |
 | `comfyui.run_delete` | comfyui | write_safe | Yes | No | No | 删除/归档已结束、失败、已取消的任务记录 |
 | `comfyui.run_sync_outputs` | comfyui | write_safe | Yes | No | No | 下载完成输出到指定输出目录 |
+| `cherry.info` | cherry | readonly | Yes | No | No | 查看 Cherry 工具状态和默认参数 |
+| `cherry.run_preview` | cherry | readonly | Yes | No | No | 预览 Cherry 帧序列处理任务 |
+| `cherry.run_start` | cherry | write_safe | Yes | No | Yes | 启动 Cherry 平滑/缩放/锐化任务，同结构输出 |
+| `cherry.run_status` | cherry | readonly | Yes | No | No | 查看 Cherry 任务进度、ETA、GPU |
+| `cherry.run_list` | cherry | readonly | Yes | No | No | 列出 Cherry 任务 |
+| `cherry.run_cancel` | cherry | write_safe | Yes | No | No | 终止 Cherry 任务 |
+| `cherry.run_delete` | cherry | write_safe | Yes | No | No | 删除/归档 Cherry 任务记录 |
+| `frame.info` | frame | readonly | Yes | No | No | 查看飞书抽帧工具配置 |
+| `frame.run_preview` | frame | readonly | Yes | No | No | 预览飞书表格视频下载和抽帧任务 |
+| `frame.run_start` | frame | write_safe | Yes | No | Yes | 下载飞书视频附件并抽 PNG 序列帧 |
+| `frame.run_status` | frame | readonly | Yes | No | No | 查看抽帧任务进度 |
+| `frame.run_list` | frame | readonly | Yes | No | No | 列出抽帧任务 |
+| `frame.run_cancel` | frame | write_safe | Yes | No | No | 终止抽帧任务 |
+| `pipeline.run_preview` | pipeline | readonly | Yes | No | No | 预览完整动画自动化流程 |
+| `pipeline.run_start` | pipeline | write_safe | Yes | No | Yes | 执行抽帧 -> 抠图 -> 平滑三步流程 |
+| `pipeline.run_status` | pipeline | readonly | Yes | No | No | 查看完整流程和子任务进度 |
+| `pipeline.run_list` | pipeline | readonly | Yes | No | No | 列出完整流程任务 |
+| `pipeline.run_cancel` | pipeline | write_safe | Yes | No | No | 终止完整流程和当前子任务 |
 | `system.gpu_status` | system | readonly | Yes | No | No | nvidia-smi GPU 显存/利用率/温度/功耗 |
 | `system.process_status` | system | readonly | Yes | No | No | 查询匹配进程状态 |
 

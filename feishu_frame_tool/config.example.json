@@ -1,0 +1,35 @@
+{
+  "feishu": {
+    "app_id": "",
+    "app_secret": "",
+    "table_url": "",
+    "app_token": "CibAbxkphagGKns1yOJcaGK7nph",
+    "table_id": "tblr2d000xleHj9p",
+    "view_id": "vewVr7d7AI",
+    "base_domain": "https://open.feishu.cn"
+  },
+  "fields": {
+    "animation": "动画",
+    "progress": "进度",
+    "role": "角色",
+    "parent": "父記錄"
+  },
+  "status": {
+    "to_extract": "待抽帧",
+    "extracting": "抽帧中",
+    "keyframing": "K帧中"
+  },
+  "paths": {
+    "download_dir": "./downloads",
+    "export_dir": "./exports"
+  },
+  "framepacker": {
+    "fps": 24,
+    "max_frames": 24
+  },
+  "dedup": {
+    "enabled": true,
+    "diff_threshold": 2.5,
+    "renumber": true
+  }
+}

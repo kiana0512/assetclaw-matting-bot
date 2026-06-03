@@ -185,6 +185,64 @@ def format_skill_results(results: list[dict[str, Any]], max_items: int = 8) -> s
         elif skill == "comfyui.run_sync_outputs":
             lines.append(f"已同步输出：{payload.get('count', 0)} 个文件")
             lines.append(str(payload.get("output_dir") or ""))
+        elif skill == "cherry.info":
+            lines.append("Cherry 帧序列工具：")
+            lines.append(f"路径：{payload.get('source_path')}")
+            lines.append(f"状态：{'可用' if payload.get('exists') else '未找到'}")
+            lines.append("处理：" + "、".join(payload.get("steps") or []))
+        elif skill == "cherry.run_preview":
+            lines.extend(_format_cherry_run_preview(payload, max_items))
+        elif skill == "cherry.run_start":
+            lines.append(f"Cherry 任务已启动：{payload.get('run_id')}")
+            lines.append(f"输入：{payload.get('input_dir')}")
+            lines.append(f"输出：{payload.get('output_dir')}")
+            lines.append(f"总数：{payload.get('total')} 张，序列：{payload.get('sequence_count')} 组")
+        elif skill == "cherry.run_status":
+            lines.extend(_format_cherry_run_status(payload))
+        elif skill == "cherry.run_list":
+            lines.extend(_format_cherry_run_list(payload, max_items))
+        elif skill in {"cherry.run_cancel", "cherry.run_delete"}:
+            lines.append(f"{payload.get('run_id')}：{payload.get('status')}")
+        elif skill == "frame.info":
+            lines.append("飞书抽帧工具：")
+            lines.append(f"路径：{payload.get('tool_dir')}")
+            lines.append(f"状态：{'可用' if payload.get('exists') else '未找到'}")
+            lines.append(f"fps：{payload.get('fps')}，最多帧数：{payload.get('max_frames') or '不限'}，相似阈值：{payload.get('diff_threshold')}")
+            lines.append(f"下载：{payload.get('download_dir')}")
+            lines.append(f"导出：{payload.get('export_dir')}")
+            lines.append("范围：所有带动画视频附件的记录")
+        elif skill == "frame.run_preview":
+            lines.append("抽帧任务预览：")
+            if payload.get("workspace_root"):
+                lines.append(f"工作区：{payload.get('workspace_root')}")
+            lines.append(f"下载目录：{payload.get('download_dir')}")
+            lines.append(f"抽帧输出：{payload.get('export_dir')}")
+            lines.append(f"fps：{payload.get('fps')}，最多帧数：{payload.get('max_frames') or '不限'}，相似阈值：{payload.get('diff_threshold')}")
+            lines.append("范围：所有带动画视频附件的记录")
+        elif skill == "frame.run_start":
+            lines.append(f"抽帧任务已启动：{payload.get('run_id')}")
+            lines.append(f"下载：{payload.get('download_dir')}")
+            lines.append(f"导出：{payload.get('export_dir')}")
+        elif skill == "frame.run_status":
+            lines.extend(_format_frame_status(payload))
+        elif skill == "frame.run_list":
+            lines.extend(_format_frame_list(payload, max_items))
+        elif skill == "frame.run_cancel":
+            lines.append(f"{payload.get('run_id')}：{payload.get('status')}")
+        elif skill == "pipeline.run_preview":
+            lines.extend(_format_pipeline_preview(payload))
+        elif skill == "pipeline.run_start":
+            lines.append(f"动画自动化流程已启动：{payload.get('run_id')}")
+            lines.append("步骤：抽帧 -> ComfyUI 抠图 -> Cherry 平滑")
+            if payload.get("workspace_root"):
+                lines.append(f"工作区：{payload.get('workspace_root')}")
+            lines.append(f"最终输出：{payload.get('smooth_output_dir')}")
+        elif skill == "pipeline.run_status":
+            lines.extend(_format_pipeline_status(payload))
+        elif skill == "pipeline.run_list":
+            lines.extend(_format_pipeline_list(payload, max_items))
+        elif skill == "pipeline.run_cancel":
+            lines.append(f"{payload.get('run_id')}：{payload.get('status')}")
         elif skill == "system.gpu_status":
             lines.extend(_format_gpu_status(payload))
         elif skill == "system.process_status":
@@ -315,6 +373,9 @@ def _format_comfyui_run_status(payload: dict[str, Any]) -> list[str]:
     ]
     if payload.get("last_completed"):
         lines.append(f"刚完成：{payload.get('last_completed')}")
+    detail = payload.get("last_completed_detail") or {}
+    if detail:
+        lines.append(f"刚完成明细：{detail.get('role')}/{detail.get('emotion')}/{detail.get('frame')}")
     eta = payload.get("eta_seconds")
     lines.append(f"预计剩余：{_format_duration(eta) if isinstance(eta, int) else '暂无法估算'}")
     lines.append(f"ComfyUI 队列：运行 {payload.get('queue_running', 0)}，等待 {payload.get('queue_pending', 0)}")
@@ -365,6 +426,161 @@ def _format_shared_matting(payload: dict[str, Any]) -> list[str]:
             lines.extend(_format_gpu_status(gpu))
     if payload.get("error"):
         lines.append(f"错误：{payload.get('error')}")
+    return lines
+
+
+def _format_cherry_run_preview(payload: dict[str, Any], max_items: int) -> list[str]:
+    options = payload.get("options") or {}
+    steps = []
+    if options.get("use_smooth"):
+        steps.append(f"平滑 窗口{options.get('smooth_window')} 强度{options.get('smooth_sigma')}")
+    if options.get("use_resize"):
+        steps.append(f"缩放 {options.get('resize_width')}x{options.get('resize_height')}")
+    if options.get("use_sharpen"):
+        steps.append(f"锐化 强度{options.get('sharpen_amount')}")
+    lines = [
+        "Cherry 任务预览：",
+        f"输入：{payload.get('input_dir')}",
+        f"输出：{payload.get('output_dir')}",
+        f"图片：{payload.get('total', 0)} 张，序列：{payload.get('sequence_count', 0)} 组",
+        "处理：" + ("、".join(steps) if steps else "无"),
+    ]
+    samples = payload.get("sample_inputs") or []
+    if samples:
+        lines.append("示例：")
+        for item in samples[:max_items]:
+            lines.append(f"- {item}")
+    return lines
+
+
+def _format_cherry_run_status(payload: dict[str, Any]) -> list[str]:
+    lines = [
+        f"Cherry 任务：{payload.get('run_id')}",
+        f"状态：{payload.get('status')}",
+        f"进度：{payload.get('completed', 0)}/{payload.get('total', 0)} ({payload.get('progress_percent', 0)}%)",
+        f"失败：{payload.get('failed', 0)}，等待/运行：{payload.get('running_or_pending', 0)}",
+        f"输入：{payload.get('input_dir')}",
+        f"输出：{payload.get('output_dir')}",
+    ]
+    if payload.get("last_completed"):
+        lines.append(f"刚完成：{payload.get('last_completed')}")
+    detail = payload.get("last_completed_detail") or {}
+    if detail:
+        lines.append(f"刚完成明细：{detail.get('role')}/{detail.get('emotion')}/{detail.get('frame')}")
+    eta = payload.get("eta_seconds")
+    lines.append(f"预计剩余：{_format_duration(eta) if isinstance(eta, int) else '暂无法估算'}")
+    if payload.get("error"):
+        lines.append(f"错误：{payload.get('error')}")
+    gpu = payload.get("gpu") or {}
+    if gpu:
+        lines.extend(_format_gpu_status(gpu))
+    return lines
+
+
+def _format_cherry_run_list(payload: dict[str, Any], max_items: int) -> list[str]:
+    items = payload.get("items") or []
+    if not items:
+        return ["当前没有 Cherry 任务。"]
+    lines = [f"Cherry 任务：{payload.get('count', len(items))} 个"]
+    for item in items[:max_items]:
+        lines.append(
+            f"- {item.get('run_id')} {item.get('status')} "
+            f"{item.get('completed', 0)}/{item.get('total', 0)}"
+        )
+        lines.append(f"  输入：{item.get('input_dir')}")
+        lines.append(f"  输出：{item.get('output_dir')}")
+    return lines
+
+
+def _format_frame_status(payload: dict[str, Any]) -> list[str]:
+    lines = [
+        f"抽帧任务：{payload.get('run_id')}",
+        f"状态：{payload.get('status')}",
+        f"记录：{payload.get('processed_records', 0)}/{payload.get('total_records', 0)} ({payload.get('progress_percent', 0)}%)",
+        f"下载：{payload.get('download_dir')}",
+        f"导出：{payload.get('export_dir')}",
+    ]
+    if payload.get("error"):
+        lines.append(f"错误：{payload.get('error')}")
+    current = payload.get("current_item") or {}
+    if current:
+        lines.append(f"当前记录：{current.get('role')}/{current.get('emotion')}")
+    if payload.get("last_log"):
+        lines.append(f"最近日志：{payload.get('last_log')}")
+    if payload.get("manifest_count"):
+        lines.append(f"已登记视频：{payload.get('manifest_count')} 条")
+    return lines
+
+
+def _format_frame_list(payload: dict[str, Any], max_items: int) -> list[str]:
+    items = payload.get("items") or []
+    if not items:
+        return ["当前没有抽帧任务。"]
+    lines = [f"抽帧任务：{payload.get('count', len(items))} 个"]
+    for item in items[:max_items]:
+        lines.append(f"- {item.get('run_id')} {item.get('status')} {item.get('processed_records', 0)}/{item.get('total_records', 0)}")
+        lines.append(f"  导出：{item.get('export_dir')}")
+    return lines
+
+
+def _format_pipeline_preview(payload: dict[str, Any]) -> list[str]:
+    lines = [
+        "动画自动化流程预览：",
+        "步骤：抽帧 -> ComfyUI 抠图 -> Cherry 平滑",
+    ]
+    if payload.get("workspace_root"):
+        lines.append(f"工作区：{payload.get('workspace_root')}")
+    lines.extend([
+        f"视频下载：{payload.get('input_dir')}",
+        f"抽帧输出：{payload.get('frame_output_dir')}",
+        f"抠图输出：{payload.get('matte_output_dir')}",
+        f"平滑输出：{payload.get('smooth_output_dir')}",
+    ])
+    return lines
+
+
+def _format_pipeline_status(payload: dict[str, Any]) -> list[str]:
+    lines = [
+        f"动画自动化流程：{payload.get('run_id')}",
+        f"状态：{payload.get('status')}，当前步骤：{payload.get('current_step')}",
+        f"工作区：{payload.get('workspace_root')}" if payload.get("workspace_root") else "",
+        f"抽帧：{payload.get('frame_run_id') or '未开始'}",
+        f"抠图：{payload.get('comfyui_run_id') or '未开始'}",
+        f"平滑：{payload.get('cherry_run_id') or '未开始'}",
+    ]
+    frame = payload.get("frame") or {}
+    if frame:
+        lines.append(f"抽帧进度：{frame.get('processed_records', 0)}/{frame.get('total_records', 0)} {frame.get('status')}")
+        current = frame.get("current_item") or {}
+        if current:
+            lines.append(f"抽帧当前：{current.get('role')}/{current.get('emotion')}")
+    comfy = payload.get("comfyui") or {}
+    if comfy:
+        lines.append(f"抠图进度：{comfy.get('completed', 0)}/{comfy.get('total', 0)} {comfy.get('status')}")
+        detail = comfy.get("last_completed_detail") or {}
+        if detail:
+            lines.append(f"抠图刚完成：{detail.get('role')}/{detail.get('emotion')}/{detail.get('frame')}")
+    cherry = payload.get("cherry") or {}
+    if cherry:
+        lines.append(f"平滑进度：{cherry.get('completed', 0)}/{cherry.get('total', 0)} {cherry.get('status')}")
+        detail = cherry.get("last_completed_detail") or {}
+        if detail:
+            lines.append(f"平滑刚完成：{detail.get('role')}/{detail.get('emotion')}/{detail.get('frame')}")
+    for line in payload.get("detail_lines") or []:
+        lines.append(str(line))
+    if payload.get("error"):
+        lines.append(f"错误：{payload.get('error')}")
+    return lines
+
+
+def _format_pipeline_list(payload: dict[str, Any], max_items: int) -> list[str]:
+    items = payload.get("items") or []
+    if not items:
+        return ["当前没有动画自动化流程任务。"]
+    lines = [f"动画自动化流程：{payload.get('count', len(items))} 个"]
+    for item in items[:max_items]:
+        lines.append(f"- {item.get('run_id')} {item.get('status')} 当前：{item.get('current_step')}")
+        lines.append(f"  输出：{item.get('smooth_output_dir')}")
     return lines
 
 

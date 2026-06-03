@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,7 @@ import requests
 from requests import HTTPError
 
 from assetclaw_matting.config import settings
-from assetclaw_matting.comfyui.workflow_patch import patch_load_image
+from assetclaw_matting.comfyui.workflow_patch import patch_load_image, prepare_api_prompt_for_run
 from assetclaw_matting.comfyui.output_resolver import resolve_first_output
 
 log = logging.getLogger(__name__)
@@ -133,6 +134,12 @@ class ComfyUIClient:
     ) -> None:
         save_path = Path(save_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path = self.resolve_local_output_path(filename, subfolder, output_type)
+        if source_path and source_path.exists():
+            shutil.copy2(source_path, save_path)
+            log.debug("Copied ComfyUI local output %s -> %s", source_path, save_path)
+            return
+
         resp = requests.get(
             f"{self._base}/view",
             params={"filename": filename, "subfolder": subfolder, "type": output_type},
@@ -144,6 +151,28 @@ class ComfyUIClient:
             for chunk in resp.iter_content(chunk_size=65536):
                 fh.write(chunk)
         log.debug("Downloaded ComfyUI output → %s", save_path)
+
+    def resolve_local_output_path(
+        self,
+        filename: str,
+        subfolder: str = "",
+        output_type: str = "output",
+    ) -> Path | None:
+        base_name = {
+            "output": "output",
+            "input": "input",
+            "temp": "temp",
+        }.get(str(output_type or "output").lower())
+        if not base_name:
+            return None
+        try:
+            parts = [part for part in Path(subfolder or "").parts if part not in {"", "."}]
+            relative = Path(*parts, filename) if parts else Path(filename)
+            if relative.is_absolute() or any(part == ".." for part in relative.parts):
+                return None
+            return settings.comfyui_dir / base_name / relative
+        except Exception:
+            return None
 
     # ── High-level run ────────────────────────────────────────────────────────
 
@@ -208,7 +237,7 @@ class ComfyUIClient:
         workflow = patch_load_image(copy.deepcopy(workflow), uploaded_filename)
 
         # 4. Submit
-        prompt_id = self.submit_prompt(workflow)
+        prompt_id = self.submit_prompt(prepare_api_prompt_for_run(workflow))
         log.info("ComfyUI prompt submitted: %s", prompt_id)
 
         # 5. Wait
@@ -216,7 +245,7 @@ class ComfyUIClient:
 
         # 6. Save history for debugging
         if task_id:
-            debug_path = settings.debug_dir / f"history_{task_id}.json"
+            debug_path = settings.storage_dir / "debug" / f"history_{task_id}.json"
             debug_path.parent.mkdir(parents=True, exist_ok=True)
             debug_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
 
@@ -224,9 +253,6 @@ class ComfyUIClient:
         try:
             output_info = resolve_first_output(history, prompt_id)
         except ValueError:
-            if task_id:
-                from assetclaw_matting.services.file_store import save_debug_history
-                save_debug_history(task_id, json.dumps(history, indent=2))
             raise
 
         self.download_output(

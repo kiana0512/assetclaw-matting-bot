@@ -142,6 +142,84 @@ class LocalCommandBrain(BrainProvider):
             return [ToolCall(skill="file.list_allowed", arguments={"path": settings.shared_matting_root})]
         if any(kw in lowered for kw in ("nvidia-smi", "gpu")) or any(kw in text for kw in ("显卡", "显存", "gpu", "GPU")):
             return [ToolCall(skill="system.gpu_status", arguments={})]
+        is_pipeline = "自动化流程" in text or "动画流程" in text or "完整流程" in text or "三步流程" in text
+        if is_pipeline and any(kw in text for kw in ("哪些任务", "任务列表", "当前任务", "有哪些任务")):
+            return [ToolCall(skill="pipeline.run_list", arguments={"include_finished": any(kw in text for kw in ("全部", "历史", "已结束"))})]
+        if is_pipeline and any(kw in text for kw in ("终止", "取消", "停止")):
+            match = re.search(r"(PIPE_[A-Fa-f0-9]{12})", text)
+            return [ToolCall(skill="pipeline.run_cancel", arguments={"run_id": match.group(1) if match else None})]
+        if is_pipeline and any(kw in text for kw in ("进度", "状态", "哪里了", "跑到")):
+            match = re.search(r"(PIPE_[A-Fa-f0-9]{12})", text)
+            return [ToolCall(skill="pipeline.run_status", arguments={"run_id": match.group(1) if match else None})]
+        if is_pipeline and any(kw in text for kw in ("预览", "看看", "检查")):
+            paths = re.findall(r"([A-Za-z]:\\[^\s，。]*)", text)
+            args = _pipeline_args_from_paths(paths)
+            return [ToolCall(skill="pipeline.run_preview", arguments=args)]
+        if is_pipeline and any(kw in text for kw in ("启动", "开始", "执行", "跑")):
+            paths = re.findall(r"([A-Za-z]:\\[^\s，。]*)", text)
+            args = _pipeline_args_from_paths(paths)
+            return [ToolCall(skill="pipeline.run_start", arguments=args)]
+        is_frame = "抽帧" in text or "序列帧" in text or "飞书表格" in text and "视频" in text
+        if is_frame and any(kw in text for kw in ("工具", "配置", "状态")) and not any(kw in text for kw in ("任务", "进度")):
+            return [ToolCall(skill="frame.info", arguments={})]
+        if is_frame and any(kw in text for kw in ("哪些任务", "任务列表", "当前任务", "有哪些任务")):
+            return [ToolCall(skill="frame.run_list", arguments={"include_finished": any(kw in text for kw in ("全部", "历史", "已结束"))})]
+        if is_frame and any(kw in text for kw in ("终止", "取消", "停止")):
+            match = re.search(r"(FRAME_[A-Fa-f0-9]{12})", text)
+            return [ToolCall(skill="frame.run_cancel", arguments={"run_id": match.group(1) if match else None})]
+        if is_frame and any(kw in text for kw in ("进度", "状态", "哪里了", "跑到")):
+            match = re.search(r"(FRAME_[A-Fa-f0-9]{12})", text)
+            return [ToolCall(skill="frame.run_status", arguments={"run_id": match.group(1) if match else None})]
+        if is_frame and any(kw in text for kw in ("预览", "检查")):
+            paths = re.findall(r"([A-Za-z]:\\[^\s，。]*)", text)
+            args = _frame_args_from_paths(paths, text)
+            return [ToolCall(skill="frame.run_preview", arguments=args)]
+        if is_frame and any(kw in text for kw in ("启动", "开始", "执行", "跑")):
+            paths = re.findall(r"([A-Za-z]:\\[^\s，。]*)", text)
+            args = _frame_args_from_paths(paths, text)
+            return [ToolCall(skill="frame.run_start", arguments=args)]
+        is_cherry = "cherry" in lowered or "帧序列" in text or "序列处理" in text or "平滑任务" in text or "平滑处理" in text
+        if is_cherry and any(kw in text for kw in ("状态", "默认参数", "工具", "可用")) and not any(kw in text for kw in ("进度", "任务")):
+            return [ToolCall(skill="cherry.info", arguments={})]
+        if is_cherry and any(kw in text for kw in ("哪些任务", "任务列表", "当前任务", "现在有哪些任务", "有哪些任务", "还有任务")):
+            include_finished = any(kw in text for kw in ("最近", "历史", "已结束", "失败", "取消", "全部"))
+            return [ToolCall(skill="cherry.run_list", arguments={"include_archived": False, "include_finished": include_finished})]
+        if is_cherry and any(kw in text for kw in ("终止", "取消", "停止", "别跑了")):
+            match = re.search(r"(CHERRY_[A-Fa-f0-9]{12})", text)
+            return [ToolCall(skill="cherry.run_cancel", arguments={"run_id": match.group(1) if match else None})]
+        if is_cherry and any(kw in text for kw in ("删除", "清掉", "移除")):
+            match = re.search(r"(CHERRY_[A-Fa-f0-9]{12})", text)
+            return [ToolCall(skill="cherry.run_delete", arguments={"run_id": match.group(1) if match else None})]
+        if is_cherry and any(kw in text for kw in ("进度", "跑到", "状态", "哪里了", "做到哪里")):
+            match = re.search(r"(CHERRY_[A-Fa-f0-9]{12})", text)
+            return [ToolCall(skill="cherry.run_status", arguments={"run_id": match.group(1) if match else None})]
+        if is_cherry and any(kw in text for kw in ("预览", "检查", "确认一下", "看看任务")):
+            paths = re.findall(r"([A-Za-z]:\\[^\s，。]*)", text)
+            if paths:
+                return [
+                    ToolCall(
+                        skill="cherry.run_preview",
+                        arguments={
+                            "input_dir": paths[0],
+                            "output_dir": paths[1] if len(paths) >= 2 else "E:\\cherry_output",
+                            "recursive": True,
+                        },
+                    )
+                ]
+        if is_cherry and any(kw in text for kw in ("启动", "开始", "跑", "执行", "处理", "平滑", "锐化", "缩放")):
+            paths = re.findall(r"([A-Za-z]:\\[^\s，。]*)", text)
+            if paths:
+                return [
+                    ToolCall(
+                        skill="cherry.run_start",
+                        arguments={
+                            "input_dir": paths[0],
+                            "output_dir": paths[1] if len(paths) >= 2 else "E:\\cherry_output",
+                            "recursive": True,
+                            "notify_interval_seconds": 60,
+                        },
+                    )
+                ]
         if "comfyui" in lowered and any(kw in text for kw in ("状态", "在线", "进程", "使用情况")):
             return [ToolCall(skill="comfyui.status", arguments={})]
         if ("comfyui" in lowered or "抠图" in text or "平滑" in text) and any(
@@ -416,3 +494,30 @@ class LocalCommandBrain(BrainProvider):
                 path = match.group(1)
             return [ToolCall(skill="file.list_allowed", arguments={"path": path})]
         return []
+
+
+def _frame_args_from_paths(paths: list[str], text: str) -> dict:
+    args: dict = {}
+    if paths:
+        args["download_dir"] = paths[0]
+    if len(paths) >= 2:
+        args["export_dir"] = paths[1]
+    fps_match = re.search(r"fps\s*[=:：]?\s*(\d+)|(\d+)\s*帧", text, re.IGNORECASE)
+    if fps_match:
+        args["fps"] = int(fps_match.group(1) or fps_match.group(2))
+    threshold_match = re.search(r"(?:阈值|threshold|diff)[^\d]*(\d+(?:\.\d+)?)", text, re.IGNORECASE)
+    if threshold_match:
+        args["diff_threshold"] = float(threshold_match.group(1))
+    return args
+
+
+def _pipeline_args_from_paths(paths: list[str]) -> dict:
+    args: dict = {}
+    keys = ("input_dir", "frame_output_dir", "matte_output_dir", "smooth_output_dir")
+    dirs = [path for path in paths if not path.lower().endswith(".json")]
+    for key, path in zip(keys, dirs):
+        args[key] = path
+    workflow = next((path for path in paths if path.lower().endswith(".json")), None)
+    if workflow:
+        args["workflow_path"] = workflow
+    return args

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from assetclaw_matting.comfyui.output_resolver import resolve_first_output
-from assetclaw_matting.comfyui.workflow_patch import inspect_workflow, patch_load_image, patch_node_input, workflow_to_api_prompt
+from assetclaw_matting.comfyui.workflow_patch import inspect_workflow, patch_load_image, patch_node_input, prepare_api_prompt_for_run
 from assetclaw_matting.skills.media_skills import IMAGE_EXTS
 from assetclaw_matting.skills.security import validate_path
 
@@ -92,9 +92,10 @@ def run_start(
     output_dir: str = "",
     input_node_id: str | None = None,
     input_name: str = "image",
-    max_images: int = 200,
+    max_images: int = 10000,
     recursive: bool = True,
     preserve_structure: bool = True,
+    skip_existing: bool = False,
     notify_interval_seconds: int = 300,
 ) -> dict[str, Any]:
     from assetclaw_matting.config import settings
@@ -116,6 +117,8 @@ def run_start(
     files = _collect_images(src, recursive=recursive, max_images=max_images)
     if not files:
         raise ValueError("input_dir has no supported images")
+    if skip_existing:
+        files = [path for path in files if not _output_target(src, dst, path, preserve_structure).exists()]
 
     run_id = _run_id()
     created_at = _now()
@@ -126,6 +129,7 @@ def run_start(
         "input_name": input_name,
         "recursive": recursive,
         "preserve_structure": preserve_structure,
+        "skip_existing": skip_existing,
         "notify_interval_seconds": max(60, min(notify_interval_seconds, 3600)),
         "prompt_map": prompt_map,
         "chat_id": (ctx.get("chat_id") or "") if ctx.get("channel") == "feishu" else "",
@@ -134,7 +138,7 @@ def run_start(
     if not settings.comfyui_fake_mode:
         comfyui_client.check_health()
 
-    status = "RUNNING"
+    status = "DONE" if not files else "RUNNING"
     with get_connection() as conn:
         conn.execute(
             """
@@ -157,10 +161,11 @@ def run_start(
             ),
         )
 
-    if options.get("chat_id"):
+    if options.get("chat_id") and files:
         _notify(run_id, f"ComfyUI 批量任务已启动：{len(files)} 张\n输入：{src}\n输出：{dst}")
         _start_progress_monitor(run_id)
-    _start_run_worker(run_id)
+    if files:
+        _start_run_worker(run_id)
 
     return {
         "ok": True,
@@ -175,6 +180,7 @@ def run_start(
         "prompt_ids": [],
         "recursive": recursive,
         "preserve_structure": preserve_structure,
+        "skip_existing": skip_existing,
     }
 
 
@@ -247,6 +253,7 @@ def run_status(run_id: str | None = None, include_gpu: bool = True) -> dict[str,
         "queue_pending": len(queue.get("queue_pending") or []),
         "prompt_ids": prompt_ids[:20],
         "last_completed": _last_completed_name(prompt_map),
+        "last_completed_detail": _path_detail(_last_completed_rel_path(prompt_map)),
     }
     if include_gpu:
         result["gpu"] = gpu_status()
@@ -554,7 +561,7 @@ def _run_worker(run_id: str) -> None:
                         workflow = patch_node_input(workflow, str(options["input_node_id"]), str(options.get("input_name") or "image"), uploaded)
                     else:
                         workflow = patch_load_image(workflow, uploaded)
-                    prompt_id = comfyui_client.submit_prompt(workflow_to_api_prompt(workflow), client_id=run_id)
+                    prompt_id = comfyui_client.submit_prompt(prepare_api_prompt_for_run(workflow), client_id=run_id)
                     prompt_ids.append(prompt_id)
                     _save_run_progress(run_id, prompt_ids, options)
                     history = comfyui_client.wait_for_completion(prompt_id)
@@ -672,6 +679,9 @@ def _format_progress_notification(status: dict[str, Any]) -> str:
         lines.append(f"预计剩余：{_format_duration(eta)}")
     if status.get("last_completed"):
         lines.append(f"刚完成：{status.get('last_completed')}")
+    detail = status.get("last_completed_detail") or {}
+    if detail:
+        lines.append(f"角色/情绪/帧：{detail.get('role')}/{detail.get('emotion')}/{detail.get('frame')}")
     gpu = status.get("gpu") or {}
     gpus = gpu.get("gpus") or []
     if gpus:
@@ -825,6 +835,25 @@ def _fake_copy_image(src: Path, dst: Path) -> None:
 def _last_completed_name(prompt_map: list[dict[str, str]]) -> str:
     completed = [Path(str(item.get("src_path") or item.get("dst_path") or "")).name for item in prompt_map if Path(str(item.get("dst_path") or "")).exists()]
     return completed[-1] if completed else ""
+
+
+def _last_completed_rel_path(prompt_map: list[dict[str, str]]) -> str:
+    completed = [str(item.get("rel_path") or "") for item in prompt_map if Path(str(item.get("dst_path") or "")).exists()]
+    return completed[-1] if completed else ""
+
+
+def _path_detail(rel_path: str) -> dict[str, str]:
+    if not rel_path:
+        return {}
+    parts = [part for part in rel_path.replace("\\", "/").split("/") if part]
+    if len(parts) >= 4 and parts[-2].lower().startswith("video_"):
+        role = parts[-4]
+        emotion = parts[-3]
+    else:
+        role = parts[-3] if len(parts) >= 3 else (parts[-2] if len(parts) >= 2 else "")
+        emotion = parts[-2] if len(parts) >= 2 else ""
+    frame = parts[-1] if parts else ""
+    return {"role": role, "emotion": emotion, "frame": frame, "rel_path": rel_path}
 
 
 def _get_run(run_id: str | None) -> Any:

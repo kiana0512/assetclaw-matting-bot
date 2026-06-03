@@ -9,6 +9,10 @@ storage/batch_outputs/*
 storage/batches/*
 storage/tasks/*
 storage/debug/*
+storage/frame_runs/*
+storage/cherry_runs/*
+storage/feishu_inbox/*
+storage/real_pipeline_check/*
 !storage/.gitkeep
 !storage/batch_inputs/.gitkeep
 !storage/batch_outputs/.gitkeep

@@ -7,7 +7,8 @@ from pathlib import Path
 from PIL import Image
 
 from assetclaw_matting.brain.result_formatter import format_skill_results
-from assetclaw_matting.comfyui.workflow_patch import inspect_workflow, patch_load_image, workflow_to_api_prompt
+from assetclaw_matting.comfyui.client import ComfyUIClient
+from assetclaw_matting.comfyui.workflow_patch import find_save_image_outputs, inspect_workflow, patch_load_image, prepare_api_prompt_for_run, workflow_to_api_prompt
 from assetclaw_matting.db.schema import create_tables
 from assetclaw_matting.db.sqlite import init_db
 from assetclaw_matting.runtime_context import reset_runtime_context, set_runtime_context
@@ -107,6 +108,53 @@ def test_frontend_workflow_inspect_and_convert() -> None:
     assert prompt["2"]["inputs"]["images"] == ["1", 0]
 
 
+def test_prepare_api_prompt_does_not_rewire_workflow() -> None:
+    workflow = _frontend_workflow()
+
+    prompt = prepare_api_prompt_for_run(workflow)
+
+    assert prompt["2"]["class_type"] == "SaveImage"
+    assert prompt["2"]["inputs"]["images"] == ["1", 0]
+
+
+def test_find_save_image_outputs_prefers_final_output_over_temp() -> None:
+    history = {
+        "pid": {
+            "outputs": {
+                "50": {"images": [{"filename": "preview.png", "subfolder": "", "type": "temp"}]},
+                "28": {"images": [{"filename": "final.png", "subfolder": "", "type": "output"}]},
+            }
+        }
+    }
+
+    outputs = find_save_image_outputs(history, "pid")
+
+    assert outputs[0]["filename"] == "final.png"
+    assert outputs[0]["type"] == "output"
+
+
+def test_download_output_prefers_local_comfyui_file_and_preserves_alpha(monkeypatch) -> None:
+    from assetclaw_matting.config import settings
+
+    comfy_root = Path("E:/assetclaw-matting-bot/storage/debug/comfy_local_copy_root")
+    source = comfy_root / "output" / "matte" / "1_00001_.png"
+    target = Path("E:/assetclaw-matting-bot/storage/debug/comfy_local_copy_outputs/0001.png")
+    source.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGBA", (4, 4), (255, 0, 0, 0)).save(source)
+    monkeypatch.setattr(settings, "comfyui_dir", comfy_root)
+
+    def fail_get(*args, **kwargs):
+        raise AssertionError("expected local ComfyUI file copy, not /view download")
+
+    monkeypatch.setattr("assetclaw_matting.comfyui.client.requests.get", fail_get)
+
+    ComfyUIClient().download_output("1_00001_.png", "matte", "output", target)
+
+    with Image.open(target) as image:
+        assert image.mode == "RGBA"
+        assert image.getchannel("A").getextrema() == (0, 0)
+
+
 def test_workflows_list() -> None:
     root = Path("E:/assetclaw-matting-bot/storage/debug/workflows")
     _make_workflow(root / "matting_api.json")
@@ -169,6 +217,7 @@ def test_run_status_without_id_prefers_active_run(monkeypatch) -> None:
 
     now = "2026-06-02T00:00:00+00:00"
     with get_connection() as conn:
+        conn.execute("DELETE FROM comfyui_runs")
         conn.execute(
             """
             INSERT OR REPLACE INTO comfyui_runs

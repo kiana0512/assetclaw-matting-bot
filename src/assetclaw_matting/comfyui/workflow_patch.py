@@ -119,6 +119,11 @@ def workflow_to_api_prompt(workflow: dict[str, Any]) -> dict[str, Any]:
     return prompt
 
 
+def prepare_api_prompt_for_run(workflow: dict[str, Any]) -> dict[str, Any]:
+    """Convert a workflow to the ComfyUI API prompt format without changing it."""
+    return workflow_to_api_prompt(workflow)
+
+
 def inspect_workflow(workflow: dict[str, Any]) -> dict[str, Any]:
     nodes: list[dict[str, Any]] = []
     class_counts: dict[str, int] = {}
@@ -255,4 +260,5 @@ def find_save_image_outputs(
             f"No SaveImage outputs found for prompt_id={prompt_id}. "
             "Make sure your workflow has a SaveImage node."
         )
-    return images
+    output_images = [item for item in images if item.get("type") == "output"]
+    return output_images or images

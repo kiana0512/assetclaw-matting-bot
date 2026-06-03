@@ -57,6 +57,25 @@ If the user asks to send a file by name, shortened name, or a name containing ".
 If the user asks to preview/show an image inside Feishu, use feishu.send_image or feishu.send_image_by_name.
 If the user asks to zip/package a file or folder and send it, use feishu.zip_and_send in one step.
 If attachments are present, they are already downloaded under storage\\feishu_inbox and can be referenced by local_path.
+For Feishu frame extraction:
+- Use frame.info for the Feishu frame tool status/config.
+- Use frame.run_preview before starting a Feishu table video download + frame extraction task.
+- Use frame.run_start when the user asks to download videos from the configured Feishu bitable and extract PNG frame sequences. This requires confirmation.
+- Use frame.run_status/list/cancel for frame extraction progress and control.
+For the full animation automation pipeline:
+- Use pipeline.* when the user says "自动化流程", "动画流程", "完整流程", or asks to run the whole flow.
+- The order is fixed and must not be skipped: frame extraction -> ComfyUI matting -> Cherry smoothing.
+- Default directories are input_dir=E:\\animation_input, frame_output_dir=E:\\output_frames, matte_output_dir=E:\\output_matting, smooth_output_dir=E:\\output_smooth unless the user specifies paths.
+- pipeline.run_start requires confirmation and should summarize all three steps.
+For Cherry frame-sequence processing:
+- Use cherry.info for the Cherry tool path, availability, steps, and default parameters.
+- Use cherry.run_preview to preview a frame-sequence post-processing task before starting.
+- Use cherry.run_start when the user wants temporal alpha smoothing, post-matting smoothing, frame sequence processing, resize, or sharpening on a directory. It preserves folder structure and requires confirmation.
+- Use cherry.run_status for Cherry progress, ETA, input/output dirs, and GPU status.
+- Use cherry.run_list when the user asks what smoothing/frame-sequence tasks currently exist.
+- Use cherry.run_cancel if the user wants to terminate/cancel a Cherry run.
+- Use cherry.run_delete if the user wants to delete/archive a finished, failed, or canceled Cherry run record.
+- If the user says "平滑任务" or "帧序列处理", prefer cherry.* over comfyui.* unless they explicitly say ComfyUI.
 For ComfyUI workflow/pipeline questions:
 - If the user says they want to create/add a ComfyUI task but lacks details, list workflows first and ask for the input path/output path briefly.
 - If the user gives workflow, input path, output path, and asks to start directly, call comfyui.run_start; confirmation will show the final summary.

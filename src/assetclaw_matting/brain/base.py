@@ -62,6 +62,27 @@ class BrainProvider(ABC):
                         message = preview_run_start_confirmation(args, confirmation_id)
                     except Exception:
                         pass
+                elif tool_call.skill == "cherry.run_start":
+                    try:
+                        from assetclaw_matting.skills.cherry_skills import preview_run_start_confirmation
+
+                        message = preview_run_start_confirmation(args, confirmation_id)
+                    except Exception:
+                        pass
+                elif tool_call.skill == "frame.run_start":
+                    try:
+                        from assetclaw_matting.skills.frame_skills import preview_run_start_confirmation
+
+                        message = preview_run_start_confirmation(args, confirmation_id)
+                    except Exception:
+                        pass
+                elif tool_call.skill == "pipeline.run_start":
+                    try:
+                        from assetclaw_matting.skills.pipeline_skills import preview_run_start_confirmation
+
+                        message = preview_run_start_confirmation(args, confirmation_id)
+                    except Exception:
+                        pass
                 result = {
                     "ok": False,
                     "skill": tool_call.skill,

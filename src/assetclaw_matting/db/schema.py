@@ -126,6 +126,55 @@ CREATE TABLE IF NOT EXISTS shared_matting_runs (
     created_at TEXT,
     updated_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS cherry_runs (
+    id TEXT PRIMARY KEY,
+    status TEXT,
+    input_dir TEXT,
+    output_dir TEXT,
+    total INTEGER,
+    completed INTEGER,
+    failed INTEGER,
+    files_json TEXT,
+    options_json TEXT,
+    error TEXT,
+    created_at TEXT,
+    updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS frame_runs (
+    id TEXT PRIMARY KEY,
+    status TEXT,
+    config_path TEXT,
+    download_dir TEXT,
+    export_dir TEXT,
+    total_records INTEGER,
+    processed_records INTEGER,
+    fps INTEGER,
+    diff_threshold REAL,
+    options_json TEXT,
+    error TEXT,
+    created_at TEXT,
+    updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+    id TEXT PRIMARY KEY,
+    status TEXT,
+    input_dir TEXT,
+    frame_output_dir TEXT,
+    matte_output_dir TEXT,
+    smooth_output_dir TEXT,
+    workflow_path TEXT,
+    frame_run_id TEXT,
+    comfyui_run_id TEXT,
+    cherry_run_id TEXT,
+    current_step TEXT,
+    options_json TEXT,
+    error TEXT,
+    created_at TEXT,
+    updated_at TEXT
+);
 """
 
 # Columns added after initial table creation — applied via migration

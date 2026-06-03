@@ -124,6 +124,24 @@ storage\feishu_inbox\日期\会话\
 | `comfyui.run_cancel` | 终止任务并尝试中断 ComfyUI 队列 | write_caution |
 | `comfyui.run_delete` | 删除/归档已结束、失败、已取消的任务记录 | write_safe |
 | `comfyui.run_sync_outputs` | 把完成的 ComfyUI 输出下载到指定输出目录 | write_safe |
+| `cherry.info` | 查看 Cherry 帧序列工具路径、可用状态和默认参数 | readonly |
+| `cherry.run_preview` | 启动前预览 Cherry 平滑/缩放/锐化任务 | readonly |
+| `cherry.run_start` | 对输入目录递归做 Cherry 帧序列处理，并同结构输出，启动前需确认 | write_safe |
+| `cherry.run_status` | 查看 Cherry 任务进度、ETA、输入输出、GPU | readonly |
+| `cherry.run_list` | 查看当前活跃的 Cherry 平滑任务；可按参数包含历史任务 | readonly |
+| `cherry.run_cancel` | 终止 Cherry 任务 | write_safe |
+| `cherry.run_delete` | 删除/归档已结束、失败、已取消的 Cherry 任务记录 | write_safe |
+| `frame.info` | 查看飞书抽帧工具配置、fps、输入输出目录 | readonly |
+| `frame.run_preview` | 预览飞书表格视频下载 + 抽帧任务 | readonly |
+| `frame.run_start` | 下载飞书表格视频附件并抽 PNG 序列帧，启动前需确认 | write_safe |
+| `frame.run_status` | 查看抽帧任务进度 | readonly |
+| `frame.run_list` | 查看抽帧任务列表 | readonly |
+| `frame.run_cancel` | 终止抽帧任务 | write_safe |
+| `pipeline.run_preview` | 预览完整动画自动化流程 | readonly |
+| `pipeline.run_start` | 固定顺序执行抽帧 -> ComfyUI 抠图 -> Cherry 平滑，启动前需确认 | write_safe |
+| `pipeline.run_status` | 查看完整流程和三个子任务进度 | readonly |
+| `pipeline.run_list` | 查看完整流程任务列表 | readonly |
+| `pipeline.run_cancel` | 终止完整流程及当前子任务 | write_safe |
 | `system.gpu_status` | 查询 nvidia-smi GPU 显存/利用率/温度/功耗 | readonly |
 | `system.process_status` | 查询匹配进程状态 | readonly |
 
@@ -173,6 +191,17 @@ storage\feishu_inbox\日期\会话\
 终止当前抠图任务
 删除这个失败的 ComfyUI 任务记录
 同步这个 ComfyUI 任务的输出结果 COMFY_XXXXXXXXXXXX
+查看 Cherry 帧序列工具状态
+预览 E:\output 到 E:\smooth_output 的 Cherry 平滑任务
+对 E:\output 做 Cherry 平滑处理，输出到 E:\smooth_output
+现在 Cherry 任务跑到哪里了
+我们现在有哪些平滑任务
+终止当前 Cherry 任务
+查看飞书抽帧工具状态
+开始飞书抽帧，下载到 E:\raw_videos，抽帧输出 E:\output_frames
+抽帧任务跑到哪里了
+执行动画自动化流程 E:\raw_videos E:\output_frames E:\output_matting E:\output_smooth
+自动化流程现在跑到哪里了
 共享盘抠图任务现在跑到哪里了
 查看当前系统状态
 现在显卡使用情况怎么样
@@ -180,6 +209,10 @@ ComfyUI 状态
 ```
 
 默认本地批量抠图使用 `E:\input` 到 `E:\output`，递归处理图片，并保留输入目录结构。启动前会返回任务摘要并要求确认；运行中采用安静进度推送，状态变化/明显进度变化/完成/失败会主动通知，用户主动问进度会立即返回。
+
+Cherry 帧序列处理工具位于 `E:\assetclaw-matting-bot\Cherry_帧序列处理工具`。Agent 调用时会递归读取输入目录图片，按父文件夹分组做时序 Alpha 平滑、缩放、锐化，输出到目标目录并保留相同相对结构。实际处理使用秋叶环境 `C:\Users\lilithgames\Downloads\ComfyUI-aki-v3\python\python.exe`，不要求 bot 的 conda 环境安装 torch。启动前会给图片数、序列数、参数摘要并要求确认。
+
+飞书抽帧工具位于 `E:\assetclaw-matting-bot\feishu_frame_tool`。完整动画自动化流程固定为三步：`frame.run_start` 抽帧输出到 `E:\output_frames`，再由 `comfyui.run_start` 抠图输出到 `E:\output_matting`，最后由 `cherry.run_start` 平滑输出到 `E:\output_smooth`。总流程会保存每个子任务 run_id，方便单独查错和返工。
 
 ## 暂不实现
 
