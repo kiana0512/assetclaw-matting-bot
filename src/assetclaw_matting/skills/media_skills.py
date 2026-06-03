@@ -250,6 +250,19 @@ def file_zip_paths(paths: list[str], zip_path: str, overwrite: bool = False) -> 
     return {"ok": True, "zip_path": str(zip_target), "count": len(added), "items": added[:50]}
 
 
+def feishu_zip_and_send(paths: list[str], zip_path: str, overwrite: bool = True, file_name: str | None = None) -> dict[str, Any]:
+    result = file_zip_paths(paths=paths, zip_path=zip_path, overwrite=overwrite)
+    sent = feishu_send_file(result["zip_path"], file_name=file_name)
+    return {
+        "ok": True,
+        "zip_path": result["zip_path"],
+        "count": result["count"],
+        "file_name": sent["file_name"],
+        "size": sent["size"],
+        "chat_id": sent["chat_id"],
+    }
+
+
 def feishu_send_file(path: str, file_name: str | None = None) -> dict[str, Any]:
     from assetclaw_matting.feishu.client import feishu_client
 
@@ -263,6 +276,22 @@ def feishu_send_file(path: str, file_name: str | None = None) -> dict[str, Any]:
     sent_name = file_name.strip() if file_name else target.name
     feishu_client.send_file_to_chat(chat_id, target, sent_name)
     return {"ok": True, "chat_id": chat_id, "path": str(target), "file_name": sent_name, "size": target.stat().st_size}
+
+
+def feishu_send_image(path: str) -> dict[str, Any]:
+    from assetclaw_matting.feishu.client import feishu_client
+
+    target = validate_path(path, must_exist=True)
+    if not target.is_file():
+        raise ValueError("path must be an image file")
+    if target.suffix.lower() not in IMAGE_EXTS:
+        raise ValueError("unsupported image extension")
+    ctx = get_runtime_context()
+    chat_id = ctx.get("chat_id")
+    if not chat_id:
+        raise RuntimeError("feishu_send_image requires a Feishu chat context")
+    feishu_client.send_image_to_chat(chat_id, target)
+    return {"ok": True, "chat_id": chat_id, "path": str(target), "file_name": target.name, "size": target.stat().st_size}
 
 
 def feishu_send_file_by_name(
@@ -286,3 +315,28 @@ def feishu_send_file_by_name(
         names = ", ".join(path.name for path in matches[:5])
         raise ValueError(f"匹配到多个文件，请说完整一点：{names}")
     return feishu_send_file(str(matches[0]), file_name=file_name)
+
+
+def feishu_send_image_by_name(
+    name_pattern: str,
+    search_root: str | None = None,
+    max_depth: int = 5,
+) -> dict[str, Any]:
+    from assetclaw_matting.skills.file_extra_skills import find_paths_by_name
+
+    matches = [
+        path for path in find_paths_by_name(
+            name_pattern=name_pattern,
+            search_root=search_root,
+            max_results=5,
+            max_depth=max_depth,
+            files_only=True,
+        )
+        if path.suffix.lower() in IMAGE_EXTS
+    ]
+    if not matches:
+        raise FileNotFoundError(f"没有找到匹配图片：{name_pattern}")
+    if len(matches) > 1:
+        names = ", ".join(path.name for path in matches[:5])
+        raise ValueError(f"匹配到多张图片，请说完整一点：{names}")
+    return feishu_send_image(str(matches[0]))

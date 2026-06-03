@@ -5,6 +5,8 @@ from pathlib import Path
 from PIL import Image
 
 from assetclaw_matting.skills.media_skills import (
+    feishu_send_image,
+    feishu_send_image_by_name,
     feishu_send_file_by_name,
     file_copy_as,
     file_duplicate_same_dir,
@@ -100,6 +102,51 @@ def test_feishu_send_file_by_name_supports_ellipsis(monkeypatch) -> None:
     assert result["ok"] is True
     assert sent["chat_id"] == "chat_test"
     assert sent["target"].endswith(path.name)
+
+
+def test_feishu_send_image_sends_inline_image(monkeypatch) -> None:
+    path = Path("E:/assetclaw-matting-bot/storage/debug/inline_preview.png")
+    _make_test_image(path)
+    sent: dict[str, str] = {}
+
+    def fake_send_image_to_chat(chat_id, target):
+        sent["chat_id"] = chat_id
+        sent["target"] = str(target)
+
+    from assetclaw_matting.feishu.client import feishu_client
+
+    monkeypatch.setattr(feishu_client, "send_image_to_chat", fake_send_image_to_chat)
+    token = set_runtime_context(chat_id="chat_test")
+    try:
+        result = feishu_send_image(str(path))
+    finally:
+        reset_runtime_context(token)
+
+    assert result["ok"] is True
+    assert sent["chat_id"] == "chat_test"
+    assert sent["target"].endswith("inline_preview.png")
+
+
+def test_feishu_send_image_by_name(monkeypatch) -> None:
+    path = Path("E:/assetclaw-matting-bot/storage/debug/inline_name_preview.png")
+    _make_test_image(path)
+    sent: dict[str, str] = {}
+
+    def fake_send_image_to_chat(chat_id, target):
+        sent["chat_id"] = chat_id
+        sent["target"] = str(target)
+
+    from assetclaw_matting.feishu.client import feishu_client
+
+    monkeypatch.setattr(feishu_client, "send_image_to_chat", fake_send_image_to_chat)
+    token = set_runtime_context(chat_id="chat_test")
+    try:
+        result = feishu_send_image_by_name("inline_name_preview.png", search_root="E:\\assetclaw-matting-bot\\storage\\debug")
+    finally:
+        reset_runtime_context(token)
+
+    assert result["ok"] is True
+    assert sent["target"].endswith("inline_name_preview.png")
 
 
 def test_image_batch_info_convert_and_resize() -> None:

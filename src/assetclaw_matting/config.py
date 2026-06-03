@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     feishu_allowed_chat_ids: str = ""
     bot_require_confirmation_for_write: bool = False
     bot_error_push_enabled: bool = True
+    feishu_ignore_events_older_than_seconds: int = 600
 
     # Event mode: "ws" (long connection, recommended) or "webhook" (legacy, requires public URL)
     feishu_event_mode: str = "ws"
@@ -80,16 +81,20 @@ class Settings(BaseSettings):
     storage_dir: Path = Path("E:/assetclaw-matting-bot/storage")
     log_dir: Path = Path("E:/assetclaw-matting-bot/logs")
 
-    allowed_roots: str = "D:;E:;F:"
+    shared_matting_root: str = r"Z:\公共机共享\抠图"
+    shared_matting_unc_root: str = r"\\audioshare.lilith.com\AIart\公共机共享\抠图"
+    allowed_roots: str = r"D:;E:;F:;Z:;C:\Users\lilithgames\Downloads\ComfyUI-aki-v3;\\audioshare.lilith.com\AIart\公共机共享\抠图"
     deny_path_patterns: str = (
         ".env;.ssh;AppData;Windows;Program Files;ProgramData;"
         "$Recycle.Bin;System Volume Information"
     )
 
-    comfyui_fake_mode: bool = True
-    comfyui_dir: Path = Path("E:/assetclaw-matting-bot/ComfyUI")
+    comfyui_fake_mode: bool = False
+    comfyui_aki_root: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3")
+    comfyui_dir: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3/ComfyUI")
+    comfyui_python_dir: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3/python")
     comfyui_url: str = "http://127.0.0.1:8188"
-    comfyui_workflow_path: Path = Path("E:/assetclaw-matting-bot/workflows/matting_api.json")
+    comfyui_workflow_path: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3/ComfyUI/user/default/workflows/软边缘测试-动画批量.json")
     comfyui_timeout_seconds: int = 600
     comfyui_poll_interval_seconds: int = 2
 
@@ -132,6 +137,8 @@ class Settings(BaseSettings):
             self.storage_dir / "batches",
             self.storage_dir / "tasks",
             self.storage_dir / "debug",
+            self.storage_dir / "feishu_inbox",
+            self.storage_dir / "matting_runs",
             self.log_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)

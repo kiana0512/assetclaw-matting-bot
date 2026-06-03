@@ -3,14 +3,16 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import shutil
 import time
 from pathlib import Path
 from typing import Any
 
 import requests
+from requests import HTTPError
 
 from assetclaw_matting.config import settings
-from assetclaw_matting.comfyui.workflow_patch import patch_load_image
+from assetclaw_matting.comfyui.workflow_patch import patch_load_image, prepare_api_prompt_for_run
 from assetclaw_matting.comfyui.output_resolver import resolve_first_output
 
 log = logging.getLogger(__name__)
@@ -27,6 +29,26 @@ class ComfyUIClient:
 
     def check_health(self) -> dict[str, Any]:
         resp = requests.get(f"{self._base}/system_stats", timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_queue(self) -> dict[str, Any]:
+        resp = requests.get(f"{self._base}/queue", timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    def interrupt(self) -> None:
+        resp = requests.post(f"{self._base}/interrupt", timeout=10)
+        resp.raise_for_status()
+
+    def delete_from_queue(self, prompt_ids: list[str]) -> None:
+        if not prompt_ids:
+            return
+        resp = requests.post(f"{self._base}/queue", json={"delete": prompt_ids}, timeout=10)
+        resp.raise_for_status()
+
+    def get_object_info(self) -> dict[str, Any]:
+        resp = requests.get(f"{self._base}/object_info", timeout=20)
         resp.raise_for_status()
         return resp.json()
 
@@ -50,13 +72,18 @@ class ComfyUIClient:
 
     # ── Prompt ────────────────────────────────────────────────────────────────
 
-    def submit_prompt(self, workflow: dict[str, Any]) -> str:
+    def submit_prompt(self, workflow: dict[str, Any], client_id: str | None = None) -> str:
+        payload: dict[str, Any] = {"prompt": workflow}
+        if client_id:
+            payload["client_id"] = client_id
         resp = requests.post(
             f"{self._base}/prompt",
-            json={"prompt": workflow},
+            json=payload,
             timeout=30,
         )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            detail = resp.text[:2000] if resp.text else resp.reason
+            raise HTTPError(f"{resp.status_code} ComfyUI /prompt failed: {detail}", response=resp)
         data = resp.json()
         prompt_id = data.get("prompt_id")
         if not prompt_id:
@@ -68,6 +95,11 @@ class ComfyUIClient:
 
     def get_history(self, prompt_id: str) -> dict[str, Any]:
         resp = requests.get(f"{self._base}/history/{prompt_id}", timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_all_history(self, max_items: int = 20) -> dict[str, Any]:
+        resp = requests.get(f"{self._base}/history", params={"max_items": max_items}, timeout=15)
         resp.raise_for_status()
         return resp.json()
 
@@ -102,6 +134,12 @@ class ComfyUIClient:
     ) -> None:
         save_path = Path(save_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path = self.resolve_local_output_path(filename, subfolder, output_type)
+        if source_path and source_path.exists():
+            shutil.copy2(source_path, save_path)
+            log.debug("Copied ComfyUI local output %s -> %s", source_path, save_path)
+            return
+
         resp = requests.get(
             f"{self._base}/view",
             params={"filename": filename, "subfolder": subfolder, "type": output_type},
@@ -113,6 +151,28 @@ class ComfyUIClient:
             for chunk in resp.iter_content(chunk_size=65536):
                 fh.write(chunk)
         log.debug("Downloaded ComfyUI output → %s", save_path)
+
+    def resolve_local_output_path(
+        self,
+        filename: str,
+        subfolder: str = "",
+        output_type: str = "output",
+    ) -> Path | None:
+        base_name = {
+            "output": "output",
+            "input": "input",
+            "temp": "temp",
+        }.get(str(output_type or "output").lower())
+        if not base_name:
+            return None
+        try:
+            parts = [part for part in Path(subfolder or "").parts if part not in {"", "."}]
+            relative = Path(*parts, filename) if parts else Path(filename)
+            if relative.is_absolute() or any(part == ".." for part in relative.parts):
+                return None
+            return settings.comfyui_dir / base_name / relative
+        except Exception:
+            return None
 
     # ── High-level run ────────────────────────────────────────────────────────
 
@@ -177,7 +237,7 @@ class ComfyUIClient:
         workflow = patch_load_image(copy.deepcopy(workflow), uploaded_filename)
 
         # 4. Submit
-        prompt_id = self.submit_prompt(workflow)
+        prompt_id = self.submit_prompt(prepare_api_prompt_for_run(workflow))
         log.info("ComfyUI prompt submitted: %s", prompt_id)
 
         # 5. Wait
@@ -185,7 +245,7 @@ class ComfyUIClient:
 
         # 6. Save history for debugging
         if task_id:
-            debug_path = settings.debug_dir / f"history_{task_id}.json"
+            debug_path = settings.storage_dir / "debug" / f"history_{task_id}.json"
             debug_path.parent.mkdir(parents=True, exist_ok=True)
             debug_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
 
@@ -193,9 +253,6 @@ class ComfyUIClient:
         try:
             output_info = resolve_first_output(history, prompt_id)
         except ValueError:
-            if task_id:
-                from assetclaw_matting.services.file_store import save_debug_history
-                save_debug_history(task_id, json.dumps(history, indent=2))
             raise
 
         self.download_output(

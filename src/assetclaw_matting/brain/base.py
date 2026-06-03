@@ -54,12 +54,41 @@ class BrainProvider(ABC):
                     skill=tool_call.skill,
                     arguments=args,
                 )
+                message = f"需要确认：{tool_call.skill}\n回复：确认执行 {confirmation_id}"
+                if tool_call.skill == "comfyui.run_start":
+                    try:
+                        from assetclaw_matting.skills.comfyui_skills import preview_run_start_confirmation
+
+                        message = preview_run_start_confirmation(args, confirmation_id)
+                    except Exception:
+                        pass
+                elif tool_call.skill == "cherry.run_start":
+                    try:
+                        from assetclaw_matting.skills.cherry_skills import preview_run_start_confirmation
+
+                        message = preview_run_start_confirmation(args, confirmation_id)
+                    except Exception:
+                        pass
+                elif tool_call.skill == "frame.run_start":
+                    try:
+                        from assetclaw_matting.skills.frame_skills import preview_run_start_confirmation
+
+                        message = preview_run_start_confirmation(args, confirmation_id)
+                    except Exception:
+                        pass
+                elif tool_call.skill == "pipeline.run_start":
+                    try:
+                        from assetclaw_matting.skills.pipeline_skills import preview_run_start_confirmation
+
+                        message = preview_run_start_confirmation(args, confirmation_id)
+                    except Exception:
+                        pass
                 result = {
                     "ok": False,
                     "skill": tool_call.skill,
                     "needs_confirmation": True,
                     "confirmation_id": confirmation_id,
-                    "message": f"需要确认：{tool_call.skill}\n回复：确认执行 {confirmation_id}",
+                    "message": message,
                 }
                 trace(
                     "skill.confirmation_required",

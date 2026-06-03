@@ -14,6 +14,10 @@ class FeishuMessageEvent:
     open_id: Optional[str]
     user_id: Optional[str]
     text: str
+    message_type: str = "text"
+    message_create_time: Optional[int] = None
+    content: dict[str, Any] = field(default_factory=dict)
+    attachments: list[dict[str, Any]] = field(default_factory=list)
     raw_event: dict[str, Any] = field(default_factory=dict)
 
 

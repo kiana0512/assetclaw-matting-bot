@@ -14,6 +14,25 @@ def plan_file_task(message: BrainMessage) -> tuple[list[ToolCall], str] | tuple[
     if not text:
         return None
 
+    if _looks_like_zip_and_send(text):
+        src = _extract_named_recent_item(text, message.conversation_id) or _default_shared_input_path(text)
+        if not src:
+            return None, "可以。你要压缩哪个文件夹？"
+        zip_path = _zip_path_for(src)
+        return (
+            [
+                ToolCall(
+                    skill="feishu.zip_and_send",
+                    arguments={
+                        "paths": [src],
+                        "zip_path": zip_path,
+                        "overwrite": True,
+                    },
+                )
+            ],
+            f"我会把 {src} 压缩成 zip 并发送给你。",
+        )
+
     if _looks_like_copy_image_to_new_folder(text):
         image_name = _extract_image_name(text) or _last_image_name(message.conversation_id)
         folder_name = _extract_folder_name(text)
@@ -69,6 +88,51 @@ def plan_file_task(message: BrainMessage) -> tuple[list[ToolCall], str] | tuple[
         )
 
     return None
+
+
+def _looks_like_zip_and_send(text: str) -> bool:
+    return any(word in text for word in ("压缩", "打包", "zip")) and any(
+        word in text for word in ("发送", "发给我", "传给我")
+    )
+
+
+def _extract_named_recent_item(text: str, conversation_id: str) -> str | None:
+    if not conversation_id:
+        return None
+    name_match = re.search(r"(input[\w\-]*|output[\w\-]*)", text, re.IGNORECASE)
+    if not name_match:
+        return None
+    target_name = name_match.group(1).lower()
+    from assetclaw_matting.db.repos import get_recent_brain_messages
+
+    recent = get_recent_brain_messages(conversation_id, limit=10)
+    for item in reversed(recent):
+        response = item.get("response_text", "") or ""
+        root_match = re.search(r"(.+?)[：:]\s*\d+\s*项", response)
+        if not root_match:
+            continue
+        root = root_match.group(1).strip()
+        for line in response.splitlines():
+            item_match = re.match(r"-\s*(.+?)\s*$", line.strip())
+            if not item_match:
+                continue
+            name = item_match.group(1).strip().rstrip("\\/")
+            if name.lower() == target_name:
+                return str(Path(root) / name)
+    return None
+
+
+def _default_shared_input_path(text: str) -> str | None:
+    if "input" not in text.lower():
+        return None
+    if not any(word in text for word in ("共享盘", "公共盘", "Z盘", "z盘", "Z 盘", "z 盘", "这个input", "这个 input")):
+        return None
+    return "Z:\\公共机共享\\抠图\\input"
+
+
+def _zip_path_for(src: str) -> str:
+    name = Path(src).name or "archive"
+    return f"E:\\{name}_backup.zip"
 
 
 def _copy_image_plan(image_name: str, folder_name: str) -> tuple[list[ToolCall], str]:
