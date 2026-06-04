@@ -299,16 +299,29 @@ def run_pause(run_id: str | None = None) -> dict[str, Any]:
 
 
 def run_resume(run_id: str | None = None) -> dict[str, Any]:
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.comfyui.client import comfyui_client
+
     row = _get_run(run_id)
     if not row:
         return {"ok": False, "error": "comfyui run not found"}
-    if row["status"] != "PAUSED":
-        return {"ok": True, "run_id": row["id"], "status": row["status"], "message": "当前任务不在暂停状态。"}
+    if row["status"] in {"DONE", "DONE_WITH_ERRORS", "FAILED", "CANCELED"}:
+        return {"ok": True, "run_id": row["id"], "status": row["status"], "message": "任务已经结束，不能继续。"}
+    if row["status"] == "RUNNING" and not settings.comfyui_fake_mode:
+        try:
+            queue = comfyui_client.get_queue()
+            queue_count = len(queue.get("queue_running") or []) + len(queue.get("queue_pending") or [])
+        except Exception:
+            queue_count = 0
+        if queue_count:
+            return {"ok": True, "run_id": row["id"], "status": "RUNNING", "message": "任务已经在 ComfyUI 队列中运行。"}
+        if not _looks_stalled(row):
+            return {"ok": True, "run_id": row["id"], "status": "RUNNING", "message": "任务刚更新过，暂不重复拉起 worker。"}
     _set_run_status(row["id"], "RUNNING")
-    _notify(row["id"], f"ComfyUI 任务已继续：{row['id']}")
+    _notify(row["id"], f"ComfyUI 任务已继续/重新拉起：{row['id']}")
     _start_run_worker(row["id"])
     _start_progress_monitor(row["id"])
-    return {"ok": True, "run_id": row["id"], "status": "RUNNING"}
+    return {"ok": True, "run_id": row["id"], "status": "RUNNING", "message": "已拉起提交 worker。"}
 
 
 def run_cancel(run_id: str | None = None, interrupt_current: bool = True) -> dict[str, Any]:
@@ -890,6 +903,14 @@ def _save_run_progress(run_id: str, prompt_ids: list[str], options: dict[str, An
             "UPDATE comfyui_runs SET prompt_ids_json = ?, options_json = ?, updated_at = ? WHERE id = ?",
             (json.dumps(prompt_ids, ensure_ascii=False), json.dumps(options, ensure_ascii=False), _now(), run_id),
         )
+
+
+def _looks_stalled(row: Any, stale_seconds: int = 60) -> bool:
+    try:
+        updated_at = datetime.fromisoformat(row["updated_at"])
+    except Exception:
+        return True
+    return time.time() - updated_at.timestamp() >= stale_seconds
 
 
 def _eta(elapsed: float, completed: int, total: int) -> int | None:

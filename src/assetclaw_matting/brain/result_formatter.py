@@ -20,6 +20,34 @@ def format_skill_results(results: list[dict[str, Any]], max_items: int = 8) -> s
         payload = item.get("result") or {}
         if skill.startswith("bot."):
             lines.append(str(payload.get("text") or "完成。"))
+        elif skill == "agent.current_work":
+            lines.extend(_format_agent_current_work(payload))
+        elif skill == "agent.diagnose":
+            lines.extend(_format_agent_diagnose(payload))
+        elif skill == "sticker.info":
+            lines.extend(_format_sticker_info(payload))
+        elif skill == "sticker.send_random":
+            lines.append("给你贴一个，先别让这些流程把你榨干。" if payload.get("sent") else "我想贴一个，但现在没选到可用表情包。")
+        elif skill == "emotion.respond":
+            lines.append(str(payload.get("text") or "我听到了。"))
+        elif skill == "life.location":
+            if payload.get("location"):
+                source = "我记住的" if payload.get("source") == "memory" else "默认配置"
+                lines.append(f"我现在按{source}位置理解：{payload.get('location')}。")
+            else:
+                lines.append(str(payload.get("error") or "我还不知道你的位置。"))
+        elif skill == "life.set_location":
+            lines.append(f"记住了，你现在在 {payload.get('location')}。后面问天气和外卖我会先按这里来。")
+        elif skill == "life.weather":
+            lines.extend(_format_life_weather(payload))
+        elif skill == "life.food_suggest":
+            lines.extend(_format_life_food(payload))
+        elif skill == "web.fetch_url":
+            lines.extend(_format_web_fetch(payload))
+        elif skill == "web.search":
+            lines.extend(_format_web_search(payload, max_items))
+        elif skill == "web.research":
+            lines.extend(_format_web_research(payload, max_items))
         elif skill in {"file.list_allowed", "image.list", "file.list_by_type"}:
             lines.extend(_format_listing(payload, max_items=max_items))
         elif skill == "file.exists":
@@ -243,6 +271,19 @@ def format_skill_results(results: list[dict[str, Any]], max_items: int = 8) -> s
             lines.extend(_format_pipeline_list(payload, max_items))
         elif skill == "pipeline.run_cancel":
             lines.append(f"{payload.get('run_id')}：{payload.get('status')}")
+        elif skill == "animation.status":
+            lines.extend(_format_animation_status(payload))
+        elif skill == "animation.manual_smooth_current":
+            cherry = payload.get("cherry") or {}
+            lines.append(f"动画平滑已启动：{cherry.get('run_id')}")
+            lines.append(f"输入：{payload.get('input_dir')}")
+            lines.append(f"输出：{payload.get('output_dir')}")
+            lines.append(f"总数：{cherry.get('total', 0)} 张，序列：{cherry.get('sequence_count', 0)} 组")
+        elif skill == "animation.rerun_from_videos":
+            lines.append("动画全量重跑已在后台启动。")
+            lines.append(f"工作区：{payload.get('root')}")
+            lines.append(f"PID：{payload.get('pid')}")
+            lines.append(f"日志：{payload.get('log_path')}")
         elif skill == "system.gpu_status":
             lines.extend(_format_gpu_status(payload))
         elif skill == "system.process_status":
@@ -432,6 +473,8 @@ def _format_shared_matting(payload: dict[str, Any]) -> list[str]:
 def _format_cherry_run_preview(payload: dict[str, Any], max_items: int) -> list[str]:
     options = payload.get("options") or {}
     steps = []
+    if options.get("use_denoise"):
+        steps.append(f"去噪 阈值{options.get('denoise_threshold')} 半径{options.get('denoise_radius')}")
     if options.get("use_smooth"):
         steps.append(f"平滑 窗口{options.get('smooth_window')} 强度{options.get('smooth_sigma')}")
     if options.get("use_resize"):
@@ -582,6 +625,189 @@ def _format_pipeline_list(payload: dict[str, Any], max_items: int) -> list[str]:
         lines.append(f"- {item.get('run_id')} {item.get('status')} 当前：{item.get('current_step')}")
         lines.append(f"  输出：{item.get('smooth_output_dir')}")
     return lines
+
+
+def _format_animation_status(payload: dict[str, Any]) -> list[str]:
+    counts = payload.get("counts") or {}
+    sequences = payload.get("sequences") or {}
+    lines = [
+        "动画工作区状态：",
+        f"根目录：{payload.get('root')}",
+        (
+            f"数量：videos {counts.get('videos', 0)}，frames {counts.get('frames', 0)}，"
+            f"matte {counts.get('matte', 0)}，smooth {counts.get('smooth', 0)}"
+        ),
+        (
+            f"序列：videos {sequences.get('videos', 0)}，frames {sequences.get('frames', 0)}，"
+            f"matte {sequences.get('matte', 0)}，smooth {sequences.get('smooth', 0)}"
+        ),
+        f"matte 对齐 frames：{'是' if payload.get('matte_matches_frames') else '否'}",
+        f"smooth 对齐 matte：{'是' if payload.get('smooth_matches_matte') else '否'}",
+    ]
+    if payload.get("latest_backup"):
+        lines.append(f"最近备份：{payload.get('latest_backup')}")
+    if payload.get("latest_rerun_report"):
+        lines.append(f"最近重跑报告：{payload.get('latest_rerun_report')}")
+    runs = payload.get("runs") or {}
+    for label, data in runs.items():
+        if isinstance(data, dict) and data.get("items"):
+            item = data["items"][0]
+            lines.append(f"{label} 当前任务：{item.get('run_id')} {item.get('status')}")
+    return lines
+
+
+def _format_agent_current_work(payload: dict[str, Any]) -> list[str]:
+    lines = ["当前执行现场："]
+    active = payload.get("active") or []
+    if active:
+        for item in active[:6]:
+            lines.append(f"- {_run_kind(item)} {item.get('run_id')}：{item.get('status')} {_run_progress(item)}".rstrip())
+            if item.get("input_dir"):
+                lines.append(f"  输入：{item.get('input_dir')}")
+            if item.get("output_dir"):
+                lines.append(f"  输出：{item.get('output_dir')}")
+    else:
+        lines.append("当前没有检测到运行中的 ComfyUI / Cherry / 抽帧 / 全流程任务。")
+
+    confirmations = payload.get("pending_confirmations") or []
+    if confirmations:
+        latest = confirmations[0]
+        lines.append(f"待确认：{len(confirmations)} 个，最新 {latest.get('skill')} / {latest.get('id')}")
+
+    gpu = payload.get("gpu") or {}
+    if gpu:
+        lines.extend(_format_gpu_status(gpu))
+    return lines
+
+
+def _format_agent_diagnose(payload: dict[str, Any]) -> list[str]:
+    lines = _format_agent_current_work(payload)
+    findings = payload.get("findings") or []
+    if findings:
+        lines.append("判断：")
+        for item in findings[:6]:
+            run_id = f"（{item.get('run_id')}）" if item.get("run_id") else ""
+            lines.append(f"- {item.get('level', 'info')} {item.get('topic', 'finding')}{run_id}：{item.get('message')}")
+    actions = payload.get("next_actions") or []
+    if actions:
+        lines.append("建议下一步：")
+        for action in actions[:4]:
+            lines.append(f"- {action.get('skill')} {action.get('arguments') or {}}")
+    return lines
+
+
+def _format_sticker_info(payload: dict[str, Any]) -> list[str]:
+    lines = [
+        "情绪表情回复：",
+        f"状态：{'开启' if payload.get('enabled') else '关闭'}",
+        f"目录：{payload.get('directory')}",
+        f"目录存在：{'是' if payload.get('directory_exists') else '否'}",
+        f"可用表情：{payload.get('count', 0)} 个",
+        f"发送概率：{payload.get('probability')}",
+    ]
+    samples = payload.get("sample") or []
+    if samples:
+        lines.append("示例：" + "、".join(_path_name(item) for item in samples[:5]))
+    return lines
+
+
+def _format_web_fetch(payload: dict[str, Any]) -> list[str]:
+    lines = [f"网页：{payload.get('url')}"]
+    if payload.get("title"):
+        lines.append(f"标题：{payload.get('title')}")
+    text = str(payload.get("text") or "").strip()
+    if text:
+        lines.append(text[:3000])
+    if payload.get("truncated"):
+        lines.append("内容较长，已截取前半部分。")
+    return lines
+
+
+def _format_web_search(payload: dict[str, Any], max_items: int) -> list[str]:
+    items = payload.get("items") or []
+    lines = [f"搜索：{payload.get('query')}（{payload.get('count', len(items))} 条）"]
+    for item in items[:max_items]:
+        title = item.get("title") or item.get("url")
+        domain = item.get("domain") or ""
+        lines.append(f"- {title} [{domain}]")
+        if item.get("url"):
+            lines.append(f"  {item.get('url')}")
+        if item.get("snippet"):
+            lines.append(f"  {item.get('snippet')}")
+    if not items:
+        lines.append("没有拿到搜索结果，可以换一个更具体的关键词。")
+    return lines
+
+
+def _format_web_research(payload: dict[str, Any], max_items: int) -> list[str]:
+    lines = [f"联网整合：{payload.get('query')}"]
+    answer = str(payload.get("answer") or "").strip()
+    if answer:
+        lines.append(answer)
+    pages = payload.get("pages") or []
+    ok_pages = [page for page in pages if page.get("ok")]
+    if ok_pages:
+        lines.append("来源：")
+        for page in ok_pages[:max_items]:
+            title = page.get("title") or page.get("url")
+            lines.append(f"- {title}：{page.get('url')}")
+    failed = [page for page in pages if not page.get("ok")]
+    if failed:
+        lines.append(f"另有 {len(failed)} 个页面读取失败。")
+    return lines
+
+
+def _format_life_weather(payload: dict[str, Any]) -> list[str]:
+    if payload.get("fallback") and not payload.get("condition"):
+        return [str(payload.get("fallback"))]
+    location = payload.get("location") or "当前位置"
+    condition = payload.get("condition") or "天气未知"
+    temp = payload.get("temperature_c")
+    feels = payload.get("feels_like_c")
+    rain = payload.get("rain_chance")
+    bits = [f"{location}现在：{condition}"]
+    if temp:
+        bits.append(f"{temp}°C")
+    if feels:
+        bits.append(f"体感 {feels}°C")
+    if rain not in (None, ""):
+        bits.append(f"降雨概率 {rain}%")
+    lines = ["，".join(bits) + "。"]
+    if payload.get("advice"):
+        lines.append(str(payload.get("advice")))
+    return lines
+
+
+def _format_life_food(payload: dict[str, Any]) -> list[str]:
+    lines = [str(payload.get("opener") or "给你几个选择：")]
+    for item in payload.get("options", [])[:4]:
+        lines.append(f"- {item.get('name')}：{item.get('reason')}")
+    if payload.get("location"):
+        lines.append(f"位置我先按 {payload.get('location')} 来理解。")
+    return lines
+
+
+def _run_kind(item: dict[str, Any]) -> str:
+    run_id = str(item.get("run_id") or "")
+    if run_id.startswith("COMFY_"):
+        return "ComfyUI"
+    if run_id.startswith("CHERRY_"):
+        return "Cherry"
+    if run_id.startswith("FRAME_"):
+        return "抽帧"
+    if run_id.startswith("PIPE_"):
+        return "全流程"
+    return "任务"
+
+
+def _run_progress(item: dict[str, Any]) -> str:
+    if "completed" in item or "total" in item:
+        return f"{item.get('completed', 0)}/{item.get('total', 0)}"
+    if "processed_records" in item or "total_records" in item:
+        return f"{item.get('processed_records', 0)}/{item.get('total_records', 0)}"
+    if item.get("current_step"):
+        return f"当前步骤 {item.get('current_step')}"
+    return ""
 
 
 def _format_duration(seconds: int) -> str:

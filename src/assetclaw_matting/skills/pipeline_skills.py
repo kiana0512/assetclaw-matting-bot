@@ -30,7 +30,7 @@ def run_preview(
     smooth_output_dir: str | None = None,
     workflow_path: str | None = None,
     fps: int = 24,
-    max_frames: int = 24,
+    max_frames: int = 0,
     diff_threshold: float = 0.2,
 ) -> dict[str, Any]:
     paths = _resolve_pipeline_paths(input_dir, frame_output_dir, matte_output_dir, smooth_output_dir)
@@ -50,7 +50,7 @@ def run_start(
     smooth_output_dir: str | None = None,
     workflow_path: str | None = None,
     fps: int = 24,
-    max_frames: int = 24,
+    max_frames: int = 0,
     diff_threshold: float = 0.2,
     notify_interval_seconds: int = 60,
 ) -> dict[str, Any]:
@@ -230,7 +230,7 @@ def _worker(run_id: str) -> None:
         from assetclaw_matting.skills.frame_skills import run_start as frame_start, run_status as frame_status
 
         _notify(run_id, "动画自动化流程：开始飞书下载和抽帧")
-        frame = frame_start(download_dir=row["input_dir"], export_dir=row["frame_output_dir"], fps=opts["fps"], max_frames=opts.get("max_frames", 24), diff_threshold=opts["diff_threshold"], notify_interval_seconds=opts["notify_interval_seconds"])
+        frame = frame_start(download_dir=row["input_dir"], export_dir=row["frame_output_dir"], fps=opts["fps"], max_frames=opts.get("max_frames", 0), diff_threshold=opts["diff_threshold"], notify_interval_seconds=opts["notify_interval_seconds"])
         _update_ids(run_id, frame_run_id=frame["run_id"], current_step="frame")
         if not _wait_until_done(lambda: frame_status(frame["run_id"]), run_id):
             return

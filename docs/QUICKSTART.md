@@ -8,13 +8,16 @@ conda activate assetclaw
 pip install -r requirements.txt
 ```
 
-编辑 `.env`（填写 FEISHU_APP_ID、FEISHU_APP_SECRET、LLM_PROXY_API_KEY、SKILL_API_TOKEN）：
+编辑 `.env`（填写 FEISHU_APP_ID、FEISHU_APP_SECRET、DEEPSEEK_API_KEY、SKILL_API_TOKEN）：
 
 ```env
 FEISHU_EVENT_MODE=ws
 FEISHU_APP_ID=cli_xxx
 FEISHU_APP_SECRET=your_secret
-LLM_PROXY_API_KEY=your_key
+BRAIN_PROVIDER=deepseek
+DEEPSEEK_API_KEY=sk-xxxx
+DEEPSEEK_ROUTER_MODEL=deepseek-v4-flash
+DEEPSEEK_SUMMARY_MODEL=deepseek-v4-pro
 SKILL_API_TOKEN=your_token
 ```
 
@@ -35,8 +38,8 @@ conda run -n assetclaw python -m assetclaw_matting.cli.main init-db
 # 单独启动 Gateway
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_local_gateway.ps1
 
-# 测试 LLM / WS 配置 / 单元测试
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_llm_proxy.ps1
+# 测试 DeepSeek / WS 配置 / 单元测试
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_deepseek_api.ps1
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_feishu_ws_config.ps1
 conda run -n assetclaw python -m pytest
 ```

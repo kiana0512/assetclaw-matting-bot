@@ -132,6 +132,8 @@ storage\feishu_inbox\日期\会话\
 | `cherry.run_cancel` | 终止 Cherry 任务 | write_safe |
 | `cherry.run_delete` | 删除/归档已结束、失败、已取消的 Cherry 任务记录 | write_safe |
 | `frame.info` | 查看飞书抽帧工具配置、fps、输入输出目录 | readonly |
+| `feishu_table.export_json` | 将飞书多维表格导出为精简业务 JSON：角色、状态、类型、附件文件名、建议目录 | write_safe |
+| `feishu_table.restore_plan` | 基于 raw 调试导出生成写回飞书的 dry-run 计划，不直接写表 | readonly |
 | `frame.run_preview` | 预览飞书表格视频下载 + 抽帧任务 | readonly |
 | `frame.run_start` | 下载飞书表格视频附件并抽 PNG 序列帧，启动前需确认 | write_safe |
 | `frame.run_status` | 查看抽帧任务进度 | readonly |

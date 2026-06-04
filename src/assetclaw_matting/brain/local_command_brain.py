@@ -4,7 +4,9 @@ import re
 
 from assetclaw_matting.brain.base import BrainProvider
 from assetclaw_matting.brain.conversation_recall import answer_recent_question
+from assetclaw_matting.brain.emotion_planner import plan_emotional_reply
 from assetclaw_matting.brain.file_task_planner import plan_file_task
+from assetclaw_matting.brain.life_planner import plan_life_task
 from assetclaw_matting.brain.multimodal_planner import answer_recent_image_question, plan_multimodal_task
 from assetclaw_matting.brain.result_formatter import format_skill_results
 from assetclaw_matting.brain.schemas import BrainMessage, BrainResponse, ToolCall
@@ -70,6 +72,23 @@ class LocalCommandBrain(BrainProvider):
             self.log_message(message, response)
             return response
 
+        life = plan_life_task(message)
+        if life:
+            tool_calls, planned_text = life
+            results = self.execute_tool_calls(
+                tool_calls,
+                conversation_id=message.conversation_id,
+                user_id=message.user_id,
+            )
+            response = BrainResponse(
+                text=format_skill_results(results),
+                tool_calls=tool_calls,
+                raw={"deterministic_plan": planned_text, "skill_results": results},
+                provider=self.name,
+            )
+            self.log_message(message, response)
+            return response
+
         planned = plan_file_task(message)
         if planned:
             tool_calls, planned_text = planned
@@ -93,6 +112,11 @@ class LocalCommandBrain(BrainProvider):
 
         tool_calls = self._infer_tool_calls(text)
         if not tool_calls:
+            emotional_reply = plan_emotional_reply(text)
+            if emotional_reply:
+                response = BrainResponse(text=emotional_reply, provider=self.name)
+                self.log_message(message, response)
+                return response
             response = BrainResponse(
                 text="我还没理解这句。可以直接说：看看 E 盘有哪些文件，或 查看技能列表。",
                 provider=self.name,
@@ -118,7 +142,22 @@ class LocalCommandBrain(BrainProvider):
         lowered = text.lower()
 
         # bot / system queries
-        if any(kw in text for kw in ("你会做什么", "帮助", "怎么用", "使用说明")) or lowered in ("help", "帮助"):
+        if any(
+            kw in text
+            for kw in (
+                "你会做什么",
+                "你能做什么",
+                "你可以做什么",
+                "你能干嘛",
+                "你可以干嘛",
+                "你有什么用",
+                "你能帮我什么",
+                "你能陪我做什么",
+                "帮助",
+                "怎么用",
+                "使用说明",
+            )
+        ) or lowered in ("help", "帮助", "what can you do"):
             return [ToolCall(skill="bot.help", arguments={})]
         if any(kw in text for kw in ("技能列表", "查看技能", "skill list")):
             return [ToolCall(skill="bot.skills", arguments={})]
@@ -128,6 +167,34 @@ class LocalCommandBrain(BrainProvider):
             return [ToolCall(skill="bot.status", arguments={})]
         if any(kw in text for kw in ("最近错误", "查看错误", "recent errors", "错误记录")):
             return [ToolCall(skill="bot.errors", arguments={})]
+        if any(
+            kw in text
+            for kw in (
+                "诊断",
+                "卡在哪里",
+                "为什么没开始",
+                "为什么这个没开始",
+                "哪里卡住",
+                "自己判断",
+                "帮我判断",
+                "你看看现在什么情况",
+                "现在什么情况",
+            )
+        ):
+            return [ToolCall(skill="agent.diagnose", arguments={})]
+        if any(kw in text for kw in ("现在机器在跑什么", "当前所有任务", "当前执行现场", "现在有哪些活", "现在在跑什么")):
+            return [ToolCall(skill="agent.current_work", arguments={})]
+        if any(kw in text for kw in ("表情包状态", "情绪回复配置", "表情包池", "sticker status")):
+            return [ToolCall(skill="sticker.info", arguments={})]
+        if any(kw in text for kw in ("随机发个表情包", "发个表情包", "来个表情包", "发个 sticker", "发个sticker")):
+            return [ToolCall(skill="sticker.send_random", arguments={})]
+        url_match = re.search(r"https?://[^\s，。]+", text)
+        if url_match and any(kw in text for kw in ("网页", "网站", "url", "URL", "链接", "读取", "看一下", "总结", "内容")):
+            return [ToolCall(skill="web.fetch_url", arguments={"url": url_match.group(0)})]
+        web_query = _web_query_from_text(text)
+        if web_query:
+            skill = "web.research" if _wants_web_research(text) else "web.search"
+            return [ToolCall(skill=skill, arguments={"query": web_query})]
         if ("z盘" in lowered or "z 盘" in lowered) and any(kw in text for kw in ("哪些文件", "有什么", "有哪些", "列", "查看", "看看")):
             return [ToolCall(skill="file.list_allowed", arguments={"path": "Z:\\"})]
         if any(kw in text for kw in ("共享盘", "公共盘", "公共机共享")) and any(
@@ -142,6 +209,31 @@ class LocalCommandBrain(BrainProvider):
             return [ToolCall(skill="file.list_allowed", arguments={"path": settings.shared_matting_root})]
         if any(kw in lowered for kw in ("nvidia-smi", "gpu")) or any(kw in text for kw in ("显卡", "显存", "gpu", "GPU")):
             return [ToolCall(skill="system.gpu_status", arguments={})]
+        animation_root = _animation_root_from_text(text)
+        is_animation_ops = (
+            "animation_automation" in lowered
+            or "动画自动化" in text
+            or "动画流程" in text
+            or "帧的问题" in text
+            or ("matte" in lowered and "smooth" in lowered)
+        )
+        if is_animation_ops and any(kw in text for kw in ("状态", "数量", "多少帧", "多少张", "对齐", "检查", "盘点", "进度")):
+            return [ToolCall(skill="animation.status", arguments={"root": animation_root})]
+        if is_animation_ops and any(kw in text for kw in ("全部重做", "全量重做", "重新抽", "重抽", "重跑", "从 videos", "从videos")):
+            return [ToolCall(skill="animation.rerun_from_videos", arguments={"root": animation_root, "fps": _fps_from_text(text) or 24})]
+        if (
+            (is_animation_ops or "平滑" in text)
+            and any(kw in text for kw in ("再做一次平滑", "手动做一下平滑", "重新平滑", "再平滑", "当前 matte", "基于当前", "最新的平滑"))
+        ):
+            paths = re.findall(r"([A-Za-z]:\\[^\s，。]*)", text)
+            args: dict = {"root": animation_root, "skip_existing": any(kw in text for kw in ("跳过已有", "不覆盖", "补跑"))}
+            if len(paths) >= 2:
+                args["input_dir"] = paths[0]
+                args["output_dir"] = paths[1]
+            elif paths and paths[0].lower().rstrip("\\").endswith("\\matte"):
+                args["input_dir"] = paths[0]
+                args["output_dir"] = str(paths[0].rstrip("\\")[:-5] + "smooth")
+            return [ToolCall(skill="animation.manual_smooth_current", arguments=args)]
         is_pipeline = "自动化流程" in text or "动画流程" in text or "完整流程" in text or "三步流程" in text
         if is_pipeline and any(kw in text for kw in ("哪些任务", "任务列表", "当前任务", "有哪些任务")):
             return [ToolCall(skill="pipeline.run_list", arguments={"include_finished": any(kw in text for kw in ("全部", "历史", "已结束"))})]
@@ -209,6 +301,7 @@ class LocalCommandBrain(BrainProvider):
         if is_cherry and any(kw in text for kw in ("启动", "开始", "跑", "执行", "处理", "平滑", "锐化", "缩放")):
             paths = re.findall(r"([A-Za-z]:\\[^\s，。]*)", text)
             if paths:
+                skip_existing = any(kw in text for kw in ("跳过已有", "跳过已存在", "不要覆盖", "不覆盖", "只处理没做的", "只处理新的", "补跑"))
                 return [
                     ToolCall(
                         skill="cherry.run_start",
@@ -216,10 +309,21 @@ class LocalCommandBrain(BrainProvider):
                             "input_dir": paths[0],
                             "output_dir": paths[1] if len(paths) >= 2 else "E:\\cherry_output",
                             "recursive": True,
+                            "skip_existing": skip_existing,
                             "notify_interval_seconds": 60,
+                            "use_smooth": not any(kw in text for kw in ("不做时序", "关闭时序", "不要时序", "不做这个时序", "不做平滑", "关闭平滑", "without temporal", "no temporal")),
                         },
                     )
                 ]
+        comfy_match = re.search(r"(COMFY_[A-Fa-f0-9]{12})", text)
+        if comfy_match and any(kw in text for kw in ("终止", "取消", "停止", "别跑了")):
+            return [ToolCall(skill="comfyui.run_cancel", arguments={"run_id": comfy_match.group(1), "interrupt_current": True})]
+        if any(kw in text for kw in ("为什么没开始", "没开始", "开始这个任务", "继续这个任务", "继续跑", "恢复", "接着跑", "拉起")) and (
+            comfy_match or "comfyui" in lowered or "抠图" in text or "任务" in text or "这个" in text
+        ):
+            return [ToolCall(skill="comfyui.run_resume", arguments={"run_id": comfy_match.group(1) if comfy_match else None})]
+        if any(kw in text for kw in ("开始抠图", "启动抠图", "继续抠图")) and not re.findall(r"([A-Za-z]:\\[^\s，。]*)", text):
+            return [ToolCall(skill="comfyui.run_resume", arguments={})]
         if "comfyui" in lowered and any(kw in text for kw in ("状态", "在线", "进程", "使用情况")):
             return [ToolCall(skill="comfyui.status", arguments={})]
         if ("comfyui" in lowered or "抠图" in text or "平滑" in text) and any(
@@ -309,20 +413,10 @@ class LocalCommandBrain(BrainProvider):
                         },
                     )
                 ]
-            if any(kw in text for kw in ("批量抠图", "抠图管线", "开始抠图")):
-                return [
-                    ToolCall(
-                        skill="comfyui.run_start",
-                        arguments={
-                            "workflow_path": workflow,
-                            "input_dir": "E:\\input",
-                            "output_dir": "E:\\output",
-                            "recursive": True,
-                            "preserve_structure": True,
-                            "notify_interval_seconds": 300,
-                        },
-                    )
-                ]
+            if any(kw in text for kw in ("开始抠图", "启动抠图", "继续抠图")):
+                return [ToolCall(skill="comfyui.run_resume", arguments={})]
+            if any(kw in text for kw in ("批量抠图", "抠图管线")):
+                return [ToolCall(skill="comfyui.workflows", arguments={})]
         if any(kw in text for kw in ("共享盘", "公共盘", "公共机共享")) and any(kw in text for kw in ("跑", "抠图", "开始", "启动")):
             paths = re.findall(r"((?:[A-Za-z]:|\\\\)[^\s，。]*)", text)
             workflow = next((p for p in paths if p.lower().endswith(".json")), None)
@@ -521,3 +615,47 @@ def _pipeline_args_from_paths(paths: list[str]) -> dict:
     if workflow:
         args["workflow_path"] = workflow
     return args
+
+
+def _web_query_from_text(text: str) -> str | None:
+    if re.search(r"https?://", text):
+        return None
+    compact = text.strip()
+    if any(kw in compact for kw in ("搜索文本", "搜索内容", "查找文本", "查找内容")):
+        return None
+    if not any(kw in compact for kw in ("搜索", "搜一下", "搜搜", "查一下", "查查", "网上查", "联网查", "调研")):
+        return None
+    query = re.sub(r"^(帮我|你帮我|麻烦你|可以帮我|能不能帮我)?\s*", "", compact)
+    query = re.sub(r"^(搜索一下|搜索|搜一下|搜搜|查一下|查查|网上查一下|网上查|联网查一下|联网查|调研一下|调研)\s*", "", query)
+    query = re.sub(r"^(并)?(整理|整合|总结|归纳|对比)(一下|给我)?\s*", "", query)
+    query = re.sub(r"(并)?(整理|整合|总结|归纳|对比)(一下|给我)?$", "", query).strip(" ：:，。")
+    return query or None
+
+
+def _wants_web_research(text: str) -> bool:
+    return any(kw in text for kw in ("整合", "整理", "总结", "归纳", "对比", "调研", "资料", "来源", "结论"))
+
+
+def _animation_root_from_text(text: str) -> str:
+    paths = re.findall(r"([A-Za-z]:\\[^\s，。]*)", text)
+    for raw in paths:
+        normalized = raw.rstrip("\\/")
+        parts = re.split(r"[\\/]+", normalized)
+        lowered_parts = [part.lower() for part in parts]
+        if "animation_automation" in lowered_parts:
+            idx = lowered_parts.index("animation_automation")
+            if len(parts) > idx + 1:
+                return "\\".join(parts[: idx + 2])
+        if parts and parts[-1].lower() in {"videos", "frames", "frames_missing_patch", "matte", "smooth"}:
+            return "\\".join(parts[:-1])
+    return r"E:\animation_automation\2026-06-02"
+
+
+def _fps_from_text(text: str) -> int | None:
+    match = re.search(r"(?:fps|帧率|每秒)\s*[=:：]?\s*(\d+)|(\d+)\s*fps|每秒\s*(\d+)\s*帧", text, re.IGNORECASE)
+    if not match:
+        return None
+    value = next((group for group in match.groups() if group), None)
+    if not value:
+        return None
+    return int(value)

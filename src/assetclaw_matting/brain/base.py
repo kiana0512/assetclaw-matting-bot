@@ -83,6 +83,20 @@ class BrainProvider(ABC):
                         message = preview_run_start_confirmation(args, confirmation_id)
                     except Exception:
                         pass
+                elif tool_call.skill == "animation.manual_smooth_current":
+                    try:
+                        from assetclaw_matting.skills.animation_ops_skills import preview_manual_smooth_current_confirmation
+
+                        message = preview_manual_smooth_current_confirmation(args, confirmation_id)
+                    except Exception:
+                        pass
+                elif tool_call.skill == "animation.rerun_from_videos":
+                    try:
+                        from assetclaw_matting.skills.animation_ops_skills import preview_rerun_from_videos_confirmation
+
+                        message = preview_rerun_from_videos_confirmation(args, confirmation_id)
+                    except Exception:
+                        pass
                 result = {
                     "ok": False,
                     "skill": tool_call.skill,
@@ -102,7 +116,22 @@ class BrainProvider(ABC):
                 results.append(result)
                 continue
             notify_progress(f"正在调用工具：{tool_call.skill}")
-            result = call_skill(tool_call.skill, args, requested_by=self.name)
+            context_token = None
+            try:
+                from assetclaw_matting.runtime_context import get_runtime_context, reset_runtime_context, set_runtime_context
+
+                current_context = get_runtime_context()
+                merged_context = {
+                    **current_context,
+                    "conversation_id": conversation_id or current_context.get("conversation_id", ""),
+                    "user_id": user_id or current_context.get("user_id", ""),
+                    "requested_by": self.name,
+                }
+                context_token = set_runtime_context(**merged_context)
+                result = call_skill(tool_call.skill, args, requested_by=self.name)
+            finally:
+                if context_token is not None:
+                    reset_runtime_context(context_token)
             trace(
                 "skill.result",
                 conversation_id=conversation_id,

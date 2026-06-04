@@ -44,6 +44,19 @@ class Settings(BaseSettings):
     llm_proxy_timeout_seconds: int = 60
     llm_proxy_openai_compatible: bool = False
 
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_api_format: str = "openai"
+    deepseek_model: str = "deepseek-v4-pro"
+    deepseek_router_model: str = "deepseek-v4-flash"
+    deepseek_summary_model: str = "deepseek-v4-pro"
+    deepseek_thinking_type: str = "disabled"
+    deepseek_reasoning_effort: str = "medium"
+    deepseek_stream: bool = False
+    deepseek_timeout_seconds: int = 120
+    deepseek_max_retries: int = 2
+    deepseek_temperature: float = 0.1
+
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
     feishu_verification_token: str = ""
@@ -54,6 +67,13 @@ class Settings(BaseSettings):
     feishu_allowed_chat_ids: str = ""
     bot_require_confirmation_for_write: bool = False
     bot_error_push_enabled: bool = True
+    bot_emotional_replies_enabled: bool = True
+    bot_sticker_dir: Path = Path("E:/assetclaw-matting-bot/miratsu_stickers")
+    bot_sticker_probability: float = 1.0
+    bot_sticker_max_bytes: int = 8_000_000
+    bot_sticker_extensions: str = ".png;.gif"
+    user_default_location: str = "上海"
+    user_food_preferences: str = ""
     feishu_ignore_events_older_than_seconds: int = 600
 
     # Event mode: "ws" (long connection, recommended) or "webhook" (legacy, requires public URL)
@@ -127,6 +147,10 @@ class Settings(BaseSettings):
     @property
     def deny_path_patterns_list(self) -> list[str]:
         return [item.strip() for item in self.deny_path_patterns.split(";") if item.strip()]
+
+    @property
+    def bot_sticker_extensions_list(self) -> list[str]:
+        return [item.strip().lower() for item in self.bot_sticker_extensions.split(";") if item.strip()]
 
     def ensure_dirs(self) -> None:
         for directory in (

@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "root": "E:\\animation_automation\\2026-06-02",
+  "fps": 24,
+  "max_frames": 24,
+  "patch_dir": "E:\\animation_automation\\2026-06-02\\frames_missing_patch",
+  "sequence_count": 2,
+  "missing_count": 7,
+  "saved_count": 0,
+  "saved": [],
+  "errors": [],
+  "report_path": "E:\\assetclaw-matting-bot\\storage\\missing_frame_repairs\\repair_cd73759d8d.json"
+}

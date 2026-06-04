@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import subprocess
 import threading
@@ -36,7 +37,7 @@ def info() -> dict[str, Any]:
         "name": "Cherry_帧序列处理工具",
         "source_path": str(source),
         "exists": source.exists(),
-        "steps": ["时序 Alpha 平滑", "缩放", "锐化"],
+        "steps": ["去除外部噪点", "时序 Alpha 平滑", "缩放", "锐化"],
         "defaults": _default_options(),
     }
 
@@ -300,48 +301,46 @@ def _run_worker(run_id: str) -> None:
             pending = [path for path in group_files if str(path) not in done]
             if not pending:
                 continue
-            try:
-                batch_np = [module.decode(path.read_bytes()) for path in pending]
-                shapes = {arr.shape for arr in batch_np}
-                if len(shapes) != 1:
-                    raise ValueError(f"同一序列内图片尺寸不一致：{pending[0].parent}")
-                np, torch = _processing_deps()
-                batch = torch.from_numpy(np.stack(batch_np)).float() / 255.0
-                if options.get("use_smooth"):
-                    batch = module.temporal_smooth(
-                        batch,
-                        int(options.get("smooth_window", 5)),
-                        float(options.get("smooth_sigma", 1.0)),
-                        bool(options.get("sync_rgb", True)),
-                        float(options.get("min_alpha", 0.05)),
-                    )
-                if options.get("use_resize"):
-                    batch = module.ps_bicubic_sharper(batch, int(options.get("resize_width", 384)), int(options.get("resize_height", 512)))
-                if options.get("use_sharpen"):
-                    batch = module.sharpen(
-                        batch,
-                        float(options.get("sharpen_amount", 2.0)),
-                        int(options.get("sharpen_radius", 2)),
-                        float(options.get("sharpen_threshold", 0.02)),
-                        int(options.get("sharpen_shrink", 4)),
-                        float(options.get("min_alpha", 0.05)),
-                    )
-                out_np = (batch.detach().cpu().numpy().clip(0, 1) * 255).astype(np.uint8)
-                for index, image_path in enumerate(pending):
-                    target = _output_target(src, dst, image_path)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(module.encode(out_np[index]))
-                    processed.append({"src_path": str(image_path), "dst_path": str(target), "rel_path": str(image_path.relative_to(src))})
-                    options["processed"] = processed
-                    _save_progress(run_id, completed=len(processed), failed=len(errors), options=options)
-            except Exception as exc:
-                for image_path in pending:
-                    errors.append({"src_path": str(image_path), "rel_path": str(image_path.relative_to(src)), "error": str(exc)})
-                options["errors"] = errors
-                _save_progress(run_id, completed=len(processed), failed=len(errors), options=options, error=str(exc))
-                _notify(run_id, f"Cherry 处理出错：{pending[0].parent}\n{exc}")
-                _set_run_status(run_id, "FAILED")
-                return
+            for process_files in _compatible_batches(module, pending, bool(options.get("use_smooth"))):
+                try:
+                    batch_np = [module.decode(path.read_bytes()) for path in process_files]
+                    np, torch = _processing_deps()
+                    batch = torch.from_numpy(np.stack(batch_np)).float() / 255.0
+                    if options.get("use_denoise"):
+                        batch = module.alpha_denoise(
+                            batch,
+                            float(options.get("denoise_threshold", 0.06)),
+                            int(options.get("denoise_radius", 0)),
+                        )
+                    if options.get("use_smooth"):
+                        batch = _temporal_smooth(module, batch, options)
+                    if options.get("use_resize"):
+                        batch = module.ps_bicubic_sharper(batch, int(options.get("resize_width", 256)), int(options.get("resize_height", 256)))
+                    if options.get("use_sharpen"):
+                        batch = module.sharpen(
+                            batch,
+                            float(options.get("sharpen_amount", 2.0)),
+                            int(options.get("sharpen_radius", 2)),
+                            float(options.get("sharpen_threshold", 0.02)),
+                            int(options.get("sharpen_shrink", 4)),
+                            float(options.get("min_alpha", 0.05)),
+                        )
+                    out_np = (batch.detach().cpu().numpy().clip(0, 1) * 255).astype(np.uint8)
+                    for index, image_path in enumerate(process_files):
+                        target = _output_target(src, dst, image_path)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(module.encode(out_np[index]))
+                        processed.append({"src_path": str(image_path), "dst_path": str(target), "rel_path": str(image_path.relative_to(src))})
+                        options["processed"] = processed
+                        _save_progress(run_id, completed=len(processed), failed=len(errors), options=options)
+                except Exception as exc:
+                    for image_path in process_files:
+                        errors.append({"src_path": str(image_path), "rel_path": str(image_path.relative_to(src)), "error": str(exc)})
+                    options["errors"] = errors
+                    _save_progress(run_id, completed=len(processed), failed=len(errors), options=options, error=str(exc))
+                    _notify(run_id, f"Cherry 处理出错：{process_files[0].parent}\n{exc}")
+                    _set_run_status(run_id, "FAILED")
+                    return
         final_status = "DONE_WITH_ERRORS" if errors else "DONE"
         _set_run_status(run_id, final_status)
     except Exception as exc:
@@ -597,6 +596,7 @@ def _tool_source_path() -> Path:
 
     root = Path(settings.assetclaw_root)
     candidates = [
+        root / "Cherry_帧序列处理工具_2" / "web_temporal_smooth.py",
         root / "Cherry_帧序列处理工具_1" / "web_temporal_smooth.py",
         root / "Cherry_帧序列处理工具" / "web_temporal_smooth.py",
     ]
@@ -625,20 +625,36 @@ def _group_sequences(root: Path, files: list[Path]) -> list[list[Path]]:
     return [sorted(paths, key=lambda path: path.name.lower()) for _rel, paths in sorted(groups.items(), key=lambda item: str(item[0]).lower())]
 
 
+def _compatible_batches(module: ModuleType, files: list[Path], require_same_shape: bool) -> list[list[Path]]:
+    by_shape: dict[tuple[int, ...], list[Path]] = defaultdict(list)
+    for path in files:
+        shape = tuple(module.decode(path.read_bytes()).shape)
+        by_shape[shape].append(path)
+    if len(by_shape) <= 1:
+        return [files]
+    if require_same_shape:
+        raise ValueError(f"同一序列内图片尺寸不一致：{files[0].parent}")
+    return [paths for _shape, paths in sorted(by_shape.items(), key=lambda item: str(item[0]))]
+
+
 def _output_target(src: Path, dst: Path, image_path: Path) -> Path:
     return dst / image_path.relative_to(src).with_suffix(".png")
 
 
 def _default_options() -> dict[str, Any]:
     return {
+        "use_denoise": True,
+        "denoise_threshold": 0.06,
+        "denoise_radius": 0,
         "use_smooth": True,
         "smooth_window": 5,
         "smooth_sigma": 1.0,
         "min_alpha": 0.05,
         "sync_rgb": True,
+        "ring_width": 25,
         "use_resize": True,
-        "resize_width": 384,
-        "resize_height": 512,
+        "resize_width": 256,
+        "resize_height": 256,
         "use_sharpen": True,
         "sharpen_amount": 2.0,
         "sharpen_radius": 2,
@@ -652,6 +668,12 @@ def _merge_options(options: dict[str, Any]) -> dict[str, Any]:
     aliases = {
         "window_size": "smooth_window",
         "sigma": "smooth_sigma",
+        "use_clean": "use_denoise",
+        "use_denoise_alpha": "use_denoise",
+        "denoise_thresh": "denoise_threshold",
+        "dn_thresh": "denoise_threshold",
+        "denoise_smooth_radius": "denoise_radius",
+        "dn_radius": "denoise_radius",
         "resize_w": "resize_width",
         "resize_h": "resize_height",
         "sharp_amount": "sharpen_amount",
@@ -663,17 +685,32 @@ def _merge_options(options: dict[str, Any]) -> dict[str, Any]:
         normalized = aliases.get(key, key)
         if normalized in merged and value is not None:
             merged[normalized] = value
-    for key in ("use_smooth", "sync_rgb", "use_resize", "use_sharpen"):
+    for key in ("use_denoise", "use_smooth", "sync_rgb", "use_resize", "use_sharpen"):
         merged[key] = bool(merged[key])
-    for key in ("smooth_window", "resize_width", "resize_height", "sharpen_radius", "sharpen_shrink"):
+    for key in ("denoise_radius", "smooth_window", "ring_width", "resize_width", "resize_height", "sharpen_radius", "sharpen_shrink"):
         merged[key] = int(merged[key])
-    for key in ("smooth_sigma", "min_alpha", "sharpen_amount", "sharpen_threshold"):
+    for key in ("denoise_threshold", "smooth_sigma", "min_alpha", "sharpen_amount", "sharpen_threshold"):
         merged[key] = float(merged[key])
     return merged
 
 
+def _temporal_smooth(module: ModuleType, batch: Any, options: dict[str, Any]) -> Any:
+    args = [
+        batch,
+        int(options.get("smooth_window", 5)),
+        float(options.get("smooth_sigma", 1.0)),
+        bool(options.get("sync_rgb", True)),
+        float(options.get("min_alpha", 0.05)),
+    ]
+    if len(inspect.signature(module.temporal_smooth).parameters) >= 6:
+        args.append(int(options.get("ring_width", 25)))
+    return module.temporal_smooth(*args)
+
+
 def _steps_text(options: dict[str, Any]) -> str:
     steps = []
+    if options.get("use_denoise"):
+        steps.append(f"去噪 阈值{options.get('denoise_threshold')} 半径{options.get('denoise_radius')}")
     if options.get("use_smooth"):
         steps.append(f"平滑 窗口{options.get('smooth_window')} 强度{options.get('smooth_sigma')}")
     if options.get("use_resize"):

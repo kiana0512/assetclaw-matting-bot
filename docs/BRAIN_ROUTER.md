@@ -1,8 +1,10 @@
 # Brain Router
 
-当前主线是 LLM Proxy + 自建 Brain Router，因为 Win3090 只负责执行，不本地跑 LLM。LLM Proxy 输出严格 JSON tool calls，本地执行 skill 后，再把结构化结果交给模型总结成飞书可读文本。
+当前主线是 DeepSeek API + 自建 Brain Router，因为 Win3090 只负责执行，不本地跑 LLM。DeepSeek 输出严格 JSON tool calls，本地执行 skill 后，再把结构化结果交给模型总结成飞书可读文本。
 
-公司 Lilith API 当前按 Claude Code 的 Anthropic-compatible 方式接入：`LLM_PROXY_BASE_URL=https://llm-proxy.lilithgames.com`，代码会请求 `/v1/messages`。Atlas 助手会把原始 LLM Proxy Key 转换成 Claude Code 使用的 `ANTHROPIC_AUTH_TOKEN`；本项目的 `.env` 应把这个 token 写入 `LLM_PROXY_API_KEY`，并设置 `LLM_PROXY_AUTH_HEADER=authorization_bearer`。
+DeepSeek 按 OpenAI-compatible Chat Completions 接入：`DEEPSEEK_BASE_URL=https://api.deepseek.com`，代码请求 `/chat/completions`。生产推荐 `.env` 设置 `BRAIN_PROVIDER=deepseek`、`DEEPSEEK_API_KEY`、`DEEPSEEK_ROUTER_MODEL=deepseek-v4-flash`、`DEEPSEEK_SUMMARY_MODEL=deepseek-v4-pro`。
+
+旧 `LLM_PROXY_*` 配置仅保留兼容，不再是生产主线。
 
 本地记忆保存在 SQLite：`brain_messages` 存近期对话和 tool calls，`conversation_summaries` 存自动压缩后的旧对话摘要，`memory_notes` 存长期结构化记忆。飞书消息会使用 `chat_id + open_id` 生成 `conversation_id`，因此同一个群里的不同用户也会各走各的上下文和记忆。Brain 每次调用 LLM 前只读取同一 `conversation_id` 的摘要、近期消息和长期记忆作为上下文。显式“请记住”类请求会通过 `memory.remember` 写入当前用户会话 scope。
 
@@ -19,13 +21,13 @@
 
 操作员可看 `logs\conversation.log` 观察完整链路：飞书入站文本、Brain 输入、模型选择的 tool calls、skill 执行结果、Brain 最终回复、飞书出站回复。日志不会展示模型隐藏思维链，只展示可审计的决策和工具调用。
 
-本地检查 LLM Proxy：
+本地检查 DeepSeek：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\test_llm_proxy.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_deepseek_api.ps1
 ```
 
-如果返回 401 且提示 `Invalid proxy server token`，说明请求已经到达公司代理，但 `.env` 中的 `LLM_PROXY_API_KEY` 未被代理接受。此时优先重新从 Atlas 助手复制当前正在使用的 Lilith LLM API-Key，而不是调整模型名。
+如果返回 401，检查 `DEEPSEEK_API_KEY`；如果返回 402，检查 DeepSeek 余额/计费；如果返回 404，检查 `DEEPSEEK_BASE_URL` 和模型名是否为 `deepseek-v4-flash` / `deepseek-v4-pro`。
 
 Brain 不能直接 shell、不能删除、不能读 secret，只能调 registry 暴露的 skills。
 

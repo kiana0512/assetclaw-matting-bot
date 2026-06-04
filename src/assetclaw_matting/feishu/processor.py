@@ -76,8 +76,9 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
     _remember_recent_attachments(conversation_id, event.attachments)
 
     if _is_simple_greeting(event.text):
-        text_out = "你好。"
+        text_out = "初音在。今天想让我陪你唱一会儿，还是一起把某个任务往前推一点？"
         _try_reply(event.message_id, event.chat_id, text_out)
+        _try_send_emotional_sticker(event.chat_id, event.text, text_out)
         _log_direct_brain_message(conversation_id, event, text_out)
         update_event_dedup_status(dedup_key, "success")
         return FeishuProcessResult(ok=True, trace_id=trace_id, reply_text=text_out)
@@ -87,11 +88,12 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
         from assetclaw_matting.brain import router as brain_router
         from assetclaw_matting.brain.schemas import BrainMessage
 
-        _try_reply(
-            event.message_id,
-            event.chat_id,
-            "收到，处理中。",
-        )
+        if _should_send_processing_ack(event):
+            _try_reply(
+                event.message_id,
+                event.chat_id,
+                "我收到啦，正在处理。",
+            )
 
         def _progress_sender(text: str) -> None:
             log.info("progress trace_id=%s text=%s", trace_id, redact_secrets(text))
@@ -120,6 +122,7 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
             reset_progress_sender(progress_token)
         reply_text = response.text or "完成。"
         _try_reply(event.message_id, event.chat_id, reply_text)
+        _try_send_emotional_sticker(event.chat_id, event.text, reply_text)
         trace(
             "feishu.reply",
             trace_id=trace_id,
@@ -154,7 +157,7 @@ def _try_handle_confirmation(
 ) -> FeishuProcessResult | None:
     text = event.text.strip()
     confirm_like = re.search(r"\b(?:yes|y)\b|确认(?:执行)?", text, re.IGNORECASE)
-    cancel_like = re.search(r"\b(?:cancel|no|n)\b|取消(?:执行)?", text, re.IGNORECASE)
+    cancel_like = _is_confirmation_cancel(text)
     if not confirm_like and not cancel_like:
         return None
 
@@ -247,6 +250,7 @@ def _try_handle_confirmation(
     if missing:
         text_out = text_out + "\n未找到：" + "、".join(missing)
     _try_send_chat(event.chat_id, text_out)
+    _try_send_emotional_sticker(event.chat_id, event.text, text_out)
     trace(
         "feishu.reply",
         trace_id=trace_id,
@@ -256,6 +260,15 @@ def _try_handle_confirmation(
         text=text_out,
     )
     return FeishuProcessResult(ok=all(bool(result.get("ok")) for result in results), trace_id=trace_id, reply_text=text_out)
+
+
+def _is_confirmation_cancel(text: str) -> bool:
+    stripped = text.strip()
+    if re.search(r"(COMFY|CHERRY|FRAME|PIPE|SMAT)_[A-Fa-f0-9]{12}", stripped):
+        return False
+    if re.fullmatch(r"(?:取消|取消执行|cancel|no|n)", stripped, re.IGNORECASE):
+        return True
+    return bool(re.fullmatch(r"(?:取消|取消执行)\s+[a-fA-F0-9]{6,}", stripped, re.IGNORECASE))
 
 
 def _try_reply(message_id: str, chat_id: str, text: str) -> None:
@@ -280,6 +293,17 @@ def _try_send_chat(chat_id: str, text: str) -> None:
         feishu_client.send_text_to_chat(chat_id, text)
     except Exception as exc:
         log.error("send to chat failed: %s", redact_secrets(str(exc)))
+
+
+def _try_send_emotional_sticker(chat_id: str, message_text: str, reply_text: str) -> None:
+    from assetclaw_matting.services.sticker_service import send_sticker_to_chat
+
+    if not chat_id:
+        return
+    try:
+        send_sticker_to_chat(chat_id, message_text=message_text, reply_text=reply_text)
+    except Exception as exc:
+        log.error("send emotional sticker failed: %s", redact_secrets(str(exc)))
 
 
 def _prepare_attachments(event: FeishuMessageEvent, conversation_id: str) -> list[dict[str, object]]:
@@ -374,6 +398,22 @@ def _unique_path(path: Path) -> Path:
 def _is_simple_greeting(text: str) -> bool:
     normalized = re.sub(r"[\s!！。,.，~～]+", "", text.strip().lower())
     return normalized in {"hi", "hello", "hey", "你好", "您好", "嗨", "哈喽"}
+
+
+def _should_send_processing_ack(event: FeishuMessageEvent) -> bool:
+    if event.attachments:
+        return True
+    text = (event.text or "").strip()
+    if not text:
+        return False
+    try:
+        from assetclaw_matting.brain.emotion_planner import plan_emotional_reply
+
+        if plan_emotional_reply(text):
+            return False
+    except Exception:
+        log.debug("failed to classify conversational message for ack", exc_info=True)
+    return True
 
 
 def _log_direct_brain_message(conversation_id: str, event: FeishuMessageEvent, response_text: str) -> None:

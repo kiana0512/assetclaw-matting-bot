@@ -37,12 +37,16 @@ im:message
 storage\feishu_inbox\日期\会话\
 ```
 
-## LLM Proxy 401 / 403
+## DeepSeek API 401 / 402 / 404 / 429
 
-1. 检查 `.env` 中 `LLM_PROXY_API_KEY` 是否有效
-2. 确认 `LLM_PROXY_BASE_URL` 格式正确（是否需要 `/v1` 后缀）
-3. 检查 `LLM_PROXY_AUTH_HEADER` 是否与服务端要求一致（`authorization_bearer` 或 `x-api-key`）
-4. 运行 `pwsh scripts\test_llm_proxy.ps1` 直接测试 Proxy 连接
+1. 401：检查 `.env` 中 `DEEPSEEK_API_KEY` 是否有效。
+2. 402 / insufficient balance：检查 DeepSeek 平台充值、余额或计费状态。
+3. 404：检查 `DEEPSEEK_BASE_URL=https://api.deepseek.com`，不要重复拼 `/v1`；检查模型名是否为 `deepseek-v4-flash` / `deepseek-v4-pro`。
+4. 429 / rate limit：稍后重试，或增加重试/backoff。
+5. timeout：调大 `DEEPSEEK_TIMEOUT_SECONDS`，或保持 `DEEPSEEK_THINKING_TYPE=disabled`。
+6. 运行 `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_deepseek_api.ps1` 直接测试 DeepSeek 和 `/brain/test`。
+
+旧 `scripts\test_llm_proxy.ps1` 仅用于 LLM Proxy 兼容测试。
 
 ## Skill token invalid / 401
 
@@ -111,6 +115,7 @@ Invoke-RestMethod http://127.0.0.1:7865/skills/v1/manifest -Headers $headers
 
 # 运行完整测试套件
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_llm_proxy.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_deepseek_api.ps1
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_feishu_ws_config.ps1
 conda run -n assetclaw python -m pytest
 ```

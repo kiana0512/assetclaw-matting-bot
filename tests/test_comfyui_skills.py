@@ -25,6 +25,7 @@ from assetclaw_matting.skills.comfyui_skills import (
     workflows_list,
 )
 from assetclaw_matting.skills import comfyui_skills
+from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
 
 
 def setup_module() -> None:
@@ -292,3 +293,95 @@ def test_run_preview_and_pause_resume(monkeypatch) -> None:
     assert paused["ok"] is True
     resumed = run_resume(started["run_id"])
     assert resumed["ok"] is True
+
+
+def test_run_resume_relaunches_running_task(monkeypatch) -> None:
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.db.sqlite import get_connection
+
+    calls: list[str] = []
+    monkeypatch.setattr(settings, "comfyui_fake_mode", True)
+    monkeypatch.setattr(comfyui_skills, "_start_run_worker", lambda run_id: calls.append(run_id))
+    monkeypatch.setattr(comfyui_skills, "_start_progress_monitor", lambda run_id: None)
+    run_id = "COMFY_RESUME0001"
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO comfyui_runs
+            (id, status, workflow_path, input_dir, output_dir, total, files_json, prompt_ids_json, options_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                "RUNNING",
+                "workflow.json",
+                "E:\\input",
+                "E:\\output",
+                1,
+                "[]",
+                "[]",
+                json.dumps({"prompt_map": []}),
+                "2026-06-04T00:00:00+00:00",
+                "2026-06-04T00:00:00+00:00",
+            ),
+        )
+
+    resumed = run_resume(run_id)
+
+    assert resumed["ok"] is True
+    assert resumed["message"] == "已拉起提交 worker。"
+    assert calls == [run_id]
+
+
+def test_run_resume_does_not_duplicate_active_queue(monkeypatch) -> None:
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.db.sqlite import get_connection
+
+    calls: list[str] = []
+    monkeypatch.setattr(settings, "comfyui_fake_mode", False)
+    monkeypatch.setattr(comfyui_skills, "_start_run_worker", lambda run_id: calls.append(run_id))
+    monkeypatch.setattr(comfyui_skills, "_start_progress_monitor", lambda run_id: None)
+    monkeypatch.setattr(
+        "assetclaw_matting.comfyui.client.comfyui_client.get_queue",
+        lambda: {"queue_running": [{"prompt_id": "p"}], "queue_pending": []},
+    )
+    run_id = "COMFY_QUEUE00001"
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO comfyui_runs
+            (id, status, workflow_path, input_dir, output_dir, total, files_json, prompt_ids_json, options_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                "RUNNING",
+                "workflow.json",
+                "E:\\input",
+                "E:\\output",
+                1,
+                "[]",
+                "[]",
+                json.dumps({"prompt_map": []}),
+                "2026-06-04T00:00:00+00:00",
+                "2026-06-04T00:00:00+00:00",
+            ),
+        )
+
+    resumed = run_resume(run_id)
+
+    assert resumed["message"] == "任务已经在 ComfyUI 队列中运行。"
+    assert calls == []
+
+
+def test_local_router_resumes_vague_start_and_cancels_named_run() -> None:
+    brain = LocalCommandBrain()
+
+    resume = brain._infer_tool_calls("为什么这个没开始啊")
+    cancel = brain._infer_tool_calls("取消终止这个任务 COMFY_ABCDEF123456")
+    vague_start = brain._infer_tool_calls("开始抠图啊")
+
+    assert resume[0].skill == "agent.diagnose"
+    assert cancel[0].skill == "comfyui.run_cancel"
+    assert cancel[0].arguments["run_id"] == "COMFY_ABCDEF123456"
+    assert vague_start[0].skill == "comfyui.run_resume"

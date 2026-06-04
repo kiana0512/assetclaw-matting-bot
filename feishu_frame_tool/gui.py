@@ -108,7 +108,7 @@ class App:
         self._path_row(base, 2, "序列帧导出目录", ("paths", "export_dir"))
 
         self.dedup_var = tk.BooleanVar(
-            value=bool(self.cfg.get("dedup", {}).get("enabled", True)))
+            value=bool(self.cfg.get("dedup", {}).get("enabled", False)))
         ttk.Checkbutton(base, text="去除相似帧 (导出后本地处理)",
                         variable=self.dedup_var).grid(
             row=3, column=1, sticky="w", pady=4)

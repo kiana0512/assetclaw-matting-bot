@@ -1,12 +1,12 @@
-AssetClaw Win3090 Animation Butler 是一个运行在 Windows RTX 3090 服务器上的自动化执行节点。通过飞书官方长连接（WebSocket）接收自然语言指令，由 LLM Proxy + 自建 Brain Router 将自然语言转换成受控 skills 调用，再由 Win3090 本地执行文件管理、ComfyUI 批量抠图等任务，并将结果返回给飞书。
+AssetClaw Win3090 Animation Butler 是一个运行在 Windows RTX 3090 服务器上的自动化执行节点。通过飞书官方长连接（WebSocket）接收自然语言指令，由 DeepSeek API + 自建 Brain Router 将自然语言转换成受控 skills 调用，再由 Win3090 本地执行文件管理、ComfyUI 批量抠图等任务，并将结果返回给飞书。
 
 **安全合规**：使用飞书官方长连接模式，无需公网 IP、无需 Cloudflare Tunnel、无需任何内网穿透工具。
 
 ## Architecture
 
 - 飞书 = 嘴巴：通过长连接 WebSocket 接收和回复消息。
-- LLM Proxy + Brain Router = 大脑：把自然语言变成 JSON tool calls。
-- Claude Opus / Sonnet = 核心模型：通过 LLM Proxy 调用，不在本地跑 LLM。
+- DeepSeek + Brain Router = 大脑：把自然语言变成 JSON tool calls。
+- DeepSeek v4 = 核心模型：通过 DeepSeek API 调用，不在本地跑 LLM。
 - Win3090 = 身体：只运行 Gateway（本地调试）、WS Receiver、Skills、Worker。
 - Skills = 四肢：所有机器动作都必须经过 Skill Registry。
 - DB / Logs = 记忆：记录 brain message 和 skill audit。
@@ -22,8 +22,8 @@ pip install -r requirements.txt
 
 编辑 `.env`，至少填写：
 
-- `LLM_PROXY_API_KEY`
-- `LLM_PROXY_MODEL`
+- `DEEPSEEK_API_KEY`
+- `DEEPSEEK_ROUTER_MODEL` / `DEEPSEEK_SUMMARY_MODEL`
 - `FEISHU_APP_ID`
 - `FEISHU_APP_SECRET`
 - `FEISHU_EVENT_MODE=ws`
@@ -42,7 +42,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot_local.ps1
 ## Local Tests
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_llm_proxy.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_deepseek_api.ps1
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_feishu_ws_config.ps1
 conda run -n assetclaw python -m pytest
 ```

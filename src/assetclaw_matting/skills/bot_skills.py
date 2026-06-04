@@ -4,41 +4,41 @@ from typing import Any
 
 
 _HELP_TEXT = """\
-AssetClaw Win3090 自动化执行节点
+我是你的初音未来机器人：能陪你唱、陪你聊，也能把 Win3090 上的生产任务往前推。你问“你能干嘛”的时候，我不该只报老三样；更好的答案应该按场景展开。
 
-我现在能做这些：
-- 在 D/E/F 工作盘、Z 盘共享盘和指定 UNC 共享路径列目录、查文件、找图片/视频/表格/压缩包
-- 跨盘复制文件/目录、复制并改名、创建目录
-- 批量复制/移动/重命名/建目录，按顺序改名
-- 读取/写入安全文本文件、计算 hash、查看磁盘空间
-- 图片批量查尺寸、转格式、缩放
-- 接收飞书图片/视频/文件，保存到本地后继续处理
-- 翻译文字；识别图片里的文字并翻译
-- ComfyUI 工作流选择、批量抠图、队列、管线进度、ETA、GPU 状态查询
-- 共享盘抠图：先同步到本地跑，再同步结果回共享盘
-- 删除/清空/移动这类高风险动作会先二次确认
-- 把本地文件通过飞书发回当前会话，图片可直接预览显示
-- 管理抠图批次（当前 fake mode，不跑 GPU）
-- 保存 / 查询本地记忆
+初音能陪你：
+- 接住吐槽、焦虑、崩溃、失眠、想听歌、想要情绪价值这类碎片化输入
+- 陪你唱歌：识别歌名和情绪线，少量接你给出的歌词，更多时候写同氛围原创小段陪唱
+- 记住你说过的重要偏好、位置、项目上下文，后面少让你重复
+- 把混乱想法整理成下一步：先做什么、卡在哪里、要不要暂停、要不要重跑
+- 陪你做低决策生活小事：天气、带不带伞、午饭晚饭外卖、今天先别把自己耗干
 
-可以直接说：
-看看 E 盘有哪些图片
-看看 Z 盘有哪些文件
-看看共享盘抠图目录有哪些文件
-把 E:\\a.png 复制一份并改名为 a_bak.png
-把刚刚那张图保存到 E:\\images
-把 E:\\1.png 用图片形式发给我
-把共享盘 input 文件夹压缩成 zip 并发送给我
-选择 C:\\Users\\lilithgames\\Downloads\\ComfyUI-aki-v3\\ComfyUI\\user\\default\\workflows\\软边缘测试-动画批量.json 作为抠图工作流
-开始批量抠图（默认 E:\\input -> E:\\output，保留目录结构）
-现在 ComfyUI 跑到多少张了
-暂停当前抠图任务
-继续当前抠图任务
-终止当前抠图任务
-把这句话翻译成英文：今天辛苦了
-把刚刚那张图里的文字翻译成中文
-把 E:\\assetclaw-matting-bot\\README.md 通过飞书发给我
-查看技能列表"""
+初音也能当生产助理：
+- 看当前现场：ComfyUI、Cherry、抽帧、完整动画流程、GPU、待确认、最近错误
+- 帮你判断任务为什么没动、卡在哪里、下一步该恢复/暂停/重跑/同步
+- 管理 ComfyUI 工作流选择、批量抠图、队列、进度、ETA、输出同步
+- 跑共享盘抠图：先拉到本地跑，再把结果同步回共享盘
+- 做动画链路：飞书表格视频下载、抽帧、抠图、Cherry 平滑、缺帧修复和全量重跑
+
+初音还能当文件和资料管家：
+- 在允许的工作盘和共享盘里找文件、列目录、数图片/视频/表格/压缩包
+- 复制、打包、改名、批量处理、发回飞书；图片可以直接预览发回
+- 接收飞书图片/视频/文件，保存后继续 OCR、翻译、转格式、缩放或整理
+- 联网搜索和整合：搜候选结果、读取明确 URL、抓取前几页并整理要点和来源
+
+你可以这样问我：
+你看看现在什么情况
+这个任务为什么没开始，帮我判断
+我现在很烦，你先帮我拆一下
+网上搜一下这个问题，整理来源和结论
+这批图从哪里到哪里，跑完发我
+把刚刚那张图里的字翻译成中文
+看看共享盘抠图目录，帮我整理输入输出
+今天我不想做决定，午饭给我三个选项
+陪我唱一会儿，给我写同氛围原创小段
+把这个流程写成我能直接发给同事的说明
+
+高风险动作比如删除、清空、移动、终止任务会先二次确认。"""
 
 
 def bot_help(**_: Any) -> dict[str, Any]:
@@ -55,7 +55,12 @@ def bot_skills(**_: Any) -> dict[str, Any]:
         domains.setdefault(d, []).append(skill)
 
     domain_labels = {
+        "agent": "智能体调度 / 诊断",
         "bot": "系统 / 帮助",
+        "sticker": "情绪表情",
+        "emotion": "情绪理解",
+        "life": "生活陪聊",
+        "web": "网页读取",
         "file": "文件系统",
         "memory": "记忆",
         "matting": "抠图批次",
@@ -135,6 +140,7 @@ def bot_status(**_: Any) -> dict[str, Any]:
     from assetclaw_matting.db.repos import get_last_error_summary
     from assetclaw_matting.skills.registry import SKILLS
 
+    deepseek_ok = bool(settings.deepseek_api_key and settings.deepseek_base_url)
     llm_key_ok = bool(settings.llm_proxy_enabled and settings.llm_proxy_api_key)
     db_exists = settings.data_db_path.exists()
     skill_count = len(SKILLS)
@@ -151,8 +157,10 @@ def bot_status(**_: Any) -> dict[str, Any]:
         f"Cloudflare：{'已禁用' if is_ws else '可能启用（切换到 ws 模式）'}",
         f"公网暴露：{'无' if is_ws else '需要公网 URL（legacy）'}",
         f"Brain provider：{settings.brain_provider}",
-        f"LLM Proxy 配置：{'已配置' if llm_key_ok else '未配置或 key 为空'}",
-        f"LLM Proxy URL：{settings.llm_proxy_base_url}",
+        f"DeepSeek 配置：{'已配置' if deepseek_ok else '未配置或 key 为空'}",
+        f"DeepSeek URL：{settings.deepseek_base_url}",
+        f"DeepSeek router/summary：{settings.deepseek_router_model} / {settings.deepseek_summary_model}",
+        f"Legacy LLM Proxy 配置：{'已配置' if llm_key_ok else '未配置或 key 为空'}",
         f"ComfyUI fake mode：{'是' if settings.comfyui_fake_mode else '否（真实模式）'}",
         f"数据库：{'存在' if db_exists else '不存在'} ({settings.data_db_path})",
         f"允许路径：{settings.allowed_roots}",

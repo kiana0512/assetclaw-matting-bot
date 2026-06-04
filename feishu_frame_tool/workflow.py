@@ -94,7 +94,7 @@ class Workflow:
 
         fp = config.get("framepacker", {})
         self.fps = int(fp.get("fps", 24))
-        self.max_frames = int(fp.get("max_frames", 24) or 0)
+        self.max_frames = int(fp.get("max_frames", 0) or 0)
 
     def _stopped(self) -> bool:
         return self.stop_event.is_set()

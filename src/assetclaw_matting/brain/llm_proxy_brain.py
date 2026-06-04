@@ -13,7 +13,9 @@ from requests import HTTPError
 from assetclaw_matting.brain.base import BrainProvider
 from assetclaw_matting.brain.conversation_recall import answer_recent_question
 from assetclaw_matting.brain.context_builder import build_memory_prompt, build_skill_manifest_prompt
+from assetclaw_matting.brain.emotion_planner import plan_emotional_reply
 from assetclaw_matting.brain.file_task_planner import plan_file_task
+from assetclaw_matting.brain.life_planner import plan_life_task
 from assetclaw_matting.brain.multimodal_planner import answer_recent_image_question, plan_multimodal_task
 from assetclaw_matting.brain.prompts import SYSTEM_PROMPT
 from assetclaw_matting.brain.result_formatter import format_skill_results
@@ -95,6 +97,23 @@ class LLMProxyBrain(BrainProvider):
             self.log_message(message, response)
             return response
 
+        life = plan_life_task(message)
+        if life:
+            tool_calls, text = life
+            results = self.execute_tool_calls(
+                tool_calls,
+                conversation_id=message.conversation_id,
+                user_id=message.user_id,
+            )
+            response = BrainResponse(
+                text=format_skill_results(results),
+                tool_calls=tool_calls,
+                raw={"deterministic_plan": text, "skill_results": results},
+                provider=self.name,
+            )
+            self.log_message(message, response)
+            return response
+
         planned = plan_file_task(message)
         if planned:
             tool_calls, text = planned
@@ -121,6 +140,12 @@ class LLMProxyBrain(BrainProvider):
                 text="我收到了空消息。可以直接发文字指令，或发图片后说明要提取文字、翻译还是保存。",
                 provider=self.name,
             )
+            self.log_message(message, response)
+            return response
+
+        emotional_reply = plan_emotional_reply(message.text)
+        if emotional_reply:
+            response = BrainResponse(text=emotional_reply, provider=self.name)
             self.log_message(message, response)
             return response
 

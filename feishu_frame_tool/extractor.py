@@ -32,7 +32,7 @@ def _save_png(path: str, frame) -> None:
 class LocalFrameExtractor:
     """本地抽帧器。对外接口与旧的 framepacker 自动化保持一致：process_video()。"""
 
-    def __init__(self, export_dir: str, fps: int = 24, max_frames: int = 24,
+    def __init__(self, export_dir: str, fps: int = 24, max_frames: int = 0,
                  logger: Optional[Callable[[str], None]] = None):
         self.export_dir = export_dir
         self.fps = int(fps) if fps else 0

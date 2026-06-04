@@ -61,3 +61,69 @@ def test_multiple_confirmations_are_executed_once(monkeypatch) -> None:
         ("comfyui.run_cancel", {"run_id": "COMFY_222222222222"}),
     ]
     assert "需要确认" not in "\n".join(replies)
+
+
+def test_cancel_named_comfy_run_is_not_treated_as_confirmation_cancel(monkeypatch) -> None:
+    replies: list[str] = []
+    seen: list[str] = []
+
+    monkeypatch.setattr("assetclaw_matting.feishu.processor._try_reply", lambda _mid, _cid, text: replies.append(text))
+    monkeypatch.setattr("assetclaw_matting.feishu.processor._try_send_chat", lambda _cid, text: replies.append(text))
+
+    def fake_handle(message):
+        seen.append(message.text)
+        from assetclaw_matting.brain.schemas import BrainResponse
+
+        return BrainResponse(text="已终止：COMFY_ABCDEF123456", provider="test")
+
+    monkeypatch.setattr("assetclaw_matting.brain.router.handle_message", fake_handle)
+
+    result = process_feishu_message(_event("取消终止这个任务 COMFY_ABCDEF123456", f"evt_cancel_comfy_{uuid.uuid4().hex}"))
+
+    assert result.ok is True
+    assert seen == ["取消终止这个任务 COMFY_ABCDEF123456"]
+    assert "当前没有等待你确认" not in "\n".join(replies)
+
+
+def test_greeting_reply_is_warm(monkeypatch) -> None:
+    replies: list[str] = []
+    monkeypatch.setattr("assetclaw_matting.feishu.processor._try_reply", lambda _mid, _cid, text: replies.append(text))
+
+    result = process_feishu_message(_event("你好", f"evt_greeting_{uuid.uuid4().hex}"))
+
+    assert result.ok is True
+    assert replies == ["初音在。今天想让我陪你唱一会儿，还是一起把某个任务往前推一点？"]
+
+
+def test_conversational_message_skips_processing_ack(monkeypatch) -> None:
+    replies: list[str] = []
+    monkeypatch.setattr("assetclaw_matting.feishu.processor._try_reply", lambda _mid, _cid, text: replies.append(text))
+
+    def fake_handle(message):
+        from assetclaw_matting.brain.schemas import BrainResponse
+
+        return BrainResponse(text="可以，我陪你唱。", provider="test")
+
+    monkeypatch.setattr("assetclaw_matting.brain.router.handle_message", fake_handle)
+
+    result = process_feishu_message(_event("陪我唱歌", f"evt_sing_{uuid.uuid4().hex}"))
+
+    assert result.ok is True
+    assert replies == ["可以，我陪你唱。"]
+
+
+def test_task_message_keeps_processing_ack(monkeypatch) -> None:
+    replies: list[str] = []
+    monkeypatch.setattr("assetclaw_matting.feishu.processor._try_reply", lambda _mid, _cid, text: replies.append(text))
+
+    def fake_handle(message):
+        from assetclaw_matting.brain.schemas import BrainResponse
+
+        return BrainResponse(text="上海现在：Clear。", provider="test")
+
+    monkeypatch.setattr("assetclaw_matting.brain.router.handle_message", fake_handle)
+
+    result = process_feishu_message(_event("今天天气怎么样", f"evt_weather_{uuid.uuid4().hex}"))
+
+    assert result.ok is True
+    assert replies == ["我收到啦，正在处理。", "上海现在：Clear。"]

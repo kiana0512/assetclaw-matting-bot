@@ -48,7 +48,7 @@ def info() -> dict[str, Any]:
         "exists": tool.exists(),
         "config_path": str(tool / "config.json"),
         "fps": int(cfg.get("framepacker", {}).get("fps", 24)),
-        "max_frames": int(cfg.get("framepacker", {}).get("max_frames", 24) or 0),
+        "max_frames": int(cfg.get("framepacker", {}).get("max_frames", 0) or 0),
         "diff_threshold": float(cfg.get("dedup", {}).get("diff_threshold", 0.2)),
         "workspace_root": defaults["workspace_root"],
         "download_dir": defaults["video_dir"],
@@ -72,8 +72,8 @@ def run_preview(
         "download_dir": cfg["paths"]["download_dir"],
         "export_dir": cfg["paths"]["export_dir"],
         "fps": cfg["framepacker"]["fps"],
-        "max_frames": cfg["framepacker"].get("max_frames", 24),
-        "dedup_enabled": cfg.get("dedup", {}).get("enabled", True),
+        "max_frames": cfg["framepacker"].get("max_frames", 0),
+        "dedup_enabled": cfg.get("dedup", {}).get("enabled", False),
         "diff_threshold": cfg.get("dedup", {}).get("diff_threshold", 0.2),
         "selection": "all_records_with_animation",
     }
@@ -132,7 +132,7 @@ def run_start(
         _notify(run_id, f"抽帧任务已启动\n下载：{cfg['paths']['download_dir']}\n导出：{cfg['paths']['export_dir']}")
         _start_progress_monitor(run_id)
     _start_worker(run_id)
-    return {"ok": True, "run_id": run_id, "status": "RUNNING", "download_dir": cfg["paths"]["download_dir"], "export_dir": cfg["paths"]["export_dir"], "fps": cfg["framepacker"]["fps"], "max_frames": cfg["framepacker"].get("max_frames", 24), "diff_threshold": cfg.get("dedup", {}).get("diff_threshold", 0.2)}
+    return {"ok": True, "run_id": run_id, "status": "RUNNING", "download_dir": cfg["paths"]["download_dir"], "export_dir": cfg["paths"]["export_dir"], "fps": cfg["framepacker"]["fps"], "max_frames": cfg["framepacker"].get("max_frames", 0), "diff_threshold": cfg.get("dedup", {}).get("diff_threshold", 0.2)}
 
 
 def run_status(run_id: str | None = None) -> dict[str, Any]:
@@ -393,7 +393,7 @@ def _build_config(download_dir: str | None, export_dir: str | None, fps: int | N
         cfg.setdefault("paths", {})["export_dir"] = str(validate_path(defaults["frame_dir"], must_exist=False))
     if fps is not None:
         cfg.setdefault("framepacker", {})["fps"] = int(fps)
-    cfg.setdefault("framepacker", {})["max_frames"] = int(max_frames) if max_frames is not None else int(cfg.get("framepacker", {}).get("max_frames", 24) or 0)
+    cfg.setdefault("framepacker", {})["max_frames"] = int(max_frames) if max_frames is not None else int(cfg.get("framepacker", {}).get("max_frames", 0) or 0)
     if diff_threshold is not None:
         cfg.setdefault("dedup", {})["diff_threshold"] = float(diff_threshold)
     return cfg
