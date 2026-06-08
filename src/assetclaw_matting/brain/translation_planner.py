@@ -5,6 +5,7 @@ from pathlib import Path
 
 from assetclaw_matting.brain.schemas import BrainMessage, ToolCall
 from assetclaw_matting.skills.media_skills import IMAGE_EXTS
+from assetclaw_matting.skills.speech_skills import AUDIO_EXTS
 
 
 LANG_ALIASES = {
@@ -29,6 +30,8 @@ LANG_ALIASES = {
 
 def plan_translation_task(message: BrainMessage) -> tuple[list[ToolCall], str] | None:
     text = message.text.strip()
+    if any(_is_audio_attachment(item) for item in message.attachments):
+        return None
     attachments = [item for item in message.attachments if item.get("local_path")]
     explicit_image = _first_image_path(attachments) or _extract_image_path_from_text(text)
     image = explicit_image
@@ -142,6 +145,13 @@ def _download_failed_text(attachments: list[dict]) -> str:
     if "99991672" in detail or "Access denied" in detail or "action_scope_required" in detail:
         return "图片拉不下来：飞书应用缺少消息资源读取权限。要开 im:message:readonly 或 im:message.history:readonly。"
     return "图片没下到本地，暂时不能 OCR。"
+
+
+def _is_audio_attachment(item: dict) -> bool:
+    raw_type = str(item.get("type") or "").lower()
+    path = str(item.get("local_path") or "")
+    name = str(item.get("file_name") or "")
+    return raw_type in {"audio", "voice"} or Path(path or name).suffix.lower() in AUDIO_EXTS
 
 
 def _extract_target_language(text: str) -> str | None:

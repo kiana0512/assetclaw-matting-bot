@@ -5,6 +5,7 @@ from pathlib import Path
 
 from assetclaw_matting.brain.schemas import BrainMessage, ToolCall
 from assetclaw_matting.skills.media_skills import IMAGE_EXTS, VIDEO_EXTS
+from assetclaw_matting.skills.speech_skills import AUDIO_EXTS
 
 
 def answer_recent_image_question(message: BrainMessage) -> str | None:
@@ -18,11 +19,17 @@ def answer_recent_image_question(message: BrainMessage) -> str | None:
 
 
 def plan_multimodal_task(message: BrainMessage) -> tuple[list[ToolCall], str] | None:
+    if any(_is_audio_attachment(item) for item in message.attachments):
+        return None
     attachments = [item for item in message.attachments if item.get("local_path")]
+    text = message.text.strip()
+    if not attachments and _looks_like_image_analysis(text):
+        recent = _recent_image_path(message.conversation_id)
+        if recent:
+            return [ToolCall(skill="image.describe", arguments={"image_path": recent, "instruction": text})], "分析最近一张图片"
     if not attachments:
         return None
 
-    text = message.text.strip()
     first = attachments[0]
     path = str(first["local_path"])
     suffix = Path(path).suffix.lower()
@@ -45,6 +52,9 @@ def plan_multimodal_task(message: BrainMessage) -> tuple[list[ToolCall], str] | 
             return [ToolCall(skill="image.info", arguments={"path": path})], "查看图片信息"
         return [ToolCall(skill="file.info", arguments={"path": path})], "查看附件信息"
 
+    if _looks_like_image_analysis(text) and suffix in IMAGE_EXTS:
+        return [ToolCall(skill="image.describe", arguments={"image_path": path, "instruction": text})], "分析图片内容"
+
     if not text or text in {"收到", "好的", "ok", "OK"}:
         kind = "图片" if suffix in IMAGE_EXTS else "视频" if suffix in VIDEO_EXTS else "文件"
         return [], (
@@ -54,6 +64,13 @@ def plan_multimodal_task(message: BrainMessage) -> tuple[list[ToolCall], str] | 
         )
 
     return None
+
+
+def _is_audio_attachment(item: dict) -> bool:
+    raw_type = str(item.get("type") or "").lower()
+    path = str(item.get("local_path") or "")
+    name = str(item.get("file_name") or "")
+    return raw_type in {"audio", "voice"} or Path(path or name).suffix.lower() in AUDIO_EXTS
 
 
 def _recent_image_path(conversation_id: str) -> str | None:
@@ -100,6 +117,26 @@ def _looks_like_preview(text: str) -> bool:
 
 def _looks_like_info(text: str) -> bool:
     return any(kw in text for kw in ("信息", "尺寸", "大小", "分辨率", "格式"))
+
+
+def _looks_like_image_analysis(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        kw in lowered or kw in text
+        for kw in (
+            "分析内容",
+            "分析这张",
+            "看图",
+            "看看图",
+            "描述图片",
+            "描述一下",
+            "图里有什么",
+            "图片内容",
+            "analyze",
+            "describe",
+            "what is in",
+        )
+    )
 
 
 def _extract_destination_dir(text: str) -> str | None:

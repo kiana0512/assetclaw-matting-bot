@@ -12,7 +12,7 @@ Write-Host "Event mode: ws"
 Write-Host "Public exposure: none"
 Write-Host ""
 
-$env:PYTHONPATH = "E:\assetclaw-matting-bot\src"
+$env:PYTHONPATH = "E:\assetclaw-matting-bot\src;E:\assetclaw-matting-bot"
 $CondaExe = Join-Path $env:USERPROFILE "miniconda3\Scripts\conda.exe"
 if (-not (Test-Path $CondaExe)) {
   $cmd = Get-Command conda -ErrorAction SilentlyContinue

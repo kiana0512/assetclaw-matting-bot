@@ -25,7 +25,7 @@ def _make_frame(path: Path, alpha: int) -> None:
 
 def _wait_done(run_id: str) -> dict:
     status = {}
-    for _ in range(80):
+    for _ in range(300):
         status = run_status(run_id, include_gpu=False)
         if status.get("status") in {"DONE", "DONE_WITH_ERRORS", "FAILED", "CANCELED"}:
             return status

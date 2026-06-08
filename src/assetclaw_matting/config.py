@@ -124,6 +124,34 @@ class Settings(BaseSettings):
     p4_workspace_root: str = ""
     p4_enabled: bool = False
 
+    speech_engine: str = "funasr"
+    speech_model: str = "iic/SenseVoiceSmall"
+    speech_model_dir: Path = Path("E:/assetclaw-matting-bot/storage/models/asr/iic__SenseVoiceSmall")
+    speech_fallback_model: str = "large-v3-turbo"
+    speech_device: str = "cuda:0"
+    speech_compute_type: str = "float16"
+    speech_beam_size: int = 1
+    speech_vad_filter: bool = True
+    speech_use_vad: bool = False
+    speech_vad_model: str = "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch"
+    speech_vad_model_dir: Path = Path("E:/assetclaw-matting-bot/storage/models/asr/iic__speech_fsmn_vad_zh-cn-16k-common-pytorch")
+    speech_disable_update: bool = True
+    tts_engine: str = "indextts"
+    tts_voice: str = "zh-CN-XiaoxiaoNeural"
+    tts_rate: str = "+0%"
+    tts_max_chars: int = 800
+    voice_reply_on_audio: bool = True
+    voice_reply_progress_enabled: bool = True
+    indextts_repo_dir: Path = Path("E:/assetclaw-matting-bot/storage/models/index-tts/repo")
+    indextts_model_dir: Path = Path("E:/assetclaw-matting-bot/storage/models/index-tts/checkpoints")
+    indextts_cfg_path: Path = Path("E:/assetclaw-matting-bot/storage/models/index-tts/checkpoints/config.yaml")
+    indextts_prompt_audio: Path = Path("E:/assetclaw-matting-bot/storage/models/asr/iic__SenseVoiceSmall/example/zh.mp3")
+    indextts_emo_audio: Path | None = None
+    indextts_emo_alpha: float = 0.6
+    indextts_use_fp16: bool = True
+    indextts_use_cuda_kernel: bool = False
+    indextts_use_deepspeed: bool = False
+
     @property
     def feishu_admin_open_ids_list(self) -> list[str]:
         return [x.strip() for x in self.feishu_admin_open_ids.split(";") if x.strip()]

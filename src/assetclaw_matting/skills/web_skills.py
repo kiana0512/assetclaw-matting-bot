@@ -231,7 +231,7 @@ def _synthesize_research_answer(query: str, items: list[dict[str, Any]], pages: 
     if _looks_like_full_lyrics_request(query):
         return (
             "我可以帮你定位歌词来源，但不能搬运整首歌词全文。"
-            "建议打开音乐平台、官方 MV/专辑页或可信歌词页查看；我可以基于你贴出的短句做歌意解析，或写同氛围原创小段。"
+            "建议打开音乐平台、官方 MV/专辑页或可信歌词页查看；我可以基于你贴出的短句做歌意解析。"
         )
     terms = _query_terms(query)
     bullets: list[str] = []

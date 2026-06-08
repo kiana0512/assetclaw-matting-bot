@@ -76,6 +76,9 @@ Z:\公共机共享\抠图 = \\audioshare.lilith.com\AIart\公共机共享\抠图
 | `feishu.zip_and_send` | 打包文件/目录后立刻发到当前飞书会话 | egress_caution |
 | `translate.text` | 翻译文本，输出自然语言译文 | readonly |
 | `translate.image_text` | 识别图片中文字并翻译 | readonly |
+| `speech.transcribe` | 把本地音频或飞书语音附件转文字，默认 FunASR/SenseVoiceSmall | readonly |
+| `speech.synthesize` | 把文字合成为本地语音文件，默认 IndexTTS2 | write_safe |
+| `speech.send_tts` | 合成语音并发送到当前飞书会话 | egress_caution |
 
 ## 多模态输入
 
@@ -95,6 +98,53 @@ storage\feishu_inbox\日期\会话\
 ```
 
 图片支持保存、复制、查尺寸、转格式、缩放、飞书图片形式发回。视频先支持保存、文件信息、复制、移动、发回。
+
+## 语音输入和语音回复
+
+飞书语音消息会被保存为音频附件，再由 `speech.transcribe` 转文字。识别出来的文字会重新进入 Agent 路由，所以语音可以触发多个工具调用，例如：
+
+```text
+查看 GPU 状态和当前任务
+开始飞书抽帧，下载到 E:\raw_videos，抽帧输出 E:\output_frames
+把刚刚那张图里的文字翻译成中文
+```
+
+语音回复由会话模式控制：
+
+```text
+开启语音回复
+关闭语音回复
+只发文字
+```
+
+开启后，机器人仍然先发文字结果，然后再用 TTS 合成语音并补发文件。ASR 默认走本地 FunASR / SenseVoiceSmall；TTS 默认走本地 IndexTTS2。如果本地模型首次加载，飞书会先提示预计等待时间。
+
+## 唱歌和接歌词
+
+唱歌模式、接歌词、续下一句功能已经关闭。飞书里说“进入唱歌模式”“陪我唱歌”“不要再接下一句了”时，机器人只会提示该功能已关闭，并继续按正常聊天或工具指令处理。
+
+当前保留的能力是：可以搜索公开网页、定位歌词来源、解释用户贴出的短句含义；不会进入唱歌模式，不会续写原歌下一句，也不会生成“原创下一句”。
+
+## 人工确认
+
+所有 destructive 或高风险操作会先进入 `pending_confirmation`，不会直接执行。常见包括：
+
+- 删除、清空目录、移动、批量重命名、解压覆盖
+- 启动 ComfyUI/Cherry/抽帧/完整 pipeline 等长任务
+- 动画流程重跑、归档旧目录、从视频重建帧
+- P4 submit/revert/sync 等会改变工作区或服务器状态的动作
+
+确认流程：
+
+```text
+用户：开始批量抠图 E:\input 到 E:\output
+机器人：需要确认：comfyui.run_start
+回复：确认执行 CONFIRM_xxxxx
+用户：确认执行 CONFIRM_xxxxx
+机器人：开始执行，并在飞书推送进度
+```
+
+未确认前只会保存待确认记录；确认码过期或参数不匹配时需要重新发起任务。
 | `memory.remember` | 保存本地记忆 | write_safe |
 | `memory.list` | 查看本地记忆 | readonly |
 | `matting.batch_create` | 创建抠图批次（fake mode） | write_safe |

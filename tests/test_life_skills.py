@@ -133,4 +133,6 @@ def test_feishu_runtime_context_does_not_duplicate_conversation_id(monkeypatch) 
 def test_lyric_like_rainy_day_message_does_not_route_to_weather() -> None:
     response = LocalCommandBrain().handle_message(BrainMessage(text="下雨天了怎么办我好想你", conversation_id="lyric-chat"))
     assert not response.tool_calls
-    assert "不敢打给你" in response.text
+    assert "想念" in response.text
+    assert "不敢打给你" not in response.text
+    assert "我接原创下一句" not in response.text

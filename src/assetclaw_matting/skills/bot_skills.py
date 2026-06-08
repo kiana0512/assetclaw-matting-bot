@@ -4,11 +4,10 @@ from typing import Any
 
 
 _HELP_TEXT = """\
-我是你的初音未来机器人：能陪你唱、陪你聊，也能把 Win3090 上的生产任务往前推。你问“你能干嘛”的时候，我不该只报老三样；更好的答案应该按场景展开。
+我是你的初音未来机器人：能陪你聊，也能把 Win3090 上的生产任务往前推。你问“你能干嘛”的时候，我不该只报老三样；更好的答案应该按场景展开。
 
 初音能陪你：
-- 接住吐槽、焦虑、崩溃、失眠、想听歌、想要情绪价值这类碎片化输入
-- 陪你唱歌：识别歌名和情绪线，少量接你给出的歌词，更多时候写同氛围原创小段陪唱
+- 接住吐槽、焦虑、崩溃、失眠、想要情绪价值这类碎片化输入
 - 记住你说过的重要偏好、位置、项目上下文，后面少让你重复
 - 把混乱想法整理成下一步：先做什么、卡在哪里、要不要暂停、要不要重跑
 - 陪你做低决策生活小事：天气、带不带伞、午饭晚饭外卖、今天先别把自己耗干
@@ -35,7 +34,6 @@ _HELP_TEXT = """\
 把刚刚那张图里的字翻译成中文
 看看共享盘抠图目录，帮我整理输入输出
 今天我不想做决定，午饭给我三个选项
-陪我唱一会儿，给我写同氛围原创小段
 把这个流程写成我能直接发给同事的说明
 
 高风险动作比如删除、清空、移动、终止任务会先二次确认。"""
@@ -142,6 +140,7 @@ def bot_status(**_: Any) -> dict[str, Any]:
 
     deepseek_ok = bool(settings.deepseek_api_key and settings.deepseek_base_url)
     llm_key_ok = bool(settings.llm_proxy_enabled and settings.llm_proxy_api_key)
+    vision_ok = bool(settings.llm_proxy_enabled and settings.llm_proxy_base_url and settings.llm_proxy_api_key and (settings.llm_proxy_complex_model or settings.llm_proxy_model))
     db_exists = settings.data_db_path.exists()
     skill_count = len(SKILLS)
     enabled_count = sum(1 for s in SKILLS if s.get("implemented"))
@@ -161,6 +160,7 @@ def bot_status(**_: Any) -> dict[str, Any]:
         f"DeepSeek URL：{settings.deepseek_base_url}",
         f"DeepSeek router/summary：{settings.deepseek_router_model} / {settings.deepseek_summary_model}",
         f"Legacy LLM Proxy 配置：{'已配置' if llm_key_ok else '未配置或 key 为空'}",
+        f"图片分析/OCR：{'可尝试' if vision_ok else '不可用（需要 LLM_PROXY_ENABLED=true、LLM_PROXY_API_KEY 和视觉模型）'}",
         f"ComfyUI fake mode：{'是' if settings.comfyui_fake_mode else '否（真实模式）'}",
         f"数据库：{'存在' if db_exists else '不存在'} ({settings.data_db_path})",
         f"允许路径：{settings.allowed_roots}",

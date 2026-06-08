@@ -161,7 +161,7 @@ def _extract_attachments(message_type: str, content: dict[str, Any]) -> list[dic
         return _extract_post_attachments(content)
     if message_type not in {"image", "file", "media", "video", "audio"}:
         return []
-    key = content.get("image_key") or content.get("file_key") or content.get("media_key")
+    key = content.get("image_key") or content.get("file_key") or content.get("media_key") or content.get("audio_key")
     if not key:
         return []
     file_name = (
@@ -228,7 +228,7 @@ def _default_attachment_name(message_type: str) -> str:
         "image": "feishu_image.png",
         "video": "feishu_video.mp4",
         "media": "feishu_media.bin",
-        "audio": "feishu_audio.bin",
+        "audio": "feishu_audio.mp3",
         "file": "feishu_file.bin",
     }
     return defaults.get(message_type, "feishu_attachment.bin")

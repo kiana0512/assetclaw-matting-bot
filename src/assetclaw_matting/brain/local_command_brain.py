@@ -3,14 +3,12 @@ from __future__ import annotations
 import re
 
 from assetclaw_matting.brain.base import BrainProvider
-from assetclaw_matting.brain.conversation_recall import answer_recent_question
 from assetclaw_matting.brain.emotion_planner import plan_emotional_reply
-from assetclaw_matting.brain.file_task_planner import plan_file_task
-from assetclaw_matting.brain.life_planner import plan_life_task
-from assetclaw_matting.brain.multimodal_planner import answer_recent_image_question, plan_multimodal_task
+from assetclaw_matting.brain.pre_llm_router import handle_pre_llm_message
 from assetclaw_matting.brain.result_formatter import format_skill_results
 from assetclaw_matting.brain.schemas import BrainMessage, BrainResponse, ToolCall
-from assetclaw_matting.brain.translation_planner import plan_translation_task
+from tools.p4_assistant.nl_intent import parse_intent
+from tools.p4_assistant.workspace_registry import WorkspaceRegistry
 
 
 class LocalCommandBrain(BrainProvider):
@@ -18,97 +16,9 @@ class LocalCommandBrain(BrainProvider):
 
     def handle_message(self, message: BrainMessage) -> BrainResponse:
         text = message.text.strip()
-        image_answer = answer_recent_image_question(message)
-        if image_answer:
-            response = BrainResponse(text=image_answer, provider=self.name)
-            self.log_message(message, response)
-            return response
-
-        translated = plan_translation_task(message)
-        if translated:
-            tool_calls, planned_text = translated
-            if not tool_calls:
-                response = BrainResponse(text=planned_text, provider=self.name)
-                self.log_message(message, response)
-                return response
-            results = self.execute_tool_calls(
-                tool_calls,
-                conversation_id=message.conversation_id,
-                user_id=message.user_id,
-            )
-            response = BrainResponse(
-                text=format_skill_results(results),
-                tool_calls=tool_calls,
-                raw={"deterministic_plan": planned_text, "skill_results": results},
-                provider=self.name,
-            )
-            self.log_message(message, response)
-            return response
-
-        multimodal = plan_multimodal_task(message)
-        if multimodal:
-            tool_calls, planned_text = multimodal
-            if not tool_calls:
-                response = BrainResponse(text=planned_text, provider=self.name)
-                self.log_message(message, response)
-                return response
-            results = self.execute_tool_calls(
-                tool_calls,
-                conversation_id=message.conversation_id,
-                user_id=message.user_id,
-            )
-            response = BrainResponse(
-                text=format_skill_results(results),
-                tool_calls=tool_calls,
-                raw={"deterministic_plan": planned_text, "skill_results": results},
-                provider=self.name,
-            )
-            self.log_message(message, response)
-            return response
-
-        recalled = answer_recent_question(text, message.conversation_id)
-        if recalled:
-            response = BrainResponse(text=recalled, provider=self.name)
-            self.log_message(message, response)
-            return response
-
-        life = plan_life_task(message)
-        if life:
-            tool_calls, planned_text = life
-            results = self.execute_tool_calls(
-                tool_calls,
-                conversation_id=message.conversation_id,
-                user_id=message.user_id,
-            )
-            response = BrainResponse(
-                text=format_skill_results(results),
-                tool_calls=tool_calls,
-                raw={"deterministic_plan": planned_text, "skill_results": results},
-                provider=self.name,
-            )
-            self.log_message(message, response)
-            return response
-
-        planned = plan_file_task(message)
-        if planned:
-            tool_calls, planned_text = planned
-            if not tool_calls:
-                response = BrainResponse(text=planned_text, provider=self.name)
-                self.log_message(message, response)
-                return response
-            results = self.execute_tool_calls(
-                tool_calls,
-                conversation_id=message.conversation_id,
-                user_id=message.user_id,
-            )
-            response = BrainResponse(
-                text=format_skill_results(results),
-                tool_calls=tool_calls,
-                raw={"deterministic_plan": planned_text, "skill_results": results},
-                provider=self.name,
-            )
-            self.log_message(message, response)
-            return response
+        pre_llm_response = handle_pre_llm_message(self, message)
+        if pre_llm_response:
+            return pre_llm_response
 
         tool_calls = self._infer_tool_calls(text)
         if not tool_calls:
@@ -146,10 +56,18 @@ class LocalCommandBrain(BrainProvider):
             kw in text
             for kw in (
                 "你会做什么",
+                "你会做啥",
+                "你会啥",
                 "你能做什么",
+                "你能做啥",
                 "你可以做什么",
+                "你可以做啥",
+                "你会干啥",
                 "你能干嘛",
+                "你能干啥",
                 "你可以干嘛",
+                "你可以干啥",
+                "会做啥",
                 "你有什么用",
                 "你能帮我什么",
                 "你能陪我做什么",
@@ -167,6 +85,9 @@ class LocalCommandBrain(BrainProvider):
             return [ToolCall(skill="bot.status", arguments={})]
         if any(kw in text for kw in ("最近错误", "查看错误", "recent errors", "错误记录")):
             return [ToolCall(skill="bot.errors", arguments={})]
+        p4_calls = _p4_tool_calls_from_text(text)
+        if p4_calls:
+            return p4_calls
         if any(
             kw in text
             for kw in (
@@ -182,6 +103,10 @@ class LocalCommandBrain(BrainProvider):
             )
         ):
             return [ToolCall(skill="agent.diagnose", arguments={})]
+        wants_gpu = any(kw in lowered for kw in ("nvidia-smi", "gpu")) or any(kw in text for kw in ("显卡", "显存", "GPU"))
+        wants_current_work = any(kw in text for kw in ("现在机器在跑什么", "当前所有任务", "当前执行现场", "现在有哪些活", "现在在跑什么", "当前任务"))
+        if wants_gpu and wants_current_work:
+            return [ToolCall(skill="system.gpu_status", arguments={}), ToolCall(skill="agent.current_work", arguments={"include_gpu": False})]
         if any(kw in text for kw in ("现在机器在跑什么", "当前所有任务", "当前执行现场", "现在有哪些活", "现在在跑什么")):
             return [ToolCall(skill="agent.current_work", arguments={})]
         if any(kw in text for kw in ("表情包状态", "情绪回复配置", "表情包池", "sticker status")):
@@ -634,6 +559,49 @@ def _web_query_from_text(text: str) -> str | None:
 
 def _wants_web_research(text: str) -> bool:
     return any(kw in text for kw in ("整合", "整理", "总结", "归纳", "对比", "调研", "资料", "来源", "结论"))
+
+
+def _p4_tool_calls_from_text(text: str) -> list[ToolCall]:
+    lowered = text.lower()
+    if not any(kw in lowered or kw in text for kw in ("p4", "perforce", "depot", "changelist", "reconcile", "workspace", "工作区", "服务器", "差异", "拉最新", "改了什么", "shelve", "搁置", "飞书报告")):
+        return []
+    if any(kw in lowered or kw in text for kw in ("submit", "提交", "merge", "合流", "copy up", "stream 创建", "创建 stream", "sync", "拉最新", "同步")):
+        return [ToolCall(skill="p4.help", arguments={})]
+    if (any(kw in text for kw in ("功能", "会做什么", "帮助", "怎么用")) or "help" in lowered) and ("p4" in lowered or "perforce" in lowered):
+        return [ToolCall(skill="p4.help", arguments={})]
+    if ("p4" in lowered or "perforce" in lowered) and any(kw in lowered or kw in text for kw in ("info", "connection", "verify", "status", "opened", "changes", "changed", "状态")):
+        return [ToolCall(skill="p4.status", arguments={})]
+    if any(kw in lowered or kw in text for kw in ("check", "检查", "安全检查")):
+        return [ToolCall(skill="p4.check", arguments={})]
+    if any(kw in lowered or kw in text for kw in ("preview", "预览", "reconcile -n")):
+        return [ToolCall(skill="p4.preview", arguments={})]
+    registry = WorkspaceRegistry()
+    intent = parse_intent(text, registry)
+    if intent.need_clarification:
+        return [ToolCall(skill="p4.help", arguments={})]
+    args: dict = {}
+    if intent.workflow:
+        args["workflow"] = intent.workflow
+    if intent.workspace:
+        args["workspace"] = intent.workspace
+    if intent.paths:
+        args["paths"] = list(intent.paths)
+    mapping = {
+        "status": "p4.status",
+        "check": "p4.check",
+        "preview": "p4.preview",
+        "create_cl": "p4.create_cl",
+        "reconcile": "p4.reconcile",
+        "shelve": "p4.shelve",
+        "report": "p4.report",
+    }
+    skill = mapping.get(intent.intent)
+    if not skill:
+        return []
+    changelist = re.search(r"(?:changelist|cl|变更)\s*(\d+)|\b(\d{4,})\b", text, re.IGNORECASE)
+    if skill in {"p4.reconcile", "p4.shelve", "p4.report"} and changelist:
+        args["cl"] = changelist.group(1) or changelist.group(2)
+    return [ToolCall(skill=skill, arguments=args)]
 
 
 def _animation_root_from_text(text: str) -> str:

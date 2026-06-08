@@ -42,3 +42,31 @@ async def brain_messages(conversation_id: str = "test", limit: int = 20) -> dict
         "conversation_id": conversation_id,
         "items": get_recent_brain_messages(conversation_id, limit),
     }
+
+
+@router.get("/skill-calls")
+async def skill_calls(limit: int = 50, ok: int | None = None, skill: str = "") -> dict:
+    from assetclaw_matting.db.sqlite import get_connection
+
+    clauses = []
+    values: list[object] = []
+    if ok is not None:
+        clauses.append("ok = ?")
+        values.append(1 if ok else 0)
+    if skill:
+        clauses.append("skill LIKE ?")
+        values.append(f"%{skill}%")
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    values.append(max(1, min(limit, 200)))
+    with get_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, skill, arguments_json, result_json, ok, error, requested_by, created_at
+            FROM skill_calls
+            {where}
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            values,
+        ).fetchall()
+    return {"ok": True, "items": [dict(row) for row in rows]}

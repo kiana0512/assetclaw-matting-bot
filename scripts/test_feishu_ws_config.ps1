@@ -53,7 +53,7 @@ try {
 Write-Host ""
 Write-Host "Checking config module..."
 try {
-  $env:PYTHONPATH = "E:\assetclaw-matting-bot\src"
+  $env:PYTHONPATH = "E:\assetclaw-matting-bot\src;E:\assetclaw-matting-bot"
   $cfgCode = "import sys; sys.path.insert(0,'src'); from assetclaw_matting.config import settings; print('feishu_event_mode:', settings.feishu_event_mode); print('feishu_enable_websocket:', settings.feishu_enable_websocket); print('app_id_set:', bool(settings.feishu_app_id))"
   $cfgResult = & $condaPath run -n assetclaw python -c $cfgCode 2>&1
   if ($LASTEXITCODE -eq 0) {

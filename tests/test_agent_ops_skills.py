@@ -32,6 +32,9 @@ def test_agent_skills_registered_and_router() -> None:
 def test_agent_diagnose_detects_stalled_comfyui(monkeypatch) -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM comfyui_runs")
+        conn.execute("DELETE FROM cherry_runs")
+        conn.execute("DELETE FROM frame_runs")
+        conn.execute("DELETE FROM pipeline_runs")
         conn.execute(
             """
             INSERT INTO comfyui_runs

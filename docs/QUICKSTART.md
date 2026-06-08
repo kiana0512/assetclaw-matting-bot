@@ -2,6 +2,8 @@
 
 ## 标准启动（飞书长连接，无需公网）
 
+Agent 只使用 conda env `assetclaw`。ComfyUI 后端单独用秋叶启动器环境，不要在 `assetclaw` 里安装或启动 ComfyUI。
+
 ```powershell
 cd E:\assetclaw-matting-bot
 conda activate assetclaw
@@ -25,6 +27,12 @@ SKILL_API_TOKEN=your_token
 
 ```powershell
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot_local.ps1
+```
+
+如果要跑真实 ComfyUI 抠图，先单独启动秋叶环境里的 ComfyUI：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\run_comfyui.ps1
 ```
 
 飞书后台：**事件与回调 → 使用长连接接收事件**（不需要 URL）。

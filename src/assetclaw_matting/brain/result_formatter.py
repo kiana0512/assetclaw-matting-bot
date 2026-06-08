@@ -48,6 +48,8 @@ def format_skill_results(results: list[dict[str, Any]], max_items: int = 8) -> s
             lines.extend(_format_web_search(payload, max_items))
         elif skill == "web.research":
             lines.extend(_format_web_research(payload, max_items))
+        elif skill.startswith("p4."):
+            lines.extend(_format_p4(payload, skill, max_items))
         elif skill in {"file.list_allowed", "image.list", "file.list_by_type"}:
             lines.extend(_format_listing(payload, max_items=max_items))
         elif skill == "file.exists":
@@ -158,9 +160,17 @@ def format_skill_results(results: list[dict[str, Any]], max_items: int = 8) -> s
             lines.append(f"已发送文件：{payload.get('file_name')}")
         elif skill in {"feishu.send_image", "feishu.send_image_by_name"}:
             lines.append(f"已发送图片：{payload.get('file_name')}")
+        elif skill == "text.process":
+            lines.append(str(payload.get("display_text") or payload.get("result") or "处理完成。"))
         elif skill in {"translate.text", "translate.image_text"}:
-            lines.append(str(payload.get("translation") or "翻译完成。"))
-        elif skill == "image.ocr":
+            lines.append(str(payload.get("display_text") or payload.get("translation") or "翻译完成。"))
+        elif skill == "speech.transcribe":
+            lines.append("语音识别：" + str(payload.get("text") or "").strip())
+        elif skill == "speech.synthesize":
+            lines.append(f"已生成语音：{payload.get('output_path')}")
+        elif skill == "speech.send_tts":
+            lines.append(f"已发送语音：{payload.get('file_name')}")
+        elif skill in {"image.ocr", "image.describe"}:
             lines.append(str(payload.get("text") or "没有识别到文字。"))
         elif skill.startswith("matting."):
             if skill.startswith("matting.shared_"):
@@ -755,6 +765,227 @@ def _format_web_research(payload: dict[str, Any], max_items: int) -> list[str]:
     if failed:
         lines.append(f"另有 {len(failed)} 个页面读取失败。")
     return lines
+
+
+def _format_p4(payload: dict[str, Any], skill: str, max_items: int) -> list[str]:
+    if payload.get("text"):
+        return [str(payload.get("text"))]
+    if payload.get("needs_confirmation"):
+        return [str(payload.get("message") or f"{skill} 需要确认后执行。")]
+    if payload.get("error"):
+        return [f"{skill} 失败：{payload.get('error')}"]
+    operation = str(payload.get("operation") or skill)
+    if payload.get("report_text"):
+        return [str(payload.get("report_text"))]
+    lines = [f"P4：{_p4_operation_label(operation)}"]
+    if operation in {"status", "check", "preview", "create-cl", "reconcile", "shelve", "report"}:
+        if payload.get("p4port"):
+            lines.append(f"P4PORT：{payload.get('p4port')}")
+        if payload.get("p4user"):
+            lines.append(f"P4USER：{payload.get('p4user')}")
+        if payload.get("p4client"):
+            lines.append(f"P4CLIENT：{payload.get('p4client')}")
+        if payload.get("root"):
+            lines.append(f"Root：{payload.get('root')}")
+        if payload.get("mode"):
+            lines.append(f"Mode：{payload.get('mode')}")
+        lines.append("Submit：disabled")
+        if payload.get("logged_in") is not None:
+            lines.append(f"登录：{'有效' if payload.get('logged_in') else '需要 p4 login'}")
+        if payload.get("workspace_matches_config") is not None:
+            lines.append(f"Workspace 匹配配置：{'是' if payload.get('workspace_matches_config') else '否'}")
+        if payload.get("managed_paths"):
+            lines.append("Managed paths：")
+            lines.extend(f"- {path}" for path in payload.get("managed_paths", [])[:max_items])
+        stats = payload.get("stats") or {}
+        if stats:
+            lines.append(f"文件统计：add {stats.get('add', 0)}，edit {stats.get('edit', 0)}，delete {stats.get('delete', 0)}，move {stats.get('move', 0)}。")
+        files = payload.get("files") or []
+        for item in files[:max_items]:
+            lines.append(f"- {item.get('action', 'unknown')} {item.get('path', '')}")
+        safety = payload.get("safety") or {}
+        if safety:
+            checks = safety.get("checks") or {}
+            if checks:
+                lines.append("安全检查：")
+                lines.extend(f"- {name}: {value}" for name, value in checks.items())
+            for warning in safety.get("warnings") or []:
+                lines.append(f"WARNING：{warning}")
+            for error in safety.get("errors") or []:
+                lines.append(f"阻断：{error}")
+        return lines
+    if payload.get("client_spec") and "setup_workspace" in str(payload.get("operation")):
+        lines.append(f"root：{payload.get('root')}")
+        if payload.get("stream"):
+            lines.append(f"stream：{payload.get('stream')}")
+        lines.append("client spec 预览：")
+        lines.append(str(payload.get("client_spec"))[:2000])
+    summary = payload.get("summary") or {}
+    if summary:
+        if operation == "inventory":
+            counts = summary.get("counts") or {}
+            info = summary.get("info") or {}
+            lines.append(f"总览：{counts.get('depots', 0)} 个 depot，{counts.get('clients_for_user', 0)} 个你的 workspace/client。")
+            if info:
+                lines.append(f"当前：{info.get('user name')} / {info.get('client name')}")
+                lines.append(f"本地：{info.get('client root')}")
+                if info.get("client stream"):
+                    lines.append(f"流：{info.get('client stream')}")
+            depots = summary.get("depots") or []
+            if depots:
+                lines.append("Depot：")
+                for depot in depots[:max_items]:
+                    detail = depot.get("type") or ""
+                    lines.append(f"- {depot.get('name')}" + (f"（{detail}）" if detail else ""))
+                if len(depots) > max_items:
+                    lines.append(f"还有 {len(depots) - max_items} 个 depot 未显示。")
+            clients = summary.get("clients") or []
+            if clients:
+                lines.append("Workspace/client：")
+                for client in clients[:max_items]:
+                    mark = "（当前）" if client.get("name") == payload.get("p4client") else ""
+                    lines.append(f"- {client.get('name')}{mark}")
+                    if client.get("name") == payload.get("p4client"):
+                        lines.append(f"  root：{client.get('root')}")
+            mappings = summary.get("configured_mappings") or []
+            if mappings:
+                lines.append("当前映射：")
+                for mapping in mappings[:max_items]:
+                    lines.append(f"- {mapping.get('depot')} -> {mapping.get('local')}")
+        if operation == "workspace_details":
+            items = summary.get("items") or []
+            lines.append(f"工作区详情：{summary.get('count', len(items))} 个。")
+            for item in items[:max_items]:
+                mark = "（当前）" if item.get("is_current") else ""
+                lines.append(f"- {item.get('name')}{mark}")
+                lines.append(f"  root：{item.get('root')}")
+                if item.get("stream"):
+                    lines.append(f"  stream：{item.get('stream')}")
+                view_lines = item.get("view_lines") or []
+                if view_lines:
+                    lines.append(f"  view：{view_lines[0]}")
+                if item.get("update") or item.get("access"):
+                    lines.append(f"  update/access：{item.get('update') or '-'} / {item.get('access') or '-'}")
+        if operation == "compare_depot":
+            local_status = summary.get("local_status") or {}
+            sync_preview = summary.get("sync_preview") or {}
+            out_of_date = summary.get("out_of_date") or []
+            not_synced = summary.get("not_synced") or []
+            deleted_at_head = summary.get("deleted_at_head") or []
+            missing_top = summary.get("missing_top_level_items") or []
+            checked_count = summary.get("active_depot_file_count", summary.get("depot_file_count", 0))
+            if summary.get("clean"):
+                lines.append(f"结论：本地 workspace 和 depot/head 一致（检查 {checked_count} 个当前 depot 文件）。")
+            else:
+                lines.append(f"结论：发现差异（检查 {checked_count} 个当前 depot 文件）。")
+                if missing_top:
+                    names = "、".join(str(item.get("name")) for item in missing_top[:max_items])
+                    lines.append(f"本地缺少 depot 顶层项：{names}。")
+                lines.append(
+                    f"服务器更新：待同步 {sync_preview.get('preview_count', 0)}，"
+                    f"版本落后 {summary.get('out_of_date_count', len(out_of_date))}，"
+                    f"本地未同步 {summary.get('not_synced_count', len(not_synced))}，"
+                    f"head 已删除 {summary.get('deleted_at_head_count', len(deleted_at_head))}。"
+                )
+                lines.append(
+                    f"本地改动：opened {local_status.get('opened_count', 0)}，"
+                    f"新增 {len(local_status.get('local_adds') or [])}，"
+                    f"修改 {len(local_status.get('local_edits') or []) + len(local_status.get('diff_files') or [])}，"
+                    f"删除 {len(local_status.get('local_deletes') or [])}。"
+                )
+                if not missing_top:
+                    for item in out_of_date[:max_items]:
+                        lines.append(f"- 落后：{item.get('depotFile')} have#{item.get('haveRev')} / head#{item.get('headRev')}")
+                    for item in not_synced[:max_items]:
+                        lines.append(f"- 未同步：{item.get('depotFile')} head#{item.get('headRev')}")
+        if operation == "list_workflows":
+            lines.append(f"P4 工作流：{summary.get('count', 0)} 个")
+            roots = summary.get("roots") or []
+            if roots:
+                lines.append(f"目录：{roots[0]}")
+            for item in (summary.get("items") or [])[:max_items]:
+                brief = ""
+                if item.get("node_count") is not None:
+                    brief = f"（节点 {item.get('node_count')}，输入 {item.get('load_image_count', 0)}，输出 {item.get('save_image_count', 0)}）"
+                elif item.get("size") is not None:
+                    brief = f"（{_format_size(int(item.get('size') or 0))}）"
+                lines.append(f"- {item.get('name')}{brief}")
+            if summary.get("missing_roots"):
+                lines.append("未找到目录：" + "、".join(summary.get("missing_roots") or []))
+            if summary.get("truncated"):
+                lines.append(f"还有更多，先显示前 {max_items} 个。")
+        if "opened_count" in summary:
+            opened = summary.get("opened_count", 0)
+            adds = summary.get("local_adds") or []
+            edits = summary.get("local_edits") or []
+            deletes = summary.get("local_deletes") or []
+            diffs = summary.get("diff_files") or []
+            if opened == 0 and not adds and not edits and not deletes and not diffs:
+                lines.append("状态：干净，没有打开文件，也没有本地待提交改动。")
+            else:
+                lines.append(f"状态：opened {opened}，新增 {len(adds)}，修改 {len(edits) + len(diffs)}，删除 {len(deletes)}。")
+            for path in (summary.get("opened_files") or [])[:max_items]:
+                lines.append(f"- opened：{path}")
+            for path in adds[:max_items]:
+                lines.append(f"- 新增：{path}")
+            for path in edits[:max_items]:
+                lines.append(f"- 修改：{path}")
+            for path in deletes[:max_items]:
+                lines.append(f"- 删除：{path}")
+        if "preview_count" in summary:
+            lines.append(f"同步预览：{summary.get('preview_count', 0)} 个文件会变化。")
+        if "adds" in summary or "edits" in summary or "deletes" in summary:
+            lines.append(
+                f"reconcile 预览：新增 {len(summary.get('adds') or [])}，"
+                f"修改 {len(summary.get('edits') or [])}，删除 {len(summary.get('deletes') or [])}。"
+            )
+        if summary.get("suggested_changelist_description"):
+            lines.append("建议 changelist 描述：")
+            lines.append(str(summary.get("suggested_changelist_description")))
+    checks = payload.get("checks") or {}
+    if checks:
+        bad = [name for name, ok in checks.items() if not ok]
+        lines.append("配置：" + ("正常" if not bad else "需要检查 " + "、".join(bad)))
+    info = payload.get("info") or {}
+    if info and payload.get("operation") == "inspect_workspace":
+        server = info.get("server address")
+        if server:
+            lines.append(f"server：已连接（内部地址 {server}）")
+        if info.get("client stream"):
+            lines.append(f"stream：{info.get('client stream')}")
+    warnings = payload.get("warnings") or []
+    for warning in warnings[:max_items]:
+        lines.append(f"风险提示：{warning}")
+    blockers = payload.get("blockers") or []
+    for blocker in blockers[:max_items]:
+        lines.append(f"阻塞：{blocker}")
+    return lines
+
+
+def _p4_operation_label(operation: str) -> str:
+    labels = {
+        "inspect_workspace": "连接信息",
+        "inventory": "拓扑总览",
+        "workspace_details": "工作区详情",
+        "compare_depot": "本地/Depot 对比",
+        "list_workflows": "工作流清单",
+        "get_status": "状态检查",
+        "preview_sync": "同步预览",
+        "do_sync": "同步完成",
+        "preview_reconcile": "reconcile 预览",
+        "do_reconcile": "reconcile 完成",
+        "build_changelist_summary": "changelist 摘要",
+        "preview_setup_workspace": "workspace 预览",
+        "setup_workspace": "workspace 已配置",
+        "status": "Shelve-only 状态",
+        "check": "Shelve-only 安全检查",
+        "preview": "UI 资源 reconcile 预览",
+        "create-cl": "pending changelist 已创建",
+        "reconcile": "UI 资源已 reconcile",
+        "shelve": "Shelve 完成",
+        "report": "飞书报告",
+    }
+    return labels.get(operation, operation)
 
 
 def _format_life_weather(payload: dict[str, Any]) -> list[str]:

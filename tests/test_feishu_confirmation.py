@@ -92,7 +92,7 @@ def test_greeting_reply_is_warm(monkeypatch) -> None:
     result = process_feishu_message(_event("你好", f"evt_greeting_{uuid.uuid4().hex}"))
 
     assert result.ok is True
-    assert replies == ["初音在。今天想让我陪你唱一会儿，还是一起把某个任务往前推一点？"]
+    assert replies == ["初音在。今天想让我陪你聊一会儿，还是一起把某个任务往前推一点？"]
 
 
 def test_conversational_message_skips_processing_ack(monkeypatch) -> None:
@@ -102,14 +102,14 @@ def test_conversational_message_skips_processing_ack(monkeypatch) -> None:
     def fake_handle(message):
         from assetclaw_matting.brain.schemas import BrainResponse
 
-        return BrainResponse(text="可以，我陪你唱。", provider="test")
+        return BrainResponse(text="唱歌和接歌词功能已经关闭。", provider="test")
 
     monkeypatch.setattr("assetclaw_matting.brain.router.handle_message", fake_handle)
 
     result = process_feishu_message(_event("陪我唱歌", f"evt_sing_{uuid.uuid4().hex}"))
 
     assert result.ok is True
-    assert replies == ["可以，我陪你唱。"]
+    assert replies == ["唱歌和接歌词功能已经关闭。"]
 
 
 def test_task_message_keeps_processing_ack(monkeypatch) -> None:
@@ -126,4 +126,4 @@ def test_task_message_keeps_processing_ack(monkeypatch) -> None:
     result = process_feishu_message(_event("今天天气怎么样", f"evt_weather_{uuid.uuid4().hex}"))
 
     assert result.ok is True
-    assert replies == ["我收到啦，正在处理。", "上海现在：Clear。"]
+    assert replies == ["我收到啦，正在处理，通常几秒内回复。", "上海现在：Clear。"]

@@ -38,17 +38,12 @@ def test_smalltalk_gets_human_reply_without_identity_disclaimer() -> None:
         "太逊了，你快点学会了教我": "确实有点逊",
         "晚上好呀": "初音在",
         "嘿咻": "初音",
-        "下雨天了怎么办我好想你": "不敢打给你",
-        "给我唱歌": "初音在这里陪你唱",
-        "陪我唱歌": "接住回声",
-        "我要点歌": "初音在这里陪你唱",
+        "给我唱歌": "功能已经关闭",
+        "陪我唱歌": "功能已经关闭",
+        "我要点歌": "功能已经关闭",
         "可以帮我搜这首歌的歌词吗全部": "不能直接贴给你",
-        "为什么失眠的声音 变的好熟悉": "接住",
         "今天任务好多我好崩溃": "最刺痛",
         "睡不着": "脑子会把一点点事放大",
-        "就想一只蝴蝶飞过了废墟": "陶喆《蝴蝶》",
-        "每次一想到你 心里好平静": "陶喆《蝴蝶》",
-        "每次一见到你 心里好平静": "陶喆《蝴蝶》",
     }
     for message, expected in samples.items():
         response = LocalCommandBrain().handle_message(BrainMessage(text=message))
@@ -57,7 +52,7 @@ def test_smalltalk_gets_human_reply_without_identity_disclaimer() -> None:
         assert "不是" not in response.text
         assert "低配" not in response.text
         assert "本尊" not in response.text
-        assert "整段唱现成歌词" not in response.text
+        assert "我接原创下一句" not in response.text
 
 
 def test_emotional_reply_does_not_steal_explicit_production_status() -> None:
@@ -67,21 +62,77 @@ def test_emotional_reply_does_not_steal_explicit_production_status() -> None:
 
 
 def test_capability_question_gets_expansive_agent_help() -> None:
-    response = LocalCommandBrain().handle_message(BrainMessage(text="你可以干嘛呀"))
-    assert response.tool_calls
-    assert response.tool_calls[0].skill == "bot.help"
-    assert "初音未来机器人" in response.text
-    assert "初音能陪你" in response.text
-    assert "生产助理" in response.text
-    assert "文件和资料管家" in response.text
-    assert "老三样" in response.text
-    assert "收到，这个我也挺开心" not in response.text
+    for text in ("你可以干嘛呀", "你会做啥", "你能做啥", "你会啥"):
+        response = LocalCommandBrain().handle_message(BrainMessage(text=text))
+        assert response.tool_calls
+        assert response.tool_calls[0].skill == "bot.help"
+        assert "初音未来机器人" in response.text
+        assert "初音能陪你" in response.text
+        assert "生产助理" in response.text
+        assert "文件和资料管家" in response.text
+        assert "老三样" in response.text
+        assert "收到，这个我也挺开心" not in response.text
 
 
 def test_bare_ok_still_gets_warm_ack() -> None:
     response = LocalCommandBrain().handle_message(BrainMessage(text="可以"))
     assert not response.tool_calls
     assert "初音也开心" in response.text
+
+
+def test_singing_mode_is_removed() -> None:
+    brain = LocalCommandBrain()
+    conversation_id = "sing-mode-removed"
+
+    for text in ("进入唱歌模式", "推出歌唱模式谢谢", "不要再接下一句了", "陪我唱歌"):
+        response = brain.handle_message(BrainMessage(text=text, conversation_id=conversation_id))
+        assert "已进入唱歌模式" not in response.text
+        assert "已退出唱歌模式" not in response.text
+        assert "我接原创下一句" not in response.text
+        assert "已经关闭" in response.text
+
+
+def test_removed_singing_mode_never_swallow_normal_tasks(monkeypatch, tmp_path) -> None:
+    brain = LocalCommandBrain()
+    conversation_id = "sing-mode-router-safety"
+    monkeypatch.setattr(
+        LocalCommandBrain,
+        "execute_tool_calls",
+        lambda self, tool_calls, conversation_id="", user_id="": [{"ok": True, "skill": call.skill, "result": {"ok": True}} for call in tool_calls],
+    )
+
+    weather = brain.handle_message(BrainMessage(text="今天天气怎么样", conversation_id=conversation_id))
+    assert "我接原创下一句" not in weather.text
+    assert weather.tool_calls
+    assert weather.tool_calls[0].skill == "life.weather"
+
+    food = brain.handle_message(BrainMessage(text="外卖点什么比较好呢", conversation_id=conversation_id))
+    assert "我接原创下一句" not in food.text
+    assert food.tool_calls
+    assert food.tool_calls[0].skill == "life.food_suggest"
+
+    comfy = brain.handle_message(BrainMessage(text="查看comfyui状态", conversation_id=conversation_id))
+    assert "我接原创下一句" not in comfy.text
+    assert comfy.tool_calls
+    assert comfy.tool_calls[0].skill == "comfyui.status"
+
+    p4 = brain.handle_message(BrainMessage(text="查看p4功能的状态", conversation_id=conversation_id))
+    assert "我接原创下一句" not in p4.text
+    assert p4.tool_calls
+    assert p4.tool_calls[0].skill == "p4.help"
+
+    image = tmp_path / "ocr.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    translated = brain.handle_message(
+        BrainMessage(
+            text="[图片]提取文字翻译为英文",
+            conversation_id=conversation_id,
+            attachments=[{"type": "image", "local_path": str(image), "file_name": image.name}],
+        )
+    )
+    assert "我接原创下一句" not in translated.text
+    assert translated.tool_calls
+    assert translated.tool_calls[0].skill == "translate.image_text"
 
 
 def test_explicit_url_routes_to_web_fetch() -> None:

@@ -63,9 +63,19 @@ def run_preview(
     fps: int | None = None,
     max_frames: int | None = None,
     diff_threshold: float | None = None,
+    dedup_enabled: bool | None = None,
+    dedup_renumber: bool | None = None,
 ) -> dict[str, Any]:
     defaults = default_automation_paths()
-    cfg = _build_config(download_dir=download_dir, export_dir=export_dir, fps=fps, max_frames=max_frames, diff_threshold=diff_threshold)
+    cfg = _build_config(
+        download_dir=download_dir,
+        export_dir=export_dir,
+        fps=fps,
+        max_frames=max_frames,
+        diff_threshold=diff_threshold,
+        dedup_enabled=dedup_enabled,
+        dedup_renumber=dedup_renumber,
+    )
     return {
         "ok": True,
         "workspace_root": defaults["workspace_root"],
@@ -85,13 +95,23 @@ def run_start(
     fps: int | None = None,
     max_frames: int | None = None,
     diff_threshold: float | None = None,
+    dedup_enabled: bool | None = None,
+    dedup_renumber: bool | None = None,
     notify_interval_seconds: int = 60,
 ) -> dict[str, Any]:
     from assetclaw_matting.config import settings
     from assetclaw_matting.db.sqlite import get_connection
     from assetclaw_matting.runtime_context import get_runtime_context
 
-    cfg = _build_config(download_dir=download_dir, export_dir=export_dir, fps=fps, max_frames=max_frames, diff_threshold=diff_threshold)
+    cfg = _build_config(
+        download_dir=download_dir,
+        export_dir=export_dir,
+        fps=fps,
+        max_frames=max_frames,
+        diff_threshold=diff_threshold,
+        dedup_enabled=dedup_enabled,
+        dedup_renumber=dedup_renumber,
+    )
     run_id = _run_id()
     run_dir = Path(settings.storage_dir) / "frame_runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -380,7 +400,15 @@ def _format_status(status: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _build_config(download_dir: str | None, export_dir: str | None, fps: int | None, max_frames: int | None, diff_threshold: float | None) -> dict[str, Any]:
+def _build_config(
+    download_dir: str | None,
+    export_dir: str | None,
+    fps: int | None,
+    max_frames: int | None,
+    diff_threshold: float | None,
+    dedup_enabled: bool | None = None,
+    dedup_renumber: bool | None = None,
+) -> dict[str, Any]:
     cfg = _load_base_config()
     defaults = default_automation_paths()
     if download_dir:
@@ -396,6 +424,10 @@ def _build_config(download_dir: str | None, export_dir: str | None, fps: int | N
     cfg.setdefault("framepacker", {})["max_frames"] = int(max_frames) if max_frames is not None else int(cfg.get("framepacker", {}).get("max_frames", 0) or 0)
     if diff_threshold is not None:
         cfg.setdefault("dedup", {})["diff_threshold"] = float(diff_threshold)
+    if dedup_enabled is not None:
+        cfg.setdefault("dedup", {})["enabled"] = bool(dedup_enabled)
+    if dedup_renumber is not None:
+        cfg.setdefault("dedup", {})["renumber"] = bool(dedup_renumber)
     return cfg
 
 

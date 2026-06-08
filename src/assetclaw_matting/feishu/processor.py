@@ -76,8 +76,9 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
     _remember_recent_attachments(conversation_id, event.attachments)
 
     if _is_simple_greeting(event.text):
-        text_out = "初音在。今天想让我陪你唱一会儿，还是一起把某个任务往前推一点？"
+        text_out = "初音在。今天想让我陪你聊一会儿，还是一起把某个任务往前推一点？"
         _try_reply(event.message_id, event.chat_id, text_out)
+        _try_send_tts_reply(event.chat_id, conversation_id, event, text_out)
         _try_send_emotional_sticker(event.chat_id, event.text, text_out)
         _log_direct_brain_message(conversation_id, event, text_out)
         update_event_dedup_status(dedup_key, "success")
@@ -92,7 +93,7 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
             _try_reply(
                 event.message_id,
                 event.chat_id,
-                "我收到啦，正在处理。",
+                _processing_ack_text(event),
             )
 
         def _progress_sender(text: str) -> None:
@@ -122,6 +123,7 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
             reset_progress_sender(progress_token)
         reply_text = response.text or "完成。"
         _try_reply(event.message_id, event.chat_id, reply_text)
+        _try_send_tts_reply(event.chat_id, conversation_id, event, reply_text)
         _try_send_emotional_sticker(event.chat_id, event.text, reply_text)
         trace(
             "feishu.reply",
@@ -306,6 +308,60 @@ def _try_send_emotional_sticker(chat_id: str, message_text: str, reply_text: str
         log.error("send emotional sticker failed: %s", redact_secrets(str(exc)))
 
 
+def _try_send_tts_reply(chat_id: str, conversation_id: str, event: FeishuMessageEvent, reply_text: str) -> None:
+    if not chat_id or not _should_send_voice_reply(event, conversation_id):
+        return
+    clean_text = (reply_text or "").strip()
+    if not clean_text:
+        return
+    try:
+        from assetclaw_matting.feishu.client import feishu_client
+        from assetclaw_matting.skills.speech_skills import synthesize
+
+        _try_send_tts_progress(chat_id)
+        payload = synthesize(clean_text)
+        if not payload.get("ok"):
+            log.error("tts synthesize failed: %s", redact_secrets(str(payload.get("error") or payload)))
+            return
+        target = Path(str(payload["output_path"]))
+        feishu_client.send_file_to_chat(chat_id, target, str(payload.get("file_name") or target.name))
+    except Exception as exc:
+        log.error("send tts reply failed: %s", redact_secrets(str(exc)))
+
+
+def _try_send_tts_progress(chat_id: str) -> None:
+    from assetclaw_matting.config import settings
+
+    if not bool(getattr(settings, "voice_reply_progress_enabled", True)):
+        return
+    _try_send_chat(chat_id, "文字先给你，语音正在合成。通常 8-20 秒，首次加载本地 TTS 模型可能更久。")
+
+
+def _should_send_voice_reply(event: FeishuMessageEvent, conversation_id: str) -> bool:
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.brain.speech_planner import voice_reply_enabled
+
+    if bool(getattr(settings, "voice_reply_on_audio", True)) and _has_audio_attachment(event):
+        return True
+    return voice_reply_enabled(conversation_id)
+
+
+def _has_audio_attachment(event: FeishuMessageEvent) -> bool:
+    if not event.attachments:
+        return False
+    from assetclaw_matting.skills.speech_skills import AUDIO_EXTS
+
+    for item in event.attachments:
+        raw_type = str(item.get("type") or "").lower()
+        path = str(item.get("local_path") or "")
+        name = str(item.get("file_name") or "")
+        if raw_type in {"audio", "voice"}:
+            return True
+        if Path(path or name).suffix.lower() in AUDIO_EXTS:
+            return True
+    return False
+
+
 def _prepare_attachments(event: FeishuMessageEvent, conversation_id: str) -> list[dict[str, object]]:
     if not event.attachments:
         return []
@@ -319,6 +375,8 @@ def _prepare_attachments(event: FeishuMessageEvent, conversation_id: str) -> lis
     for index, attachment in enumerate(event.attachments, start=1):
         item = dict(attachment)
         name = _safe_attachment_name(str(item.get("file_name") or f"attachment_{index}.bin"))
+        if str(item.get("type") or "").lower() in {"audio", "voice"} and Path(name).suffix.lower() not in _audio_suffixes():
+            name = f"{Path(name).stem or f'voice_{index}'}.mp3"
         target = _unique_path(inbox / name)
         resource_type = _download_resource_type(str(item.get("type") or "file"))
         try:
@@ -352,6 +410,12 @@ def _download_resource_type(raw_type: str) -> str:
     if raw_type in {"image", "file", "video", "audio", "media"}:
         return raw_type
     return "file"
+
+
+def _audio_suffixes() -> set[str]:
+    from assetclaw_matting.skills.speech_skills import AUDIO_EXTS
+
+    return AUDIO_EXTS
 
 
 def _is_stale_event(event: FeishuMessageEvent) -> bool:
@@ -414,6 +478,29 @@ def _should_send_processing_ack(event: FeishuMessageEvent) -> bool:
     except Exception:
         log.debug("failed to classify conversational message for ack", exc_info=True)
     return True
+
+
+def _processing_ack_text(event: FeishuMessageEvent) -> str:
+    if _has_audio_attachment(event):
+        suffix = " 如果还要合成语音，我会先发文字结果，再补发语音。"
+        if _deepseek_thinking_enabled():
+            return "收到语音了。我会先用本地 ASR 转文字，再让大脑深度思考，通常需要 10-60 秒。" + suffix
+        return "收到语音了。我会先用本地 ASR 转文字，通常 2-8 秒，首次加载模型可能需要 20 秒以上。" + suffix
+    if event.attachments:
+        return "附件收到了，我正在下载并分析，通常需要 5-30 秒。"
+    if _deepseek_thinking_enabled():
+        return "我收到啦，正在调用 DeepSeek 深度思考，通常需要 10-60 秒。"
+    return "我收到啦，正在处理，通常几秒内回复。"
+
+
+def _deepseek_thinking_enabled() -> bool:
+    from assetclaw_matting.config import settings
+
+    if str(getattr(settings, "brain_provider", "")).lower() != "deepseek":
+        return False
+    thinking_type = str(getattr(settings, "deepseek_thinking_type", "") or "").strip().lower()
+    reasoning_effort = str(getattr(settings, "deepseek_reasoning_effort", "") or "").strip().lower()
+    return thinking_type not in {"", "disabled", "none", "off", "false"} or reasoning_effort in {"high", "maximum"}
 
 
 def _log_direct_brain_message(conversation_id: str, event: FeishuMessageEvent, response_text: str) -> None:
