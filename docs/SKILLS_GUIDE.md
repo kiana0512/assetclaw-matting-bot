@@ -189,11 +189,22 @@ storage\feishu_inbox\日期\会话\
 | `frame.run_status` | 查看抽帧任务进度 | readonly |
 | `frame.run_list` | 查看抽帧任务列表 | readonly |
 | `frame.run_cancel` | 终止抽帧任务 | write_safe |
-| `pipeline.run_preview` | 预览完整动画自动化流程 | readonly |
-| `pipeline.run_start` | 固定顺序执行抽帧 -> ComfyUI 抠图 -> Cherry 平滑，启动前需确认 | write_safe |
-| `pipeline.run_status` | 查看完整流程和三个子任务进度 | readonly |
-| `pipeline.run_list` | 查看完整流程任务列表 | readonly |
-| `pipeline.run_cancel` | 终止完整流程及当前子任务 | write_safe |
+| `animation_flow.preview` | 预览完整 7 步动画自动化流程 | readonly |
+| `animation_flow.start` | 执行飞书下载 -> 抽帧 -> 抠图 -> Cherry -> unity_ready -> Unity 导入 -> P4 Shelve-only，启动前需确认 | write_safe |
+| `animation_flow.status` | 查看完整 7 步流程和子任务进度 | readonly |
+| `animation_flow.list` | 查看完整 7 步流程任务列表 | readonly |
+| `animation_flow.cancel` | 终止完整 7 步流程及当前子任务 | write_safe |
+| `unity_ready.preview` | 预览 unity_ready scene/emoji 输出结构 | readonly |
+| `unity_ready.build` | 单独生成 unity_ready，启动前需确认 | write_safe |
+| `unity_ready.status` | 查看 unity_ready JSON 和帧数量 | readonly |
+| `unity_import.preview` | 预览 Unity 插件导入路径 | readonly |
+| `unity_import.run` | 调用 Unity 插件 API 导入引擎，启动前需确认 | write_safe |
+| `unity_import.status` | 查看 Unity 导入准备状态 | readonly |
+| `pipeline.run_preview` | 预览旧三步动画流程 | readonly |
+| `pipeline.run_start` | 旧入口：固定顺序执行抽帧 -> ComfyUI 抠图 -> Cherry 平滑，启动前需确认 | write_safe |
+| `pipeline.run_status` | 查看旧三步流程和子任务进度 | readonly |
+| `pipeline.run_list` | 查看旧三步流程任务列表 | readonly |
+| `pipeline.run_cancel` | 终止旧三步流程及当前子任务 | write_safe |
 | `system.gpu_status` | 查询 nvidia-smi GPU 显存/利用率/温度/功耗 | readonly |
 | `system.process_status` | 查询匹配进程状态 | readonly |
 

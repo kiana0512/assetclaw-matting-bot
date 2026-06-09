@@ -86,7 +86,6 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
 
     # --- main processing chain -----------------------------------------------
     try:
-        from assetclaw_matting.brain import router as brain_router
         from assetclaw_matting.brain.schemas import BrainMessage
 
         if _should_send_processing_ack(event):
@@ -95,6 +94,57 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
                 event.chat_id,
                 _processing_ack_text(event),
             )
+
+        if settings.agent_queue_enabled:
+            from assetclaw_matting.services.agent_job_queue import enqueue_brain_job
+
+            def _on_job_done(job: dict[str, object]) -> None:
+                if str(job.get("status") or "") == "DONE":
+                    response = job.get("response") if isinstance(job.get("response"), dict) else {}
+                    reply_text = str(response.get("text") or "完成。")
+                    _try_reply(event.message_id, event.chat_id, reply_text)
+                    _try_send_tts_reply(event.chat_id, conversation_id, event, reply_text)
+                    _try_send_emotional_sticker(event.chat_id, event.text, reply_text)
+                    trace(
+                        "feishu.reply",
+                        trace_id=trace_id,
+                        conversation_id=conversation_id,
+                        chat_id=event.chat_id,
+                        open_id=event.open_id,
+                        text=reply_text,
+                    )
+                    update_event_dedup_status(dedup_key, "success")
+                    log.info("process_message ASYNC SUCCESS trace_id=%s job_id=%s", trace_id, job.get("job_id"))
+                    return
+                update_event_dedup_status(dedup_key, "failed")
+                error_text = str(job.get("error") or "Agent 后台任务失败")
+                if settings.bot_error_push_enabled:
+                    _try_reply(event.message_id, event.chat_id, f"这条消息后台处理失败：{error_text}")
+                log.error("process_message ASYNC FAILED trace_id=%s job_id=%s error=%s", trace_id, job.get("job_id"), error_text)
+
+            job = enqueue_brain_job(
+                BrainMessage(
+                    channel="feishu",
+                    conversation_id=conversation_id,
+                    user_id=event.open_id or "",
+                    text=event.text,
+                    attachments=event.attachments,
+                ),
+                trace_id=trace_id,
+                context={
+                    "channel": "feishu",
+                    "chat_id": event.chat_id,
+                    "open_id": event.open_id,
+                    "user_id": event.user_id,
+                    "conversation_id": conversation_id,
+                    "trace_id": trace_id,
+                },
+                callback=_on_job_done,
+            )
+            log.info("process_message QUEUED trace_id=%s job_id=%s", trace_id, job.get("job_id"))
+            return FeishuProcessResult(ok=True, trace_id=trace_id, reply_text="已进入后台队列。")
+
+        from assetclaw_matting.brain import router as brain_router
 
         def _progress_sender(text: str) -> None:
             log.info("progress trace_id=%s text=%s", trace_id, redact_secrets(text))

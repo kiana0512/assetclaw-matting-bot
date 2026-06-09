@@ -1,0 +1,22 @@
+{
+  "ok": true,
+  "job_id": "AJOB_4EFB841CBC37",
+  "id": "AJOB_4EFB841CBC37",
+  "channel": "brain_test",
+  "conversation_id": "test",
+  "user_id": "local",
+  "trace_id": "d337d50624c44bae819bad5f3cf297e1",
+  "status": "DONE",
+  "queued_at": "2026-06-09T11:57:19",
+  "started_at": "2026-06-09T11:57:21",
+  "finished_at": "2026-06-09T11:57:21",
+  "error": "",
+  "response": {
+    "text": "这句我接住了。刚才如果判断跑偏了，是我的问题；你直接说要我改哪里，我会收敛一点认真处理。",
+    "tool_calls": [],
+    "raw": {},
+    "provider": "deepseek"
+  },
+  "last_progress": "",
+  "text_preview": "你是大笨蛋"
+}

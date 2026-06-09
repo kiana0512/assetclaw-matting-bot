@@ -1,0 +1,42 @@
+{
+  "ok": true,
+  "job_id": "AJOB_5D04BB2B8F49",
+  "id": "AJOB_5D04BB2B8F49",
+  "channel": "feishu",
+  "conversation_id": "feishu:oc_eb29d865510325e9944b2d0894907af1:ou_43a252311b1cb6ae4c6f61f380b886b3",
+  "user_id": "ou_43a252311b1cb6ae4c6f61f380b886b3",
+  "trace_id": "d8516ff79e66",
+  "status": "DONE",
+  "queued_at": "2026-06-09T16:52:06",
+  "started_at": "2026-06-09T16:52:08",
+  "finished_at": "2026-06-09T16:52:10",
+  "error": "",
+  "response": {
+    "text": "当前没有动画自动化流程任务。",
+    "tool_calls": [
+      {
+        "skill": "pipeline.run_list",
+        "arguments": {
+          "limit": 5
+        }
+      }
+    ],
+    "raw": {
+      "llm_tool_json": "{\"tool_calls\":[{\"skill\":\"pipeline.run_list\",\"arguments\":{\"limit\":5}}],\"text\":\"我查一下当前动画自动化流程的记录。\"}",
+      "skill_results": [
+        {
+          "ok": true,
+          "skill": "pipeline.run_list",
+          "result": {
+            "ok": true,
+            "count": 0,
+            "items": []
+          }
+        }
+      ]
+    },
+    "provider": "deepseek"
+  },
+  "last_progress": "工具执行完成，正在整理回复",
+  "text_preview": "现在动画自动化流程有哪些步骤呢"
+}

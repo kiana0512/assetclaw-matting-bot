@@ -22,9 +22,10 @@ def test_report_text_contains_cl_shelf_files_and_safety() -> None:
     )
     safety = SafetyResult(True, warnings=("meta reviewed",), checks={"managed paths only": "PASS", "Unity .meta": "WARNING"})
     text = render_report(ReportData(workspace, "123456", "123456", files, safety, "main"))
-    assert "【P4 UI 表情资源导入 - Shelve Only】" in text
+    assert "【P4 UI 动画资源导入 - Shelve Only】" in text
     assert "123456" in text
-    assert "Shelve-only" in text
+    assert "Submit:" in text
+    assert "DISABLED" in text
     assert "add  Assets/Art/UI/SpritesAnim/Emoji/a.png" in text
     assert "Unity .meta 检查: WARNING" in text
     assert "meta reviewed" in text

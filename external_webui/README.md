@@ -22,7 +22,7 @@ python .\external_webui\server.py
 然后打开：
 
 ```text
-http://127.0.0.1:5177
+http://127.0.0.1:5180
 ```
 
 默认代理到本机 Agent 后端，会优先读取项目 `.env` 里的 `GATEWAY_BASE_URL` / `GATEWAY_PORT`。当前项目默认是：
@@ -58,9 +58,9 @@ python .\external_webui\server.py
 - 总控：模块状态、诊断、参数入口。
 - 队列：ComfyUI / Cherry / 抽帧 / Pipeline / 自定义流程任务和控制。
 - 流程：动画自动化流程时间线与工作区计数。
-- 编排：自定义工作流步骤、变量、参数 JSON。
+- 编排：自定义工作流步骤、变量、模块参数弹窗。
 - 语音：ASR / TTS。
-- P4：workspace、opened、reconcile、depot 对比。
+- P4：Shelve-only 的 status / check / preview / create CL / reconcile / shelve / report。
 - 记忆：Memory / RAG context pack 和压缩。
 - 技能：后端 skills manifest。
 - 日志：Agent 对话日志和 skill 调用日志。

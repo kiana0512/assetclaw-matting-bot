@@ -10,14 +10,17 @@ EXAMPLE_CONFIG_PATH = PACKAGE_DIR / "workspaces.example.yaml"
 DEFAULT_MANAGED_PATHS = (
     "Assets/Art/UI/SpritesAnim/Emoji/...",
     "Assets/Art/UI/SpritesAnim/CharacterAnim/...",
+    "Assets/Art/UI/Animation/Emoji/...",
+    "Assets/Art/Character/Animation/...",
+    "Assets/Res/UI/Animator/EmojiOverride/...",
+    "Assets/Res/Character/Animation/Override/...",
+    "Assets/Modules/UepUtility/AnimTextureImporter/Editor/Manifests/...",
 )
 
 DEFAULT_FORBIDDEN_PATHS = (
     "ProjectSettings/...",
     "Assets/ProjectSettings/...",
     "Assets/AddressableAssetsData/...",
-    "Assets/Art/Character/...",
-    "Assets/Art/Scene/...",
     "Assets/Plugins/...",
     "Assets/Editor/...",
     "Packages/...",

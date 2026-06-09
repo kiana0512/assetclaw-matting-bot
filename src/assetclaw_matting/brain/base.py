@@ -83,6 +83,13 @@ class BrainProvider(ABC):
                         message = preview_run_start_confirmation(args, confirmation_id)
                     except Exception:
                         pass
+                elif tool_call.skill == "animation_flow.start":
+                    try:
+                        from assetclaw_matting.skills.animation_flow_skills import preview_run_start_confirmation
+
+                        message = preview_run_start_confirmation(args, confirmation_id)
+                    except Exception:
+                        pass
                 elif tool_call.skill == "animation.manual_smooth_current":
                     try:
                         from assetclaw_matting.skills.animation_ops_skills import preview_manual_smooth_current_confirmation

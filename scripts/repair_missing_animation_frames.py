@@ -32,7 +32,7 @@ def _video_files(video_root: Path) -> list[Path]:
 
 
 def _expected_names(max_frames: int) -> set[str]:
-    return {f"{idx:04d}.png" for idx in range(1, max_frames + 1)}
+    return {f"{idx:04d}.png" for idx in range(max_frames)}
 
 
 def collect_missing(root: Path, max_frames: int) -> list[dict[str, object]]:
@@ -102,7 +102,6 @@ def extract_missing_for_video(
                     else:
                         keep = False
                 if keep:
-                    out_idx += 1
                     if out_idx in wanted:
                         name = f"{out_idx:04d}.png"
                         main_target = frame_root / rel_dir / name
@@ -112,6 +111,7 @@ def extract_missing_for_video(
                         if overwrite_patch or not patch_target.exists():
                             _save_png(patch_target, frame)
                         saved.append(str(Path(rel_dir) / name).replace("\\", "/"))
+                    out_idx += 1
                     if max_frames and out_idx >= max_frames:
                         break
                 frame_idx += 1

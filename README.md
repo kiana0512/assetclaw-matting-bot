@@ -93,4 +93,5 @@ E:\assetclaw-matting-bot\README.md 是否存在
 - [飞书接入说明](docs/FEISHU_SETUP.md)
 - [技能权限矩阵](docs/SKILL_PERMISSION_MATRIX.md)
 - [飞书机器人使用说明](docs/FEISHU_BOT_USAGE.md)
+- [动画自动化到 Unity Ready 流程](docs/ANIMATION_UNITY_READY.md)
 - [故障排查](docs/TROUBLESHOOTING.md)

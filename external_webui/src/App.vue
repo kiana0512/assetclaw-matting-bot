@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, reactive } from "vue";
 
 const DEFAULT_TOKEN = localStorage.getItem("assetclaw.skillToken") || "";
 const CHAT_STORAGE_KEY = "assetclaw.mikuAgent.chat.test";
+const STATUS_CACHE_KEY = "assetclaw.mikuAgent.statusCache.v1";
 const DEFAULT_SYSTEM_MESSAGE = {
   role: "system",
   text: "Miku Agent 控制台已连接。本页发送的内容会原样进入本机 Agent，与飞书走同一套后端。",
@@ -10,16 +11,23 @@ const DEFAULT_SYSTEM_MESSAGE = {
 const HEALTH_FAILURES_BEFORE_OFFLINE = 3;
 const HEALTH_GRACE_MS = 30000;
 const HEALTH_TIMEOUT_MS = 25000;
-const STATUS_POLL_MS = 15000;
-const DEFAULT_DAY = localStorage.getItem("assetclaw.workspaceDay") || "2026-06-08";
+const STATUS_POLL_MS = 20000;
+const FRONTEND_CACHE_MS = 2500;
+const MAX_STATUS_PARALLEL = 4;
+const VISIBLE_TASK_LIMIT = 40;
+const VISIBLE_LOG_LIMIT = 60;
+const DEFAULT_DAY = localStorage.getItem("assetclaw.workspaceDay") || localDateStamp();
 const DEFAULT_WORKSPACE_ROOT = `E:/animation_automation/${DEFAULT_DAY}`;
+
+const inflightRequests = new Map();
+const responseCache = new Map();
 
 const views = [
   { id: "chat", icon: "⌘", label: "对话", eyebrow: "本机 Agent 入口", title: "AI 对话工作台" },
   { id: "overview", icon: "◎", label: "总控", eyebrow: "生产状态总览", title: "总控台" },
   { id: "queues", icon: "▦", label: "队列", eyebrow: "任务队列与控制", title: "任务队列" },
   { id: "pipeline", icon: "⇄", label: "流程", eyebrow: "动画自动化流程", title: "流程总览" },
-  { id: "builder", icon: "▣", label: "编排", eyebrow: "自定义工作流", title: "流程编排器" },
+  { id: "builder", icon: "▣", label: "生产", eyebrow: "一键自动化", title: "动画自动化流程" },
   { id: "voice", icon: "♬", label: "语音", eyebrow: "ASR / TTS", title: "语音工作台" },
   { id: "p4", icon: "◇", label: "P4", eyebrow: "版本管理", title: "P4 工作区" },
   { id: "memory", icon: "◌", label: "记忆", eyebrow: "Memory / RAG", title: "记忆检索" },
@@ -41,7 +49,12 @@ const statusCalls = [
   { key: "frameCurrent", skill: "frame.run_status", args: {} },
   { key: "pipelineRuns", skill: "pipeline.run_list", args: { limit: 12, include_finished: true } },
   { key: "pipelineCurrent", skill: "pipeline.run_status", args: {} },
+  { key: "animationFlowRuns", skill: "animation_flow.list", args: { limit: 12, include_finished: true } },
+  { key: "animationFlowCurrent", skill: "animation_flow.status", args: {} },
   { key: "customPipelineRuns", skill: "custom_pipeline.run_list", args: { limit: 12, include_finished: true } },
+  { key: "customPipelineCurrent", skill: "custom_pipeline.run_status", args: {} },
+  { key: "unityReady", skill: "unity_ready.status", args: {} },
+  { key: "unityImport", skill: "unity_import.status", args: {} },
   { key: "animation", skill: "animation.status", args: { include_runs: true } },
   { key: "p4", skill: "p4.status", args: {} },
 ];
@@ -135,9 +148,54 @@ const modules = {
       f("notify_interval_seconds", "进度通知间隔", "number", 300, "后端报告进度的间隔。"),
     ],
   },
+  animationFlow: {
+    title: "完整 7 步动画自动化",
+    subtitle: "飞书下载 -> 抽帧 -> 抠图 -> Cherry -> unity_ready -> Unity 导入 -> P4 Shelve-only。",
+    previewSkill: "animation_flow.preview",
+    startSkill: "animation_flow.start",
+    statusKey: "animationFlowCurrent",
+    runKey: "animationFlowRuns",
+    fields: [
+      f("date_root", "当天工作区", "path", pathInWorkspace(), "例如 E:/animation_automation/2026-06-09。", "dir"),
+      f("workflow_path", "ComfyUI 工作流", "path", "", "抠图用工作流 json；留空走后端默认。", "file"),
+      f("unity_project", "Unity 工程", "path", "D:/Spark/Client", "插件 API 在这个 Unity 工程里执行。", "dir"),
+      f("p4_stream", "P4 Stream", "text", "//streams/rel_0.0.1", "当前固定使用 rel_0.0.1。"),
+      f("package", "Unity 导入包", "text", "both", "both / scene / emoji。"),
+      f("fps", "抽帧 FPS", "number", 24, "默认 24。"),
+      f("notify_interval_seconds", "进度通知间隔", "number", 60, "飞书和 WebUI 进度刷新间隔。"),
+      f("allow_p4_writes", "允许 P4 create/reconcile/shelve", "checkbox", true, "只允许 shelve-only，submit 永远禁用。"),
+    ],
+  },
+  unityReady: {
+    title: "unity_ready 整理",
+    subtitle: "把处理后的 scene / emoji 资源整理成 Unity 插件可读取的 JSON + frames。",
+    previewSkill: "unity_ready.preview",
+    startSkill: "unity_ready.build",
+    statusKey: "unityReady",
+    runKey: "",
+    fields: [
+      f("date_root", "当天工作区", "path", pathInWorkspace(), "例如 E:/animation_automation/2026-06-09。", "dir"),
+      f("overwrite", "覆盖已有 unity_ready", "checkbox", true, "整体流程会覆盖当天 unity_ready。"),
+      f("copy_mode", "复制模式", "text", "copy", "默认 copy。"),
+    ],
+  },
+  unityImport: {
+    title: "Unity 插件导入引擎",
+    subtitle: "通过插件 API/MCP 导入 unity_ready，不改插件源码，不点击 UI。",
+    previewSkill: "unity_import.preview",
+    startSkill: "unity_import.run",
+    statusKey: "unityImport",
+    runKey: "",
+    fields: [
+      f("unity_ready", "unity_ready 目录", "path", pathInWorkspace("unity_ready"), "包含 scene/emoji 两包。", "dir"),
+      f("unity_project", "Unity 工程", "path", "D:/Spark/Client", "当前 Spark Client 工程。", "dir"),
+      f("package", "导入包", "text", "both", "both / scene / emoji。"),
+      f("timeout_seconds", "超时时间", "number", 900, "Unity 导入可能比较慢。"),
+    ],
+  },
   pipeline: {
-    title: "动画大流程",
-    subtitle: "抽帧 -> ComfyUI -> Cherry 的一键流程。",
+    title: "旧三步流程",
+    subtitle: "仅抽帧 -> ComfyUI -> Cherry；主流程请用完整 7 步动画自动化。",
     previewSkill: "pipeline.run_preview",
     startSkill: "pipeline.run_start",
     statusKey: "pipelineCurrent",
@@ -165,7 +223,18 @@ const flowSkills = [
   "comfyui.run_status",
   "cherry.run_start",
   "cherry.run_status",
+  "unity_ready.preview",
+  "unity_ready.build",
+  "unity_ready.status",
+  "unity_import.preview",
+  "unity_import.run",
+  "unity_import.status",
+  "animation_flow.preview",
+  "animation_flow.start",
+  "animation_flow.status",
+  "animation_flow.list",
   "pipeline.run_start",
+  "p4.shelve_ui_import",
   "speech.transcribe",
   "speech.synthesize",
   "memory.context_pack",
@@ -187,6 +256,7 @@ const state = reactive({
     lastError: "",
   },
   status: {},
+  statusUpdatedAt: {},
   skills: [],
   messages: [DEFAULT_SYSTEM_MESSAGE],
   input: "",
@@ -201,9 +271,19 @@ const state = reactive({
   configResult: "",
   commandOpen: false,
   commandQuery: "",
+  action: {
+    current: "",
+    startedAt: "",
+    startedMs: 0,
+    nowMs: Date.now(),
+    last: "",
+    busy: {},
+  },
   pathPicker: null,
   pathItems: [],
   pathLoading: false,
+  pathDialogLoading: false,
+  pathDialogError: "",
   pathManual: "",
   toasts: [],
   flowName: "animation_custom",
@@ -223,9 +303,21 @@ const state = reactive({
     { key: "smooth", label: "Cherry 平滑输出目录", value: pathInWorkspace("smooth"), mode: "dir" },
   ],
   flowSteps: [],
+  quickFlow: {
+    workflowPath: "",
+    unityProject: "D:/Spark/Client",
+    p4Stream: "//streams/rel_0.0.1",
+    package: "both",
+    fps: 24,
+    notifyIntervalSeconds: 60,
+    allowP4Writes: true,
+    p4Description: "[UI Emoji Import] 动画资源导入 - Shelve-only",
+    advancedOpen: false,
+  },
   flowResult: "",
   flowResultSummary: null,
   flowBusy: false,
+  flowStepConfigIndex: null,
   flowDefinitions: [],
   moduleCatalog: null,
   asr: { audio_path: "", language: "zh", prompt: "飞书语音指令，可能包含动画流程、ComfyUI、P4、文件路径。" },
@@ -234,15 +326,30 @@ const state = reactive({
   ttsResult: "",
   memoryScope: "global",
   memoryConversation: "test",
+  memoryAdvanced: false,
   memoryItems: [],
   memoryPack: null,
   logs: [],
   skillCalls: [],
+  logsLoading: false,
   logError: "",
   conversationId: "test",
   logTab: "brain",
+  queueVisibleLimit: VISIBLE_TASK_LIMIT,
+  logVisibleLimit: VISIBLE_LOG_LIMIT,
+  queueFilters: { keyword: "", status: "all", day: "" },
+  workspaceRoot: localStorage.getItem("assetclaw.workspaceRoot") || DEFAULT_WORKSPACE_ROOT,
   p4Result: null,
   p4LastAction: "status",
+  p4Advanced: false,
+  p4Form: {
+    workflow: "",
+    workspace: "",
+    cl: "",
+    description: "[UI Emoji Import] 动画资源导入 - Shelve-only",
+    allow_delete: false,
+    force: false,
+  },
 });
 
 const currentView = computed(() => views.find((item) => item.id === state.view) || views[0]);
@@ -261,6 +368,19 @@ const connectionSubtitle = computed(() => {
   return state.connection.lastError || state.healthError || "本机代理暂不可达";
 });
 const tasks = computed(() => normalizeTasks());
+const filteredTasks = computed(() => {
+  const keyword = state.queueFilters.keyword.trim().toLowerCase();
+  return tasks.value.filter((task) => {
+    if (state.queueFilters.status !== "all" && String(task.status).toLowerCase() !== state.queueFilters.status) return false;
+    if (state.queueFilters.day && task.day !== state.queueFilters.day) return false;
+    if (!keyword) return true;
+    return `${task.module} ${task.id} ${task.input} ${task.output} ${task.status}`.toLowerCase().includes(keyword);
+  });
+});
+const visibleTasks = computed(() => filteredTasks.value.slice(0, state.queueVisibleLimit));
+const visibleLogs = computed(() => state.logs.slice(0, state.logVisibleLimit));
+const visibleSkillCalls = computed(() => state.skillCalls.slice(0, state.logVisibleLimit));
+const queueDays = computed(() => Array.from(new Set(tasks.value.map((task) => task.day).filter(Boolean))).slice(0, 12));
 const activeTasks = computed(() => tasks.value.filter((item) => !isTaskDone(item)));
 const retrievalSkills = computed(() => state.skills.filter((item) => ["memory", "web", "life", "speech"].includes(item.domain) || /rag|memory|search|recall|vector/i.test(`${item.name} ${item.description}`)));
 const filteredCommands = computed(() => {
@@ -276,12 +396,31 @@ const snapshotRows = computed(() => {
     ["GPU", g0.memory_total_mb ? `${g0.memory_used_mb}/${g0.memory_total_mb} MB` : compact(gpu.error, "未知")],
     ["ComfyUI", unwrap(state.status.comfyCurrent).status || "空闲"],
     ["Cherry", unwrap(state.status.cherryCurrent).status || "空闲"],
-    ["Pipeline", unwrap(state.status.pipelineCurrent).status || unwrap(state.status.pipelineRuns).items?.[0]?.status || "空闲"],
+    ["7步流程", unwrap(state.status.animationFlowCurrent).status || unwrap(state.status.animationFlowRuns).items?.[0]?.status || "空闲"],
   ];
 });
 const diagnosticCards = computed(() => buildDiagnosticCards(state.status.agentDiagnose || state.status.agentWork));
 const p4Display = computed(() => buildP4Display(state.p4Result || unwrap(state.status.p4)));
+const activeAction = computed(() => {
+  const keys = Object.keys(state.action.busy);
+  if (!keys.length) return null;
+  const elapsed = state.action.startedMs ? Math.max(0, Math.round((state.action.nowMs - state.action.startedMs) / 1000)) : 0;
+  const progress = Math.min(92, 18 + elapsed * 3);
+  return {
+    label: state.action.current || Object.values(state.action.busy)[0] || "后端处理中",
+    elapsed,
+    progress,
+    count: keys.length,
+  };
+});
+const selectedFlowStep = computed(() => {
+  if (state.flowStepConfigIndex === null || state.flowStepConfigIndex === undefined || state.flowStepConfigIndex === "") return null;
+  const index = Number(state.flowStepConfigIndex);
+  return Number.isInteger(index) && state.flowSteps[index] ? state.flowSteps[index] : null;
+});
 const flowModules = computed(() => [
+  { key: "animation_flow.start", title: "完整 7 步流程", subtitle: "飞书到 Unity 导入再到 P4 Shelve-only", module: "animationFlow" },
+  { key: "animation_flow.status", title: "7 步流程进度", subtitle: "查看当前完整流程、子任务和 CL 信息", module: "animationFlow" },
   { key: "feishu_table.export_json", title: "飞书表格读取", subtitle: "先把飞书表单/多维表格导出成 JSON", module: "feishu_table" },
   { key: "frame.run_preview", title: "飞书下载预检", subtitle: "确认下载目录、抽帧目录和参数", module: "frame" },
   { key: "frame.run_start", title: "视频下载 + 抽帧", subtitle: "读取飞书视频附件、下载、抽帧、去重", module: "frame" },
@@ -290,7 +429,10 @@ const flowModules = computed(() => [
   { key: "comfyui.run_status", title: "ComfyUI 进度检查", subtitle: "查看当前 ComfyUI 批处理状态", module: "comfyui" },
   { key: "cherry.run_start", title: "Cherry 平滑", subtitle: "时序平滑、缩放、锐化", module: "cherry" },
   { key: "cherry.run_status", title: "Cherry 进度检查", subtitle: "查看平滑任务进度和最近错误", module: "cherry" },
-  { key: "pipeline.run_start", title: "动画大流程", subtitle: "抽帧到平滑的一键链路", module: "pipeline" },
+  { key: "unity_ready.build", title: "unity_ready 整理", subtitle: "生成 scene/emoji JSON 和 frames", module: "unityReady" },
+  { key: "unity_import.run", title: "Unity 导入引擎", subtitle: "调用插件 API 导入 unity_ready", module: "unityImport" },
+  { key: "pipeline.run_start", title: "旧三步流程", subtitle: "只跑抽帧到平滑，不含 Unity/P4", module: "pipeline" },
+  { key: "p4.shelve_ui_import", title: "P4 Shelve", subtitle: "安全检查、预览、创建 CL、reconcile、shelve 和报告", module: "p4" },
   { key: "speech.transcribe", title: "ASR 语音识别", subtitle: "把音频转成文字指令", module: "speech" },
   { key: "speech.synthesize", title: "TTS 语音合成", subtitle: "把流程结果合成为语音", module: "speech" },
   { key: "memory.context_pack", title: "记忆 / RAG", subtitle: "读取对话上下文和记忆包", module: "memory" },
@@ -305,7 +447,13 @@ const flowStepStats = computed(() => {
   ];
 });
 const pipelineSteps = computed(() => buildPipelineSteps());
-const pipelineRuns = computed(() => tasks.value.filter((task) => task.module.includes("流程") || task.module.includes("抽帧") || task.module.includes("ComfyUI") || task.module.includes("Cherry")));
+const customPipelineRun = computed(() => {
+  const current = unwrap(state.status.customPipelineCurrent);
+  if (current?.run_id) return current;
+  return unwrap(state.status.customPipelineRuns).items?.[0] || {};
+});
+const customFlowStepCards = computed(() => buildCustomFlowStepCards(customPipelineRun.value));
+const pipelineRuns = computed(() => tasks.value.filter((task) => task.module.includes("流程") || task.module.includes("抽帧") || task.module.includes("ComfyUI") || task.module.includes("Cherry") || task.module.includes("Unity")));
 const memorySummary = computed(() => buildMemorySummary());
 
 const commands = [
@@ -317,27 +465,117 @@ const commands = [
   { id: "refresh", title: "刷新状态", hint: "拉取最新后端快照", keys: "刷新", run: () => refreshAll(true) },
 ];
 
+const p4Actions = [
+  { kind: "status", skill: "p4.status", title: "读取状态", subtitle: "查看 P4PORT / P4USER / P4CLIENT / root / stream / 登录状态。" },
+  { kind: "check", skill: "p4.check", title: "安全检查", subtitle: "检查登录、workspace、白名单、opened 文件和 shelve-only 边界。" },
+  { kind: "preview", skill: "p4.preview", title: "预览改动", subtitle: "只对 UI 白名单目录执行 reconcile -n，不改变 P4 状态。" },
+  { kind: "create_cl", skill: "p4.create_cl", title: "创建 CL", subtitle: "创建 pending changelist，描述会自动补 Shelve-only 信息。", needsDescription: true },
+  { kind: "reconcile", skill: "p4.reconcile", title: "放入 CL", subtitle: "把白名单 UI 目录的 add/edit/delete reconcile 到指定 CL。", needsCl: true, confirm: "确认执行 P4 reconcile？这会打开白名单目录内的文件到指定 CL。" },
+  { kind: "shelve", skill: "p4.shelve", title: "Shelve", subtitle: "安全检查后 shelve 指定 CL；不会 submit。", needsCl: true, confirm: "确认 Shelve 这个 CL？不会 submit，但会更新 shelf。" },
+  { kind: "report", skill: "p4.report", title: "生成报告", subtitle: "生成可以复制到飞书的 shelf / 文件统计 / 安全检查报告。", needsCl: true },
+  { kind: "shelve_ui_import", skill: "p4.shelve_ui_import", title: "一键导入 Shelve", subtitle: "check -> preview -> create CL -> reconcile -> shelve -> report。", needsDescription: true, confirm: "确认一键执行 UI 导入 Shelve？这会创建 CL、reconcile 并 shelve。" },
+];
+const p4PrimaryKinds = new Set(["status", "check", "preview", "shelve_ui_import"]);
+const p4PrimaryActions = computed(() => p4Actions.filter((item) => p4PrimaryKinds.has(item.kind)));
+const p4AdvancedActions = computed(() => p4Actions.filter((item) => !p4PrimaryKinds.has(item.kind)));
+
 function f(key, label, type, value, help, pathMode = "") {
   return { key, label, type, value, help, pathMode };
 }
 
+function localDateStamp(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function todayStamp() {
-  return DEFAULT_DAY;
+  return localDateStamp();
 }
 
 function pathInWorkspace(name = "") {
   return name ? `${DEFAULT_WORKSPACE_ROOT}/${name}` : DEFAULT_WORKSPACE_ROOT;
 }
 
+function workspacePath(name = "") {
+  const root = state?.workspaceRoot || DEFAULT_WORKSPACE_ROOT;
+  return name ? `${root.replace(/[\\/]$/, "")}/${name}` : root;
+}
+
+function applyWorkspaceRoot(root) {
+  const normalized = String(root || DEFAULT_WORKSPACE_ROOT).replaceAll("\\", "/").replace(/[\\/]$/, "");
+  state.workspaceRoot = normalized;
+  localStorage.setItem("assetclaw.workspaceRoot", normalized);
+  syncWorkspaceVariables(normalized);
+  toast(`工作区已切换：${normalized}`, "ok");
+}
+
+function syncWorkspaceVariables(root = state.workspaceRoot) {
+  const normalized = String(root || DEFAULT_WORKSPACE_ROOT).replaceAll("\\", "/").replace(/[\\/]$/, "");
+  const mapping = {
+    workspace_root: normalized,
+    videos: `${normalized}/videos`,
+    frames: `${normalized}/frames`,
+    matte: `${normalized}/matte`,
+    smooth: `${normalized}/smooth`,
+  };
+  for (const item of state.flowVars) {
+    if (mapping[item.key]) item.value = mapping[item.key];
+  }
+  state.flowVariables = JSON.stringify(mapping, null, 2);
+}
+
 function headers() {
   return state.token ? { "X-Skill-Token": state.token } : {};
 }
 
+function stableStringify(value) {
+  if (!value || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+}
+
+function clonePayload(value) {
+  if (value === undefined) return value;
+  try {
+    return structuredClone(value);
+  } catch {
+    return JSON.parse(JSON.stringify(value));
+  }
+}
+
+function requestCacheKey(path, fetchOptions) {
+  const method = String(fetchOptions.method || "GET").toUpperCase();
+  const body = typeof fetchOptions.body === "string" ? fetchOptions.body : stableStringify(fetchOptions.body || {});
+  return `${method} ${path} ${body}`;
+}
+
+function clearFrontendCache() {
+  responseCache.clear();
+}
+
 async function request(path, options = {}) {
-  const { timeoutMs = 45000, ...fetchOptions } = options;
+  const { timeoutMs = 45000, cacheMs = 0, dedupe = true, ...fetchOptions } = options;
+  const cacheKey = requestCacheKey(path, fetchOptions);
+  const now = Date.now();
+  if (cacheMs > 0) {
+    const cached = responseCache.get(cacheKey);
+    if (cached && now - cached.at < cacheMs) {
+      return { ...clonePayload(cached.data), frontendCached: true };
+    }
+  }
+  if (dedupe && inflightRequests.has(cacheKey)) {
+    try {
+      return clonePayload(await inflightRequests.get(cacheKey));
+    } catch (error) {
+      const message = error?.name === "AbortError" ? "请求超时：后端这次没有在限定时间内返回。" : String(error?.message || error);
+      return { ok: false, offline: true, error: message };
+    }
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
+  const promise = (async () => {
     const response = await fetch(path, {
       ...fetchOptions,
       signal: controller.signal,
@@ -352,20 +590,69 @@ async function request(path, options = {}) {
     }
     if (!response.ok) return { ok: false, status: response.status, ...data };
     return data;
+  })();
+  if (dedupe) inflightRequests.set(cacheKey, promise);
+  try {
+    const payload = await promise;
+    if (cacheMs > 0 && payload?.ok !== false) {
+      responseCache.set(cacheKey, { at: Date.now(), data: clonePayload(payload) });
+      if (responseCache.size > 160) responseCache.delete(responseCache.keys().next().value);
+    }
+    return payload;
   } catch (error) {
     const message = error?.name === "AbortError" ? "请求超时：后端这次没有在限定时间内返回。" : String(error?.message || error);
     return { ok: false, offline: true, error: message };
   } finally {
     clearTimeout(timer);
+    if (dedupe) inflightRequests.delete(cacheKey);
   }
 }
 
-async function skillCall(skill, args = {}) {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isReadonlySkill(skill) {
+  return /(\.status|\.run_list|\.queue_status|\.diagnose|\.current_work|\.list_|\.get_|manifest$|module_catalog|context_pack)/.test(skill)
+    || skill.startsWith("system.")
+    || skill === "animation.status"
+    || skill === "p4.status";
+}
+
+async function skillCall(skill, args = {}, options = {}) {
+  const readonly = isReadonlySkill(skill);
   return request("/api/skills/call", {
     method: "POST",
     headers: headers(),
     body: JSON.stringify({ skill, arguments: args, requested_by: "external_webui_vue3" }),
+    timeoutMs: options.timeoutMs || 45000,
+    cacheMs: options.cacheMs ?? (readonly ? FRONTEND_CACHE_MS : 0),
+    dedupe: options.dedupe ?? readonly,
   });
+}
+
+async function adminCleanup(target, options = {}) {
+  clearFrontendCache();
+  const payload = await request("/api/admin/cleanup", {
+    method: "POST",
+    body: JSON.stringify({
+      target,
+      conversation_id: options.conversation_id || state.conversationId || "test",
+      scope: options.scope || state.memoryScope || "global",
+    }),
+  });
+  if (payload.ok === false) {
+    toast(payload.error || "清理失败", "bad");
+    return payload;
+  }
+  toast(`已清理 ${payload.deleted ?? 0} 条记录`, "ok");
+  refreshInBackground(true);
+  return payload;
+}
+
+async function cleanupWithConfirm(target, label, options = {}) {
+  if (!confirm(`确认清理${label}？只删除后端记录，不删除实际产物文件。`)) return null;
+  return adminCleanup(target, options);
 }
 
 function unwrap(result) {
@@ -380,10 +667,37 @@ function compact(value, fallback = "-") {
   return String(value);
 }
 
+function parseDate(value) {
+  const date = new Date(value || "");
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function taskTime(item) {
+  return item.started_at || item.created_at || item.updated_at || item.finished_at || item.completed_at || "";
+}
+
+function formatTaskDay(value) {
+  const date = parseDate(value);
+  if (!date) return "时间未知";
+  return date.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
+}
+
+function formatTaskClock(value) {
+  const date = parseDate(value);
+  if (!date) return "--:--";
+  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function formatTaskFullTime(value) {
+  const date = parseDate(value);
+  if (!date) return "后端未返回时间";
+  return date.toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
 function statusClass(status) {
   const lower = String(status || "").toLowerCase();
   if (lower.includes("fail") || lower.includes("error") || lower.includes("cancel") || lower.includes("offline")) return "bad";
-  if (lower.includes("run") || lower.includes("queue") || lower.includes("pending") || lower.includes("pause")) return "warn";
+  if (lower.includes("run") || lower.includes("queue") || lower.includes("pending") || lower.includes("waiting") || lower.includes("pause")) return "warn";
   return "ok";
 }
 
@@ -396,14 +710,99 @@ function toast(message, type = "info") {
   }, 2800);
 }
 
+function isBusy(key) {
+  return Boolean(state.action.busy[key]);
+}
+
+function beginAction(key, label) {
+  state.action.busy[key] = label;
+  state.action.current = label;
+  state.action.startedAt = new Date().toLocaleTimeString();
+  state.action.startedMs = Date.now();
+  state.action.nowMs = state.action.startedMs;
+}
+
+function endAction(key, last = "") {
+  delete state.action.busy[key];
+  const next = Object.values(state.action.busy)[0] || "";
+  state.action.current = next;
+  if (!next) {
+    state.action.startedAt = "";
+    state.action.startedMs = 0;
+  } else {
+    state.action.startedMs = Date.now();
+    state.action.nowMs = state.action.startedMs;
+  }
+  if (last) state.action.last = last;
+}
+
+async function runWithFeedback(key, label, worker) {
+  if (isBusy(key)) {
+    toast(`${label} 已经在处理中`, "info");
+    return null;
+  }
+  beginAction(key, label);
+  toast(`${label}：已提交给后端`, "info");
+  try {
+    return await worker();
+  } catch (error) {
+    const message = String(error?.message || error);
+    toast(`${label} 失败：${message}`, "bad");
+    return { ok: false, error: message };
+  } finally {
+    endAction(key, `${label} 已结束`);
+  }
+}
+
+function refreshInBackground(includeLazy = false) {
+  setTimeout(() => {
+    refreshAll(includeLazy).catch((error) => toast(`后台刷新失败：${String(error?.message || error)}`, "bad"));
+  }, 200);
+}
+
 function switchView(view) {
   state.view = view;
+  state.queueVisibleLimit = VISIBLE_TASK_LIMIT;
+  state.logVisibleLimit = VISIBLE_LOG_LIMIT;
+  refreshInBackground(false);
   if (view === "skills") loadSkills();
   if (view === "logs") loadLogs();
   if (view === "memory") loadMemory();
   if (view === "builder") {
     loadFlowDefinitions();
   }
+}
+
+async function runLimited(items, limit, worker) {
+  const results = new Array(items.length);
+  let index = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (index < items.length) {
+      const current = index++;
+      results[current] = await worker(items[current], current);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function statusCallsForCurrentView(includeLazy = false) {
+  if (includeLazy) return statusCalls;
+  const common = ["gpu", "agentWork"];
+  const byView = {
+    chat: ["comfyCurrent", "cherryCurrent", "animationFlowCurrent", "customPipelineCurrent"],
+    overview: ["comfyCurrent", "cherryCurrent", "frameCurrent", "animationFlowCurrent", "unityReady", "unityImport", "customPipelineCurrent", "animation"],
+    queues: ["comfyRuns", "cherryRuns", "frameRuns", "animationFlowRuns", "pipelineRuns", "customPipelineRuns"],
+    pipeline: ["frameCurrent", "animationFlowCurrent", "animationFlowRuns", "unityReady", "unityImport", "pipelineRuns", "customPipelineCurrent", "customPipelineRuns", "animation"],
+    builder: ["animationFlowCurrent", "animationFlowRuns", "unityReady", "unityImport", "customPipelineCurrent", "customPipelineRuns", "frameCurrent", "comfyCurrent", "cherryCurrent", "p4"],
+    voice: [],
+    p4: ["p4"],
+    memory: [],
+    skills: [],
+    logs: [],
+  };
+  const keys = new Set([...common, ...(byView[state.view] || [])]);
+  return statusCalls.filter((item) => keys.has(item.key) && !item.lazy);
 }
 
 async function refreshAll(includeLazy = false) {
@@ -416,11 +815,15 @@ async function refreshAll(includeLazy = false) {
     const health = await request("/api/health", { timeoutMs: HEALTH_TIMEOUT_MS });
     if (health.ok) {
       markHealthOk(health);
-      const calls = statusCalls.filter((item) => includeLazy || !item.lazy);
-      const results = await Promise.all(calls.map((call) => skillCall(call.skill, call.args).catch((error) => ({ ok: false, error: String(error) }))));
-      calls.forEach((call, index) => {
-        state.status[call.key] = results[index];
-      });
+      const calls = statusCallsForCurrentView(includeLazy);
+      const results = await runLimited(calls, MAX_STATUS_PARALLEL, (call) => (
+        skillCall(call.skill, call.args, {
+          cacheMs: includeLazy ? 1200 : FRONTEND_CACHE_MS,
+          timeoutMs: call.lazy ? 45000 : 25000,
+        }).catch((error) => ({ ok: false, error: String(error) }))
+      ));
+      calls.forEach((call, index) => assignStatus(call.key, results[index], includeLazy));
+      persistStatusCache();
       const failedSkills = results.filter((item) => item?.ok === false).length;
       if (includeLazy && failedSkills) toast(`后端在线，但有 ${failedSkills} 个状态接口暂时不可用。`, "info");
     } else {
@@ -432,8 +835,50 @@ async function refreshAll(includeLazy = false) {
   }
 }
 
+function assignStatus(key, payload, includeLazy = false) {
+  const previous = state.status[key];
+  if (shouldKeepPreviousStatus(key, payload, previous, includeLazy)) {
+    state.statusUpdatedAt[key] ||= "缓存";
+    return;
+  }
+  state.status[key] = payload;
+  state.statusUpdatedAt[key] = new Date().toLocaleTimeString();
+}
+
+function shouldKeepPreviousStatus(key, payload, previous, includeLazy = false) {
+  if (!previous) return false;
+  const next = unwrap(payload);
+  const prev = unwrap(previous);
+  if (payload?.ok === false || next?.error) return true;
+  if (key.endsWith("Runs") && Array.isArray(prev.items) && prev.items.length && Array.isArray(next.items) && !next.items.length && !includeLazy) return true;
+  if (key === "animation" && prev.counts && next.counts) {
+    const prevTotal = Object.values(prev.counts).reduce((sum, value) => sum + Number(value || 0), 0);
+    const nextTotal = Object.values(next.counts).reduce((sum, value) => sum + Number(value || 0), 0);
+    if (prevTotal > 0 && nextTotal === 0 && !includeLazy) return true;
+  }
+  return false;
+}
+
+function persistStatusCache() {
+  const payload = { status: state.status, statusUpdatedAt: state.statusUpdatedAt, savedAt: new Date().toISOString() };
+  localStorage.setItem(STATUS_CACHE_KEY, JSON.stringify(payload));
+}
+
+function loadStatusCache() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STATUS_CACHE_KEY) || "{}");
+    if (saved.status && typeof saved.status === "object") {
+      state.status = saved.status;
+      state.statusUpdatedAt = saved.statusUpdatedAt || {};
+      state.lastRefreshAt = saved.savedAt ? `缓存 ${new Date(saved.savedAt).toLocaleTimeString()}` : "缓存";
+    }
+  } catch {
+    localStorage.removeItem(STATUS_CACHE_KEY);
+  }
+}
+
 async function loadSkills() {
-  const payload = await request("/api/skills/manifest");
+  const payload = await request("/api/skills/manifest", { cacheMs: 10_000, dedupe: true, timeoutMs: 20000 });
   if (payload.ok === false) {
     state.skills = [];
     return;
@@ -539,6 +984,30 @@ function extractAgentText(payload) {
   return payload.text || payload.reply || payload.message || payload.response || payload.result?.text || payload.result?.reply || payload.result?.message || "";
 }
 
+async function waitForBrainJob(jobId, pendingMessage) {
+  const startedAt = Date.now();
+  let lastStatus = "";
+  while (Date.now() - startedAt < 30 * 60 * 1000) {
+    const job = await request(`/api/brain/jobs/${encodeURIComponent(jobId)}`, { timeoutMs: 30000 });
+    const status = String(job.status || "");
+    if (job.ok === false && status !== "FAILED") {
+      updateMessage(pendingMessage, { text: `后台队列查询失败：${job.error || job.detail || "未知错误"}` });
+      await sleep(2000);
+      continue;
+    }
+    if (status !== lastStatus || job.last_progress) {
+      const position = job.position ? `，前面还有 ${job.position - 1} 条` : "";
+      const progress = job.last_progress ? `\n${job.last_progress}` : "";
+      updateMessage(pendingMessage, { text: status === "QUEUED" ? `已进入后台队列${position}，不用等页面卡住。${progress}` : `后台正在处理这条消息，长任务会继续更新状态。${progress}` });
+      lastStatus = status;
+    }
+    if (status === "DONE") return job;
+    if (status === "FAILED") throw new Error(job.error || "后台任务失败");
+    await sleep(status === "QUEUED" ? 1500 : 2200);
+  }
+  throw new Error("后台任务超过 30 分钟仍未结束，请到日志页查看。");
+}
+
 function onComposerKeydown(event) {
   if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
   event.preventDefault();
@@ -563,10 +1032,21 @@ async function sendChat() {
   state.input = "";
   state.sending = true;
   toast("已发送给 Agent，正在等后端回复", "info");
+  const stages = [
+    "已送达本机 Agent，正在排队进入大模型...",
+    "大模型正在理解你的指令。如果需要调用技能，后端会继续执行。",
+    "仍在处理中：这通常表示模型在思考或技能调用还没返回，不是前端卡住。",
+  ];
+  let stageIndex = 0;
+  const stageTimer = setInterval(() => {
+    if (!pendingMessage.pending) return;
+    updateMessage(pendingMessage, { text: stages[Math.min(stageIndex, stages.length - 1)] });
+    stageIndex += 1;
+  }, 5000);
   try {
     const payload = await request("/api/brain/test", {
       method: "POST",
-      timeoutMs: 120000,
+      timeoutMs: 30000,
       body: JSON.stringify({ text: `${text}${attachmentNote}`, conversation_id: state.conversationId || "test", source: "external_webui", attachments }),
     });
     if (payload.ok === false) {
@@ -577,15 +1057,18 @@ async function sendChat() {
       toast("Agent 返回异常", "bad");
       return;
     }
+    if (payload.queued && payload.job_id) clearInterval(stageTimer);
+    const finalPayload = payload.queued && payload.job_id ? (await waitForBrainJob(payload.job_id, pendingMessage)).response : payload;
     updateMessage(pendingMessage, {
       pending: false,
-      text: extractAgentText(payload) || "后端已收到，但这次没有返回可展示的自然语言。可以打开“日志”页确认 brain_messages 是否写入。",
+      text: extractAgentText(finalPayload) || "后端已收到，但这次没有返回可展示的自然语言。可以打开“日志”页确认 brain_messages 是否写入。",
     });
     state.attachments = [];
     setTimeout(() => refreshAll(true), 600);
   } catch (error) {
     updateMessage(pendingMessage, { pending: false, text: `处理被中断：${String(error?.message || error)}` });
   } finally {
+    clearInterval(stageTimer);
     state.sending = false;
   }
 }
@@ -631,7 +1114,8 @@ function normalizeTasks() {
     ["ComfyUI", unwrap(state.status.comfyRuns).items || []],
     ["Cherry", unwrap(state.status.cherryRuns).items || []],
     ["抽帧", unwrap(state.status.frameRuns).items || []],
-    ["动画流程", unwrap(state.status.pipelineRuns).items || []],
+    ["完整7步流程", unwrap(state.status.animationFlowRuns).items || []],
+    ["旧三步流程", unwrap(state.status.pipelineRuns).items || []],
     ["自定义流程", unwrap(state.status.customPipelineRuns).items || []],
   ];
   return buckets.flatMap(([module, items]) =>
@@ -640,12 +1124,16 @@ function normalizeTasks() {
       id: item.run_id || item.id || "",
       status: item.status || "-",
       progress: taskProgress(item),
-      input: item.input_dir || item.frame_output_dir || item.workspace_root || item.workflow_name || "-",
-      output: item.output_dir || item.smooth_output_dir || item.matte_output_dir || "-",
+      input: item.date_root || item.input_dir || item.frame_output_dir || item.workspace_root || item.workflow_name || "-",
+      output: item.unity_ready || item.output_dir || item.smooth_output_dir || item.matte_output_dir || "-",
+      timeRaw: taskTime(item),
+      day: formatTaskDay(taskTime(item)),
+      clock: formatTaskClock(taskTime(item)),
+      fullTime: formatTaskFullTime(taskTime(item)),
       updated_at: item.updated_at || item.created_at || "",
       raw: item,
     })),
-  );
+  ).sort((a, b) => (Date.parse(b.timeRaw || "") || 0) - (Date.parse(a.timeRaw || "") || 0));
 }
 
 function taskActionSkills(module) {
@@ -653,6 +1141,7 @@ function taskActionSkills(module) {
   if (key.includes("comfy")) return { pause: "comfyui.run_pause", resume: "comfyui.run_resume", cancel: "comfyui.run_cancel" };
   if (key.includes("cherry")) return { cancel: "cherry.run_cancel" };
   if (key.includes("抽帧") || key.includes("frame")) return { cancel: "frame.run_cancel" };
+  if (key.includes("完整7步") || key.includes("animation_flow")) return { cancel: "animation_flow.cancel" };
   if (key.includes("自定义")) return { cancel: "custom_pipeline.run_cancel" };
   if (key.includes("流程") || key.includes("pipeline")) return { cancel: "pipeline.run_cancel" };
   return {};
@@ -668,15 +1157,17 @@ async function runTaskAction(task, action) {
   if (action === "cancel" && !confirm(`确认终止 ${task.module} ${task.id || "当前/latest"}？`)) return;
   const args = task.id ? { run_id: task.id } : {};
   if (skill === "comfyui.run_cancel") args.interrupt_current = true;
-  const payload = await skillCall(skill, args);
+  const payload = await runWithFeedback(`task:${skill}:${task.id || "latest"}`, `${task.module} ${action}`, () => skillCall(skill, args));
+  if (!payload) return;
   state.detail = { title: skill, payload };
   toast(payload.ok === false ? "控制失败" : "控制指令已发送", payload.ok === false ? "bad" : "ok");
-  await refreshAll(true);
+  refreshInBackground(true);
 }
 
 function openConfig(module) {
   const schema = modules[module];
   if (!schema) return;
+  closeAllModals();
   const defaults = Object.fromEntries(schema.fields.map((field) => [field.key, field.value]));
   let saved = {};
   try {
@@ -706,7 +1197,7 @@ function collectConfig() {
 function saveConfig() {
   const payload = collectConfig();
   localStorage.setItem(`assetclaw.moduleConfig.${state.configModule}`, JSON.stringify(payload));
-  state.configResult = `已保存：\n${JSON.stringify(payload, null, 2)}`;
+  state.configResult = "参数已保存到本机浏览器。点“预览”只检查参数，点“调用后端”才会真正启动模块。";
   toast("参数已保存", "ok");
   return payload;
 }
@@ -716,17 +1207,43 @@ async function callConfig(preview = true) {
   const payload = saveConfig();
   const skill = preview ? schema.previewSkill : schema.startSkill;
   if (!preview && !confirm(`确认调用 ${skill}？`)) return;
-  const result = await skillCall(skill, payload);
-  state.configResult = JSON.stringify(result, null, 2);
+  state.configResult = preview ? "正在把参数发给后端做预览..." : "正在把任务提交给后端，成功后可到“队列/流程”页看进度。";
+  const result = await runWithFeedback(`config:${skill}`, `${schema.title}${preview ? "预览" : "启动"}`, () => skillCall(skill, payload));
+  if (!result) return;
+  state.configResult = formatSkillResult(skill, result);
   toast(result.ok === false ? "后端调用失败" : "后端已返回", result.ok === false ? "bad" : "ok");
-  await refreshAll(true);
+  refreshInBackground(true);
 }
 
-function openPathPicker({ target, mode = "dir", current = "" }) {
+async function openPathPicker({ target, mode = "dir", current = "" }) {
+  state.detail = null;
+  state.commandOpen = false;
+  state.settingsOpen = false;
+  const seed = normalizePathSeed(current);
+  state.pathDialogLoading = true;
+  state.pathDialogError = "";
+  beginAction(`path:${target}`, mode === "file" ? "正在打开 Windows 文件选择器" : "正在打开 Windows 文件夹选择器");
+  try {
+    const payload = await request(`/api/local/path-dialog?mode=${encodeURIComponent(mode)}&current=${encodeURIComponent(current || seed)}`, { timeoutMs: 5 * 60 * 1000 });
+    if (payload.ok && payload.path) {
+      applySelectedPath(target, payload.path);
+      toast(`已选择：${payload.path}`, "ok");
+      return;
+    }
+    if (!payload.canceled) state.pathDialogError = payload.error || "系统选择器没有返回路径。";
+  } finally {
+    state.pathDialogLoading = false;
+    endAction(`path:${target}`, "路径选择已结束");
+  }
+  openManualPathPicker({ target, mode, current: current || seed });
+}
+
+function openManualPathPicker({ target, mode = "dir", current = "" }) {
   const seed = normalizePathSeed(current);
   state.pathPicker = { target, mode, current: seed };
   state.pathManual = current || seed;
-  browsePath(seed);
+  state.pathItems = [];
+  state.pathLoading = false;
 }
 
 function normalizePathSeed(value) {
@@ -753,26 +1270,34 @@ async function browsePath(path) {
 
 function choosePath(item = null) {
   if (!state.pathPicker) return;
-  const selected = item?.path || state.pathPicker.current;
-  if (state.pathPicker.target === "scratch") {
-    state.detail = { title: "已选择路径", payload: { path: selected } };
-  } else if (state.pathPicker.target.startsWith("config:")) {
-    const key = state.pathPicker.target.split(":")[1];
-    state.configValues[key] = selected;
-  } else if (state.pathPicker.target.startsWith("voice:")) {
-    const key = state.pathPicker.target.split(":")[1];
-    state[key.split(".")[0]][key.split(".")[1]] = selected;
-  } else if (state.pathPicker.target.startsWith("flowvar:")) {
-    const index = Number(state.pathPicker.target.split(":")[1]);
-    if (state.flowVars[index]) state.flowVars[index].value = selected;
-  } else if (state.pathPicker.target.startsWith("flowstep:")) {
-    const [, stepIndex, fieldKey] = state.pathPicker.target.split(":");
-    const step = state.flowSteps[Number(stepIndex)];
-    if (step) step.arguments[fieldKey] = selected;
-  }
+  applySelectedPath(state.pathPicker.target, item?.path || state.pathManual || state.pathPicker.current);
   state.pathPicker = null;
   state.pathItems = [];
   state.pathManual = "";
+}
+
+function applySelectedPath(target, selected) {
+  if (target === "scratch") {
+    state.detail = { title: "已选择路径", payload: { path: selected } };
+  } else if (target.startsWith("config:")) {
+    const key = target.split(":")[1];
+    state.configValues[key] = selected;
+  } else if (target.startsWith("voice:")) {
+    const key = target.split(":")[1];
+    state[key.split(".")[0]][key.split(".")[1]] = selected;
+  } else if (target.startsWith("flowvar:")) {
+    const index = Number(target.split(":")[1]);
+    if (state.flowVars[index]) state.flowVars[index].value = selected;
+  } else if (target.startsWith("flowstep:")) {
+    const [, stepIndex, fieldKey] = target.split(":");
+    const step = state.flowSteps[Number(stepIndex)];
+    if (step) step.arguments[fieldKey] = selected;
+  } else if (target.startsWith("quickFlow:")) {
+    const key = target.split(":")[1];
+    if (key in state.quickFlow) state.quickFlow[key] = selected;
+  } else if (target === "workspaceRoot") {
+    applyWorkspaceRoot(selected);
+  }
 }
 
 function parentPath(path) {
@@ -793,7 +1318,18 @@ function defaultFlowStep(skill = "frame.run_start") {
     "comfyui.run_status": { include_gpu: false },
     "cherry.run_start": { input_dir: "${matte}", output_dir: "${smooth}", recursive: true, skip_existing: true, max_images: 50000, use_smooth: true, smooth_window: 5, smooth_sigma: 1.0 },
     "cherry.run_status": { include_gpu: false },
+    "unity_ready.preview": { date_root: "${workspace_root}", copy_mode: "copy" },
+    "unity_ready.build": { date_root: "${workspace_root}", overwrite: true, copy_mode: "copy" },
+    "unity_ready.status": { date_root: "${workspace_root}" },
+    "unity_import.preview": { unity_ready: "${workspace_root}/unity_ready", unity_project: "D:/Spark/Client", package: "both" },
+    "unity_import.run": { unity_ready: "${workspace_root}/unity_ready", unity_project: "D:/Spark/Client", package: "both" },
+    "unity_import.status": { unity_ready: "${workspace_root}/unity_ready", unity_project: "D:/Spark/Client", package: "both" },
+    "animation_flow.preview": { date_root: "${workspace_root}", unity_project: "D:/Spark/Client", p4_stream: "//streams/rel_0.0.1", package: "both" },
+    "animation_flow.start": { date_root: "${workspace_root}", unity_project: "D:/Spark/Client", p4_stream: "//streams/rel_0.0.1", package: "both", fps: 24, notify_interval_seconds: 60, allow_p4_writes: true },
+    "animation_flow.status": {},
+    "animation_flow.list": { limit: 10, include_finished: true },
     "pipeline.run_start": { input_dir: "${videos}", frame_output_dir: "${frames}", matte_output_dir: "${matte}", smooth_output_dir: "${smooth}", fps: 24 },
+    "p4.shelve_ui_import": { desc: "[UI Emoji Import] 动画资源导入 - Shelve-only", yes: true },
     "speech.synthesize": { text: "流程已经完成。", engine: "auto" },
     "memory.context_pack": { conversation_id: "test", recent_limit: 12, max_chars: 6000 },
   };
@@ -803,14 +1339,16 @@ function defaultFlowStep(skill = "frame.run_start") {
     skill,
     enabled: true,
     arguments: { ...(presets[skill] || {}) },
-    expanded: true,
+    expanded: false,
   };
 }
 
 function ensureFlowSteps() {
   if (!state.flowSteps.length) {
     state.flowSteps.push(
-      defaultFlowStep("feishu_table.export_json"),
+      defaultFlowStep("animation_flow.start"),
+      defaultFlowStep("unity_ready.build"),
+      defaultFlowStep("unity_import.run"),
       defaultFlowStep("frame.run_start"),
       defaultFlowStep("comfyui.run_start"),
       defaultFlowStep("cherry.run_start"),
@@ -825,6 +1363,7 @@ function addFlowStep(skill = "frame.run_start") {
 
 function removeFlowStep(index) {
   state.flowSteps.splice(index, 1);
+  if (state.flowStepConfigIndex === index) state.flowStepConfigIndex = null;
 }
 
 function moveFlowStep(index, direction) {
@@ -837,6 +1376,62 @@ function onFlowSkillChange(step) {
   const next = defaultFlowStep(step.skill);
   step.name = next.name;
   step.arguments = next.arguments;
+}
+
+function findFlowStep(skill) {
+  return state.flowSteps.find((step) => step.skill === skill);
+}
+
+function applyQuickFlowToSteps() {
+  ensureFlowSteps();
+  syncWorkspaceVariables();
+  state.flowName = state.flowName || "animation_custom";
+  state.flowDescription = "完整 7 步动画自动化：飞书下载 -> 抽帧 -> 抠图 -> Cherry -> unity_ready -> Unity 导入 -> P4 Shelve-only";
+  const flow = findFlowStep("animation_flow.start");
+  if (flow) {
+    flow.arguments.date_root = "${workspace_root}";
+    flow.arguments.workflow_path = state.quickFlow.workflowPath.trim();
+    flow.arguments.unity_project = state.quickFlow.unityProject.trim() || "D:/Spark/Client";
+    flow.arguments.p4_stream = state.quickFlow.p4Stream.trim() || "//streams/rel_0.0.1";
+    flow.arguments.package = state.quickFlow.package.trim() || "both";
+    flow.arguments.fps = Number(state.quickFlow.fps || 24);
+    flow.arguments.notify_interval_seconds = Number(state.quickFlow.notifyIntervalSeconds || 60);
+    flow.arguments.allow_p4_writes = Boolean(state.quickFlow.allowP4Writes);
+  }
+  const comfy = findFlowStep("comfyui.run_start");
+  if (comfy) {
+    comfy.arguments.workflow_path = state.quickFlow.workflowPath.trim();
+    comfy.arguments.input_dir ||= "${frames}";
+    comfy.arguments.output_dir ||= "${matte}";
+  }
+}
+
+function openFlowStepConfig(index) {
+  const step = state.flowSteps[index];
+  if (!step) return;
+  closeAllModals();
+  state.flowStepConfigIndex = index;
+}
+
+function closeFlowStepConfig() {
+  state.flowStepConfigIndex = null;
+}
+
+function closeAllModals() {
+  state.configModule = "";
+  state.commandOpen = false;
+  state.pathPicker = null;
+  state.settingsOpen = false;
+  state.detail = null;
+  state.flowStepConfigIndex = null;
+  state.pathDialogError = "";
+}
+
+function stepArgumentSummary(step) {
+  const args = step.arguments || {};
+  const keys = Object.keys(args).filter((key) => args[key] !== "" && args[key] !== undefined);
+  if (!keys.length) return ["使用模块默认参数"];
+  return keys.slice(0, 4).map((key) => `${key}: ${compact(args[key])}`).concat(keys.length > 4 ? [`另有 ${keys.length - 4} 项`] : []);
 }
 
 function flowModuleMeta(skill) {
@@ -881,6 +1476,16 @@ function flowStepFields(step) {
       f("max_chars", "最大字符数", "number", 6000, "控制塞入上下文的长度。"),
     ];
   }
+  if (step.skill === "p4.shelve_ui_import") {
+    return [
+      f("desc", "CL 描述", "text", state.quickFlow.p4Description, "会用于创建 Shelve-only CL。"),
+      f("workflow", "Workflow", "text", "", "通常留空，使用后端默认。"),
+      f("workspace", "Workspace", "text", "", "通常留空，使用后端默认 P4CLIENT。"),
+      f("cl", "已有 CL", "text", "", "留空则一键流程自动创建。"),
+      f("force", "覆盖已有 Shelf", "checkbox", false, "仅需要覆盖 shelf 时开启。"),
+      f("yes", "确认一键 Shelve", "checkbox", true, "必须开启，后端才会执行 shelve_ui_import。"),
+    ];
+  }
   return [];
 }
 
@@ -903,12 +1508,44 @@ function flowVariablesObject() {
 }
 
 function collectFlowDefinition() {
+  applyQuickFlowToSteps();
   const variables = flowVariablesObject();
   const steps = [];
   for (const step of state.flowSteps) {
     steps.push({ id: step.id, name: step.name, skill: step.skill, enabled: step.enabled !== false, arguments: cleanStepArguments(step) });
   }
   return { name: state.flowName, description: state.flowDescription, variables, steps };
+}
+
+function collectAnimationFlowArgs() {
+  const args = {
+    date_root: workspacePath(),
+    workflow_path: state.quickFlow.workflowPath.trim(),
+    unity_project: state.quickFlow.unityProject.trim() || "D:/Spark/Client",
+    p4_stream: state.quickFlow.p4Stream.trim() || "//streams/rel_0.0.1",
+    package: state.quickFlow.package.trim() || "both",
+    fps: Number(state.quickFlow.fps || 24),
+    notify_interval_seconds: Number(state.quickFlow.notifyIntervalSeconds || 60),
+    allow_p4_writes: Boolean(state.quickFlow.allowP4Writes),
+  };
+  if (state.p4Form.workflow.trim()) args.p4_workflow = state.p4Form.workflow.trim();
+  if (state.p4Form.workspace.trim()) args.p4_workspace = state.p4Form.workspace.trim();
+  Object.keys(args).forEach((key) => {
+    if (args[key] === "" || args[key] === undefined || Number.isNaN(args[key])) delete args[key];
+  });
+  return args;
+}
+
+async function previewAnimationFlow() {
+  await runFlowAction("animation_flow.preview", collectAnimationFlowArgs(), "7 步流程预览已生成");
+}
+
+async function runAnimationFlow() {
+  const args = collectAnimationFlowArgs();
+  const p4Text = args.allow_p4_writes ? "第 7 步会 create CL / reconcile / shelve，submit 仍然禁用。" : "第 7 步会停在 P4 等待确认。";
+  if (!confirm(`确认启动完整 7 步动画自动化？\n${p4Text}`)) return;
+  await runFlowAction("animation_flow.start", args, "完整 7 步流程已启动");
+  refreshInBackground(true);
 }
 
 async function saveFlow() {
@@ -927,18 +1564,20 @@ async function runFlow() {
   const definition = collectFlowDefinition();
   if (!definition || !confirm(`确认执行 ${definition.name}？`)) return;
   await runFlowAction("custom_pipeline.run_start", { definition, variables: definition.variables }, "流程已提交后端");
-  await refreshAll(true);
+  refreshInBackground(true);
 }
 
 async function runFlowAction(skill, args, okText) {
   state.flowBusy = true;
   state.flowResultSummary = { title: "正在处理", tone: "warn", lines: [`正在调用 ${skill}，请稍等。`] };
   try {
-    const payload = await skillCall(skill, args);
+    const payload = await runWithFeedback(`flow:${skill}`, `流程动作 ${skill}`, () => skillCall(skill, args));
+    if (!payload) return;
     state.flowResult = JSON.stringify(payload, null, 2);
     state.flowResultSummary = summarizeFlowPayload(skill, payload);
     toast(payload.ok === false ? "后端调用失败" : okText, payload.ok === false ? "bad" : "ok");
     if (skill === "custom_pipeline.save_definition") await loadFlowDefinitions();
+    else refreshInBackground(false);
   } finally {
     state.flowBusy = false;
   }
@@ -956,7 +1595,31 @@ function summarizeFlowPayload(skill, payload) {
     const steps = data.steps || data.preview?.steps || collectFlowDefinition()?.steps || [];
     return { title: "预览完成", tone: "ok", lines: [`将执行 ${steps.length} 个步骤。`, ...steps.slice(0, 5).map((step, index) => `${index + 1}. ${step.name || step.skill}`)] };
   }
+  if (skill === "animation_flow.preview") {
+    const stages = data.stages || [];
+    const p4 = data.p4 || {};
+    return { title: "7 步预览完成", tone: "ok", lines: [`工作区：${data.date_root}`, ...stages.map((stage) => stage.label || stage.key).slice(0, 7), `P4 Stream：${p4.stream || "//streams/rel_0.0.1"}`, "Submit：disabled"] };
+  }
+  if (skill === "animation_flow.start") {
+    return { title: "7 步流程已启动", tone: "ok", lines: [`Run：${data.run_id || data.id || "后端已接收"}`, `工作区：${data.date_root || workspacePath()}`, "完成后飞书会返回 CL/Shelf ID；submit disabled。"] };
+  }
   return { title: "流程已启动", tone: "ok", lines: [`Run：${data.run_id || data.id || "后端已接收"}`, `名称：${state.flowName}`, "可以去“队列”或“流程”页查看实时状态。"] };
+}
+
+function formatSkillResult(skill, payload) {
+  const data = unwrap(payload);
+  if (payload?.ok === false || data?.ok === false || data?.error) {
+    return `调用失败：${payload.error || data.error || "后端返回异常"}\n\n需要看完整对象时点右上角“查看原始详情”。`;
+  }
+  const lines = [`后端已执行：${skill}`];
+  const text = firstText(data);
+  if (data.run_id || data.id) lines.push(`Run ID：${data.run_id || data.id}`);
+  if (data.status) lines.push(`状态：${data.status}`);
+  if (data.input_dir || data.download_dir) lines.push(`输入：${data.input_dir || data.download_dir}`);
+  if (data.output_dir || data.export_dir || data.smooth_output_dir) lines.push(`输出：${data.output_dir || data.export_dir || data.smooth_output_dir}`);
+  if (text && !lines.includes(text)) lines.push(text);
+  if (lines.length === 1) lines.push("后端已返回成功。可以到“队列/流程”页继续看进度。");
+  return lines.join("\n");
 }
 
 async function loadModuleCatalog() {
@@ -981,47 +1644,84 @@ async function loadFlowDefinition(name) {
     skill: step.skill,
     enabled: step.enabled !== false,
     arguments: { ...(step.arguments || {}) },
-    expanded: index === 0,
+    expanded: false,
   }));
+  const comfy = findFlowStep("comfyui.run_start");
+  const p4 = findFlowStep("p4.shelve_ui_import");
+  state.quickFlow.workflowPath = comfy?.arguments?.workflow_path || "";
+  state.quickFlow.allowP4Writes = p4 ? p4.enabled !== false : state.quickFlow.allowP4Writes;
+  state.quickFlow.p4Description = p4?.arguments?.desc || state.quickFlow.p4Description;
 }
 
 async function runDiagnose() {
   switchView("overview");
-  state.status.agentDiagnose = await skillCall("agent.diagnose", { include_gpu: false });
+  state.status.agentDiagnose = await runWithFeedback("diagnose", "后端自动诊断", () => skillCall("agent.diagnose", { include_gpu: false }));
   toast(unwrap(state.status.agentDiagnose).error ? "诊断返回异常" : "诊断已完成", unwrap(state.status.agentDiagnose).error ? "bad" : "ok");
 }
 
 async function runAsr() {
-  const payload = await skillCall("speech.transcribe", { ...state.asr });
-  state.asrResult = JSON.stringify(payload, null, 2);
+  state.asrResult = "正在识别音频，后端处理中...";
+  const payload = await runWithFeedback("voice:asr", "ASR 语音识别", () => skillCall("speech.transcribe", { ...state.asr }));
+  state.asrResult = formatSkillResult("speech.transcribe", payload);
 }
 
 async function runTts() {
   const args = { ...state.tts };
   Object.keys(args).forEach((key) => { if (!args[key]) delete args[key]; });
-  const payload = await skillCall("speech.synthesize", args);
-  state.ttsResult = JSON.stringify(payload, null, 2);
+  state.ttsResult = "正在生成语音，后端处理中...";
+  const payload = await runWithFeedback("voice:tts", "TTS 语音生成", () => skillCall("speech.synthesize", args));
+  state.ttsResult = formatSkillResult("speech.synthesize", payload);
 }
 
 async function loadMemory() {
+  beginAction("memory:load", "正在读取记忆与上下文");
   const scope = encodeURIComponent(state.memoryScope || "global");
-  const payload = await request(`/api/admin/memory?scope=${scope}&limit=30`);
-  state.memoryItems = payload.items || [];
-  state.memoryPack = unwrap(await skillCall("memory.context_pack", { conversation_id: state.memoryConversation || "test", recent_limit: 12, max_chars: 6000 }));
+  const conversation = encodeURIComponent(state.memoryConversation || "test");
+  try {
+    const payload = await request(`/api/admin/memory-pack?scope=${scope}&conversation_id=${conversation}&limit=10`, { timeoutMs: 30000, cacheMs: 3000, dedupe: true });
+    state.memoryItems = payload.items || [];
+    state.memoryPack = payload.pack || {};
+  } finally {
+    endAction("memory:load", "记忆读取已结束");
+  }
 }
 
 async function compactMemory() {
-  const payload = await skillCall("memory.compact", { conversation_id: state.memoryConversation || "test", keep_messages: 12, max_chars: 6000 });
+  const payload = await runWithFeedback("memory:compact", "手动压缩记忆", () => skillCall("memory.compact", { conversation_id: state.memoryConversation || "test", keep_messages: 12, max_chars: 6000 }));
   state.detail = { title: "memory.compact", payload };
   await loadMemory();
 }
 
 async function runP4(kind) {
-  const payload = await skillCall(`p4.${kind}`, {});
-  state.p4LastAction = kind;
+  const action = p4Actions.find((item) => item.kind === kind) || { kind, skill: `p4.${kind}`, title: p4OperationLabel(kind) };
+  await runP4Action(action);
+}
+
+function p4ActionArgs(action) {
+  const args = {};
+  if (state.p4Form.workflow.trim()) args.workflow = state.p4Form.workflow.trim();
+  if (state.p4Form.workspace.trim()) args.workspace = state.p4Form.workspace.trim();
+  if (action.needsCl && state.p4Form.cl.trim()) args.cl = state.p4Form.cl.trim();
+  if (action.needsDescription && state.p4Form.description.trim()) args.desc = state.p4Form.description.trim();
+  if (state.p4Form.allow_delete) args.allow_delete = true;
+  if (state.p4Form.force && ["shelve", "shelve_ui_import"].includes(action.kind)) args.force = true;
+  if (action.kind === "shelve_ui_import") args.yes = true;
+  return args;
+}
+
+async function runP4Action(action) {
+  if (action.needsCl && !state.p4Form.cl.trim()) {
+    toast("这个动作需要先填写 CL 编号", "bad");
+    return;
+  }
+  if (action.confirm && !confirm(action.confirm)) return;
+  const payload = await runWithFeedback(`p4:${action.kind}`, `P4 ${action.title}`, () => skillCall(action.skill, p4ActionArgs(action)));
+  if (!payload) return;
+  state.p4LastAction = action.kind;
   state.p4Result = unwrap(payload);
-  if (kind === "status") state.status.p4 = payload;
-  toast(state.p4Result?.error ? "P4 检查返回异常" : "P4 检查已完成", state.p4Result?.error ? "bad" : "ok");
+  if (action.kind === "status") state.status.p4 = payload;
+  toast(state.p4Result?.error ? "P4 返回异常" : `P4 ${action.title}已完成`, state.p4Result?.error ? "bad" : "ok");
+  refreshInBackground(false);
 }
 
 function asList(value) {
@@ -1079,6 +1779,17 @@ function buildDiagnosticCards(payload) {
 }
 
 function buildPipelineSteps() {
+  const aflow = unwrap(state.status.animationFlowCurrent);
+  const aflowStages = Array.isArray(aflow?.stages) ? aflow.stages : [];
+  if (aflowStages.length) {
+    return aflowStages.map((stage) => ({
+      title: stage.label || animationFlowStageTitle(stage.key),
+      skill: stage.key || "animation_flow",
+      status: stage.status || (aflow.current_stage === stage.key ? "running" : "pending"),
+      progress: stage.status === "done" ? 100 : stage.status === "running" ? 45 : 0,
+      log: animationFlowStageLog(stage.key, aflow),
+    }));
+  }
   const custom = unwrap(state.status.customPipelineRuns).items?.[0] || unwrap(state.status.customPipelineRuns).items?.[0];
   const customSteps = Array.isArray(custom?.steps) ? custom.steps : [];
   const customResults = Array.isArray(custom?.results) ? custom.results : [];
@@ -1107,8 +1818,34 @@ function buildPipelineSteps() {
     pipelineStepFromStatus("飞书视频下载 / 抽帧", "frame.run_status", unwrap(state.status.frameCurrent)),
     pipelineStepFromStatus("ComfyUI 抠图", "comfyui.run_status", unwrap(state.status.comfyCurrent)),
     pipelineStepFromStatus("Cherry 平滑", "cherry.run_status", unwrap(state.status.cherryCurrent)),
-    pipelineStepFromStatus("动画大流程", "pipeline.run_status", unwrap(state.status.pipelineCurrent)),
+    pipelineStepFromStatus("unity_ready 整理", "unity_ready.status", unwrap(state.status.unityReady)),
+    pipelineStepFromStatus("Unity 导入引擎", "unity_import.status", unwrap(state.status.unityImport)),
+    pipelineStepFromStatus("P4 Shelve-only", "p4.status", unwrap(state.status.p4)),
   ];
+}
+
+function animationFlowStageTitle(key) {
+  return {
+    feishu_download: "1 飞书文档/表格下载视频",
+    frame_extract: "2 抽帧",
+    matting: "3 抠图",
+    cherry: "4 Cherry 后处理",
+    unity_ready: "5 unity_ready 整理",
+    unity_import: "6 Unity 插件导入引擎",
+    p4_shelve: "7 P4 reconcile/changelist/shelve/report",
+  }[key] || key || "动画流程";
+}
+
+function animationFlowStageLog(key, payload) {
+  if (payload?.error && payload.current_stage === key) return payload.error;
+  if (key === "p4_shelve") {
+    const p4 = payload?.children?.p4 || payload?.p4 || {};
+    const cl = p4.changelist_id || p4.cl || p4.shelf;
+    return cl ? `CL/Shelf ${cl}，Submit disabled` : "只做 create CL / reconcile / shelve / report，submit disabled。";
+  }
+  if (key === "unity_import") return firstText(payload?.children?.unity_import || {}) || "调用 Unity 插件 API，不改插件源码。";
+  if (key === "unity_ready") return "整理 scene / emoji 两包 JSON 和 frames。";
+  return firstText(payload?.pipeline || payload) || "等待后端更新进度。";
 }
 
 function pipelineStepFromStatus(title, skill, payload) {
@@ -1119,6 +1856,32 @@ function pipelineStepFromStatus(title, skill, payload) {
     progress: progressFromPayload(payload),
     log: payload.last_log || payload.error || payload.current_item?.label || firstText(payload) || "暂无进度日志",
   };
+}
+
+function buildCustomFlowStepCards(run) {
+  const results = Array.isArray(run?.results) ? run.results : [];
+  const childStatus = run?.child_status || {};
+  return state.flowSteps.map((step, index) => {
+    const result = results.find((item) => item.step === step.id || item.skill === step.skill);
+    const child = Object.values(childStatus).find((item) => {
+      const data = unwrap(item);
+      return String(data?.skill || data?.module || "").includes(step.skill.split(".")[0]) || data?.run_id;
+    });
+    const resultPayload = unwrap(result?.result || {});
+    const childPayload = unwrap(child || {});
+    const isCurrent = run?.current_step === step.id;
+    const status = step.enabled === false ? "SKIPPED" : result ? (resultPayload.status || "DONE") : isCurrent ? "RUNNING" : run?.status === "FAILED" ? "WAITING" : "PENDING";
+    const text = resultPayload.error || childPayload.error || firstText(resultPayload) || childPayload.last_log || flowModuleMeta(step.skill).subtitle;
+    return {
+      id: step.id,
+      index: index + 1,
+      title: step.name,
+      skill: step.skill,
+      status,
+      result: text,
+      payload: result || child || step,
+    };
+  });
 }
 
 function progressFromPayload(payload) {
@@ -1132,11 +1895,14 @@ function progressFromPayload(payload) {
 
 function p4OperationLabel(kind) {
   return {
-    status: "状态刷新",
-    inventory: "拓扑检查",
-    workspace_details: "Workspace 详情",
-    compare_depot: "Depot 对比",
-    list_workflows: "工作流列表",
+    status: "状态读取",
+    check: "安全检查",
+    preview: "改动预览",
+    create_cl: "创建 CL",
+    reconcile: "放入 CL",
+    shelve: "Shelve",
+    report: "报告生成",
+    shelve_ui_import: "一键导入 Shelve",
   }[kind] || kind || "P4 检查";
 }
 
@@ -1155,65 +1921,73 @@ function buildP4Display(payload) {
       title: "P4 尚未刷新",
       tone: "warn",
       cards: [
-        ["Workspace", "-"],
-        ["Opened", "0"],
-        ["Reconcile", "0"],
-        ["状态", "等待检查"],
+        ["工作区", "-"],
+        ["打开文件", "0"],
+        ["预览变更", "0"],
+        ["安全模式", "只 Shelve"],
       ],
-      sections: [{ title: "说明", lines: ["点击“刷新 P4”或下面的快速检查，WebUI 会调用后端 P4 技能。"] }],
+      sections: [{ title: "下一步", tone: "info", lines: ["先点“读取状态”。如果状态正常，再点“预览改动”。确认后使用“一键导入 Shelve”。"] }],
     };
   }
 
   const commands = asList(data.commands).filter(Boolean);
-  const opened = asList(data.opened || data.opened_files || data.files_opened).filter(Boolean);
-  const reconcile = asList(data.reconcile || data.reconcile_files || data.changed_files).filter(Boolean);
-  const workflowItems = asList(data.workflows || data.items || data.workflow_roots).filter(Boolean);
+  const summary = data.summary || data.result?.summary || {};
+  const safety = data.safety || data.safety_result || summary.safety || {};
+  const opened = asList(data.opened || data.opened_files || data.files_opened || summary.opened_files || summary.opened).filter(Boolean);
+  const reconcile = asList(data.reconcile || data.reconcile_files || data.changed_files || data.preview_files || summary.reconcile_files || summary.files).filter(Boolean);
+  const reportText = data.report_text || data.report || data.text || "";
   const error = data.error || commands.find((item) => item.returncode && item.returncode !== 0)?.stderr;
-  const workspace = data.workspace || data.client || data.p4client || data.workflow || "-";
-  const openedCount = data.opened_count ?? opened.length ?? 0;
-  const reconcileCount = data.reconcile_count ?? reconcile.length ?? 0;
+  const workspace = data.workspace || data.client || data.p4client || summary.workspace || data.workflow || "-";
+  const openedCount = data.opened_count ?? summary.opened_count ?? opened.length ?? 0;
+  const reconcileCount = data.reconcile_count ?? summary.reconcile_count ?? summary.change_count ?? reconcile.length ?? 0;
+  const cl = data.cl || data.changelist || data.change || data.shelf_cl || summary.cl || summary.changelist;
 
-  const sections = [
-    {
-      title: "Shelve-only 安全边界",
-      tone: "info",
-      lines: [
-        "WebUI 只展示和调用 P4 检查/预览/报告能力；submit、merge、copy up 这类危险动作不放进前端。",
-        "UI 表情资源目录应限制在 Assets/Art/UI/SpritesAnim/Emoji 和 CharacterAnim 白名单内。",
-      ],
-    },
-  ];
-  if (data.root || data.workspace_root || data.cwd) {
-    sections.push({ title: "工作区路径", lines: [`根目录：${data.root || data.workspace_root || data.cwd}`] });
+  const sections = [];
+  const summaryText = firstText(data, ["readable_summary", "safe_summary", "report_text", "text", "message", "summary"]);
+  if (summaryText) {
+    sections.push({ title: error ? "需要处理" : "本次结果", tone: error ? "bad" : "ok", lines: summaryText.split("\n").filter(Boolean).slice(0, 8) });
   }
-  if (opened.length) {
-    sections.push({ title: "已打开文件", lines: opened.slice(0, 10).map((item) => compact(item.depotFile || item.path || item.file || item)) });
+  if (state.p4Advanced && (data.root || data.workspace_root || data.cwd || summary.root)) {
+    sections.push({ title: "工作区路径", lines: [`根目录：${data.root || data.workspace_root || data.cwd || summary.root}`] });
+  }
+  if (cl) {
+    sections.push({ title: "CL / Shelf", tone: "info", lines: [`当前 CL：${cl}`, "后续 reconcile、shelve、report 可以沿用这个编号。"] });
+  }
+  if (opened.length && state.p4Advanced) {
+    sections.push({ title: "已打开文件", lines: opened.slice(0, 8).map((item) => compact(item.depotFile || item.path || item.file || item)) });
   }
   if (reconcile.length) {
-    sections.push({ title: "待同步 / 待处理", lines: reconcile.slice(0, 10).map((item) => compact(item.depotFile || item.path || item.file || item)) });
+    sections.push({ title: "预览到的变更", tone: "info", lines: reconcile.slice(0, state.p4Advanced ? 12 : 5).map((item) => compact(item.depotFile || item.local_path || item.path || item.file || item)) });
   }
-  if (workflowItems.length && state.p4LastAction === "list_workflows") {
-    sections.push({ title: "工作流列表", lines: workflowItems.slice(0, 12).map((item) => `${compact(item.workflow || item.name || item.id)}：${compact(item.root || item.path || item.workspace, "-")}`) });
+  if (reportText && state.p4LastAction === "report") {
+    sections.push({ title: "飞书报告", tone: "ok", lines: String(reportText).split("\n").filter(Boolean).slice(0, 12) });
   }
-  if (commands.length) {
+  if (safety.warnings?.length) {
+    sections.push({ title: "安全提醒", tone: "warn", lines: safety.warnings.map((item) => compact(item)) });
+  }
+  if (safety.errors?.length || safety.blockers?.length) {
+    sections.unshift({ title: "安全阻断", tone: "bad", lines: [...asList(safety.errors), ...asList(safety.blockers)].map((item) => compact(item)) });
+  }
+  if (state.p4Advanced && commands.length) {
     sections.push({ title: "命令结论", lines: commands.map(commandSummary).filter(Boolean) });
   }
   if (error) {
     sections.unshift({ title: "异常原因", tone: "bad", lines: [String(error).trim()] });
   }
   if (!sections.length) {
+    const next = reconcileCount > 0 ? "有变更可以继续 Shelve。确认文件符合预期后，填写或创建 CL，再执行 Shelve。" : "目前没有看到需要提交到 Shelf 的变更。";
     const text = firstText(data);
-    sections.push({ title: "检查结果", lines: [text || "后端返回正常，但没有额外的文件变化。"] });
+    sections.push({ title: "下一步", tone: "info", lines: [text || next] });
   }
 
   return {
     title: error ? "P4 有异常需要处理" : `${p4OperationLabel(state.p4LastAction)}完成`,
     tone: error ? "bad" : "ok",
     cards: [
-      ["Workspace", workspace],
-      ["Opened", openedCount],
-      ["Reconcile", reconcileCount],
-      ["模式", "Shelve-only"],
+      ["工作区", workspace],
+      ["打开文件", openedCount],
+      ["预览变更", reconcileCount],
+      ["安全模式", "只 Shelve"],
     ],
     sections,
   };
@@ -1242,26 +2016,37 @@ function memoryNoteText(item) {
 }
 
 async function loadLogs() {
+  if (state.logsLoading) return;
+  state.logVisibleLimit = VISIBLE_LOG_LIMIT;
+  state.logsLoading = true;
+  beginAction("logs:load", "正在读取日志");
   const id = encodeURIComponent(state.conversationId || "test");
-  const [messages, calls] = await Promise.all([
-    request(`/api/admin/brain-messages?conversation_id=${id}&limit=80`),
-    request("/api/admin/skill-calls?limit=120"),
-  ]);
-  state.logError = "";
-  if (messages.ok === false || calls.ok === false) {
-    state.logError = "当前后端进程还没有加载日志接口。请重启 Agent 网关后再刷新日志页。";
+  try {
+    const [messages, calls] = await Promise.all([
+      request(`/api/admin/brain-messages?conversation_id=${id}&limit=60`, { timeoutMs: 30000, cacheMs: 2500, dedupe: true }),
+      request("/api/admin/skill-calls?limit=80", { timeoutMs: 30000, cacheMs: 2500, dedupe: true }),
+    ]);
+    state.logError = "";
+    if (messages.ok === false || calls.ok === false) {
+      state.logError = messages.error || calls.error || "当前后端进程还没有加载日志接口。请重启 Agent 网关后再刷新日志页。";
+    }
+    state.logs = messages.items || [];
+    state.skillCalls = calls.items || [];
+  } finally {
+    state.logsLoading = false;
+    endAction("logs:load", "日志读取已结束");
   }
-  state.logs = messages.items || [];
-  state.skillCalls = calls.items || [];
 }
 
 function runCommand(command) {
   state.commandOpen = false;
+  state.settingsOpen = false;
   command.run();
 }
 
 function seedAgentFlowPrompt() {
   state.commandOpen = false;
+  state.settingsOpen = false;
   sendPrompt("请帮我生成一个自定义动画自动化流程 JSON：步骤包括抽帧并剔除关键帧、ComfyUI 抠图、Cherry 平滑；每一步都要给 skill 和 arguments，路径使用 ${videos}/${frames}/${matte}/${smooth} 变量，并说明哪些参数建议我在 WebUI 里手动改。");
 }
 
@@ -1271,24 +2056,27 @@ function onTokenChange() {
   refreshAll(true);
 }
 
-onMounted(async () => {
+onMounted(() => {
   loadChatHistory();
+  loadStatusCache();
   ensureFlowSteps();
-  await refreshAll(true);
-  loadSkills();
+  refreshAll(false).catch((error) => toast(`初始刷新失败：${String(error?.message || error)}`, "bad"));
+  setTimeout(() => loadSkills(), 1200);
   setInterval(() => {
-    if (state.polling) refreshAll(false);
+    state.action.nowMs = Date.now();
+  }, 1000);
+  setInterval(() => {
+    if (state.polling && !document.hidden) refreshAll(false);
   }, STATUS_POLL_MS);
   window.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
-      state.commandOpen = true;
+      state.commandOpen = false;
+      state.settingsOpen = true;
       nextTick(() => document.querySelector(".command-search")?.focus());
     }
     if (event.key === "Escape") {
-      state.commandOpen = false;
-      state.pathPicker = null;
-      state.settingsOpen = false;
+      closeAllModals();
     }
   });
   window.addEventListener("pointermove", (event) => {
@@ -1325,7 +2113,7 @@ onMounted(async () => {
           <div class="signal" :class="{ online, checking: state.connection.checking && !online, offline: !online && !state.connection.checking }"></div>
           <div><strong>{{ connectionTitle }}</strong><span>{{ connectionSubtitle }}</span></div>
         </div>
-        <button class="settings-button" @click="state.settingsOpen = true">连接设置</button>
+        <button class="settings-button" @click="state.settingsOpen = true">高级设置</button>
         <div class="local-guard"><b>仅本机运行</b><span>Vite / WebUI / Agent 都不暴露公网</span></div>
       </div>
     </aside>
@@ -1335,10 +2123,20 @@ onMounted(async () => {
         <div><p class="eyebrow">{{ currentView.eyebrow }}</p><h1>{{ currentView.title }}</h1></div>
         <div class="toolbar">
           <span class="guard-pill">No Tunnel</span>
-          <button class="icon-button wide-icon" title="打开指令面板" @click="state.commandOpen = true">⌘K</button>
-          <button class="icon-button" title="刷新状态" @click="refreshAll(true)">↻</button>
+          <button class="small-button ghost" title="选择当前动画工作区" @click="openPathPicker({ target: 'workspaceRoot', mode: 'dir', current: state.workspaceRoot })">工作区</button>
+          <button class="icon-button wide-icon" title="高级设置" @click="state.settingsOpen = true">高级</button>
+          <button class="icon-button" title="刷新状态" :disabled="state.refreshing" @click="refreshAll(true)">↻</button>
           <button class="segmented" :class="{ active: state.polling }" @click="state.polling = !state.polling">{{ state.polling ? "Auto" : "Manual" }}</button>
         </div>
+      </section>
+      <section v-if="activeAction" class="action-banner">
+        <span class="spinner"></span>
+        <div class="action-banner-copy">
+          <b>{{ activeAction.label }}</b>
+          <small>{{ state.action.startedAt }} 开始，已等待 {{ activeAction.elapsed }} 秒。后端还在处理时页面可以继续浏览其它区域。</small>
+          <div class="indeterminate-progress"><span :style="{ width: `${activeAction.progress}%` }"></span></div>
+        </div>
+        <span class="action-count" v-if="activeAction.count > 1">{{ activeAction.count }} 项</span>
       </section>
 
       <section v-if="state.view === 'chat'" class="view active">
@@ -1428,11 +2226,17 @@ onMounted(async () => {
 
       <section v-if="state.view === 'queues'" class="view active">
         <section class="wide-panel">
-          <div class="panel-title"><h2>生产任务</h2><span>{{ state.lastRefreshAt || "-" }}</span></div>
+          <div class="panel-title"><div><h2>生产任务</h2><span>上次同步：{{ state.lastRefreshAt || "-" }}。短暂刷新失败时会保留上次成功快照。</span></div><div class="button-row"><button class="small-button danger" @click="cleanupWithConfirm('production_runs', '生产任务历史')">清空历史</button><button class="small-button ghost" @click="refreshAll(true)">刷新队列</button></div></div>
+          <div class="queue-filterbar">
+            <input v-model="state.queueFilters.keyword" class="search" placeholder="搜索 Run ID、模块、输入/输出路径..." />
+            <select v-model="state.queueFilters.status"><option value="all">全部状态</option><option value="running">RUNNING</option><option value="done">DONE</option><option value="failed">FAILED</option><option value="canceled">CANCELED</option></select>
+            <select v-model="state.queueFilters.day"><option value="">全部日期</option><option v-for="day in queueDays" :key="day" :value="day">{{ day }}</option></select>
+          </div>
           <div class="task-table">
-            <div class="task-row header"><span>模块 / Run</span><span>状态</span><span>输入</span><span>输出</span><span>操作</span></div>
-            <div v-if="!tasks.length" class="log-item"><h3>暂无任务</h3><pre>后端没有返回任务记录。若后端开启了 token 校验，请在连接设置里确认 X-Skill-Token。</pre></div>
-            <div v-for="task in tasks" :key="`${task.module}:${task.id}`" class="task-row">
+            <div class="task-row header"><span>运行时间</span><span>模块 / Run</span><span>状态</span><span>输入</span><span>输出</span><span>操作</span></div>
+            <div v-if="!filteredTasks.length" class="log-item"><h3>{{ tasks.length ? "没有匹配记录" : "暂无任务" }}</h3><pre>{{ tasks.length ? "换一个筛选条件试试。" : "后端没有返回任务记录；如果刚刷新失败，页面会继续保留上次成功快照。" }}</pre></div>
+            <div v-for="task in visibleTasks" :key="`${task.module}:${task.id}`" class="task-row queue-row">
+              <div class="task-time"><b>{{ task.clock }}</b><span>{{ task.day }}</span><small>{{ task.fullTime }}</small></div>
               <div><h3>{{ task.module }}</h3><span class="muted">{{ task.id || "-" }}</span></div>
               <div><span class="pill" :class="statusClass(task.status)">{{ task.status }}</span><div class="progress"><div class="bar" :style="{ width: `${task.progress}%` }"></div></div></div>
               <span class="muted">{{ task.input }}</span>
@@ -1444,6 +2248,9 @@ onMounted(async () => {
                 <button v-if="!isTaskDone(task) && taskActionSkills(task.module).cancel" class="small-button danger" @click="runTaskAction(task, 'cancel')">终止</button>
               </div>
             </div>
+            <button v-if="filteredTasks.length > visibleTasks.length" class="small-button ghost load-more" @click="state.queueVisibleLimit += VISIBLE_TASK_LIMIT">
+              显示更多 {{ filteredTasks.length - visibleTasks.length }} 条
+            </button>
           </div>
         </section>
       </section>
@@ -1451,7 +2258,7 @@ onMounted(async () => {
       <section v-if="state.view === 'pipeline'" class="view active">
         <div class="pipeline-hero">
           <section class="wide-panel">
-            <div class="panel-title"><h2>动画流程时间线</h2><span>{{ unwrap(state.status.pipelineCurrent).run_id || "当前无活动流程" }}</span></div>
+            <div class="panel-title"><h2>7 步动画流程时间线</h2><span>{{ unwrap(state.status.animationFlowCurrent).run_id || "当前无活动流程" }}</span></div>
             <div class="timeline dynamic">
               <div v-for="(step, index) in pipelineSteps" :key="`${step.skill}:${index}`" class="step" :class="statusClass(step.status)">
                 <div class="step-head"><span>{{ String(index + 1).padStart(2, "0") }}</span><b class="pill" :class="statusClass(step.status)">{{ step.status }}</b></div>
@@ -1469,124 +2276,81 @@ onMounted(async () => {
             </div>
           </section>
         </div>
-        <section class="wide-panel"><div class="panel-title"><h2>流程运行记录</h2><div class="button-row"><button class="small-button" @click="switchView('builder')">自定义编排</button><button class="small-button" @click="openConfig('pipeline')">旧一键流程</button></div></div><div class="task-table"><div v-if="!pipelineRuns.length" class="log-item"><h3>暂无流程记录</h3><pre>可以从“编排”页创建任意步骤的自定义流程；每一步会在这里显示状态和日志。</pre></div><div v-for="task in pipelineRuns" :key="`${task.module}:${task.id}`" class="task-row"><div><h3>{{ task.module }} {{ task.id }}</h3><span class="muted">{{ task.updated_at }}</span></div><span class="pill" :class="statusClass(task.status)">{{ task.status }}</span><span>{{ task.input }}</span><span>{{ task.output }}</span><button class="small-button ghost" @click="state.detail = { title: task.id, payload: task.raw }">详情</button></div></div></section>
+        <section class="wide-panel"><div class="panel-title"><h2>流程运行记录</h2><div class="button-row"><button class="small-button" @click="switchView('builder')">7 步生产</button><button class="small-button" @click="openConfig('animationFlow')">完整流程参数</button><button class="small-button ghost" @click="openConfig('pipeline')">旧三步</button></div></div><div class="task-table"><div v-if="!pipelineRuns.length" class="log-item"><h3>暂无流程记录</h3><pre>可以从“生产”页启动完整 7 步流程；每一步会在这里显示状态和日志。</pre></div><div v-for="task in pipelineRuns" :key="`${task.module}:${task.id}`" class="task-row"><div class="task-time"><b>{{ task.clock }}</b><span>{{ task.day }}</span><small>{{ task.fullTime }}</small></div><div><h3>{{ task.module }} {{ task.id }}</h3><span class="muted">{{ task.updated_at }}</span></div><span class="pill" :class="statusClass(task.status)">{{ task.status }}</span><span>{{ task.input }}</span><span>{{ task.output }}</span><button class="small-button ghost" @click="state.detail = { title: task.id, payload: task.raw }">详情</button></div></div></section>
       </section>
 
-      <section v-if="state.view === 'builder'" class="view active workflow-studio">
+      <section v-if="state.view === 'builder'" class="view active workflow-studio production-flow">
         <section class="workflow-main">
           <div class="builder-hero wide-panel">
             <div>
-              <p class="eyebrow">自定义工作流</p>
-              <h2>流程编排器</h2>
-              <span>用模块卡片搭流程，参数直接填表单；后端仍然调用 custom_pipeline，不再让你手搓 JSON。</span>
+              <p class="eyebrow">动画自动化</p>
+              <h2>7 步生产流程</h2>
+              <span>飞书下载、抽帧、抠图、Cherry、unity_ready、Unity 导入、P4 Shelve-only 会按顺序执行。</span>
             </div>
             <div class="builder-actions">
-              <button class="small-button" @click="seedAgentFlowPrompt">让 Agent 生成建议</button>
-              <button class="small-button" @click="previewFlow" :disabled="state.flowBusy">预览</button>
-              <button class="small-button" @click="saveFlow" :disabled="state.flowBusy">保存</button>
-              <button class="send-button" @click="runFlow" :disabled="state.flowBusy">执行</button>
+              <button class="small-button" @click="previewAnimationFlow" :disabled="state.flowBusy">预览7步</button>
+              <button class="small-button" @click="saveFlow" :disabled="state.flowBusy">保存自定义方案</button>
+              <button class="send-button" @click="runAnimationFlow" :disabled="state.flowBusy">{{ state.flowBusy ? "执行中" : "启动7步流程" }}</button>
             </div>
           </div>
 
-          <section class="builder-grid">
-            <article class="wide-panel flow-identity">
-              <div class="panel-title"><h2>流程信息</h2><span>{{ state.flowName }}</span></div>
-              <div class="flow-meta modern">
-                <label><span>流程名称</span><input v-model="state.flowName" /></label>
-                <label><span>说明</span><input v-model="state.flowDescription" /></label>
-              </div>
-              <div class="flow-stat-strip">
-                <div v-for="item in flowStepStats" :key="item[0]"><span>{{ item[0] }}</span><b>{{ item[1] }}</b></div>
-              </div>
-            </article>
-
-            <article class="wide-panel flow-vars-modern">
-              <div class="panel-title"><h2>路径变量</h2><span>步骤里可以使用 ${videos} / ${frames} 这类变量</span></div>
-              <div class="var-grid">
-                <label v-for="(item, index) in state.flowVars" :key="item.key">
-                  <span>{{ item.label || item.key }}</span>
-                  <div class="path-input">
-                    <input v-model="item.value" />
-                    <button class="small-button" @click="openPathPicker({ target: `flowvar:${index}`, mode: item.mode || 'dir', current: item.value })">浏览</button>
-                  </div>
-                </label>
-              </div>
-            </article>
+          <section class="wide-panel quick-flow-panel">
+            <div class="panel-title"><div><h2>生产输入</h2><span>这几个字段就是日常要改的内容。</span></div><button class="small-button ghost" @click="state.quickFlow.advancedOpen = !state.quickFlow.advancedOpen">{{ state.quickFlow.advancedOpen ? "收起模块参数" : "模块参数" }}</button></div>
+            <div class="quick-flow-grid">
+              <label class="wide-field"><span>ComfyUI 工作流</span><div class="path-input"><input v-model="state.quickFlow.workflowPath" placeholder="E:/.../workflow.json" /><button class="small-button" @click="openPathPicker({ target: 'quickFlow:workflowPath', mode: 'file', current: state.quickFlow.workflowPath })">浏览</button></div></label>
+              <label><span>当天工作区</span><div class="path-input"><input v-model="state.workspaceRoot" /><button class="small-button" @click="openPathPicker({ target: 'workspaceRoot', mode: 'dir', current: state.workspaceRoot })">浏览</button></div></label>
+              <label><span>Unity 工程</span><div class="path-input"><input v-model="state.quickFlow.unityProject" /><button class="small-button" @click="openPathPicker({ target: 'quickFlow:unityProject', mode: 'dir', current: state.quickFlow.unityProject })">浏览</button></div></label>
+              <label><span>P4 Stream</span><input v-model="state.quickFlow.p4Stream" /></label>
+              <label><span>导入包</span><input v-model="state.quickFlow.package" placeholder="both / scene / emoji" /></label>
+              <label><span>抽帧 FPS</span><input v-model="state.quickFlow.fps" type="number" /></label>
+              <label><span>通知间隔秒</span><input v-model="state.quickFlow.notifyIntervalSeconds" type="number" /></label>
+              <label class="toggle-field"><input v-model="state.quickFlow.allowP4Writes" type="checkbox" /><span>允许第 7 步 create CL / reconcile / shelve；submit 永远禁用</span></label>
+            </div>
           </section>
 
-          <section class="wide-panel flow-canvas">
-            <div class="panel-title"><div><h2>执行步骤</h2><span>拖拽以后再做；今天先支持添加、上移、下移、禁用、参数编辑。</span></div><button class="small-button" @click="addFlowStep('frame.run_start')">添加默认步骤</button></div>
-            <div class="flow-steps">
-              <article v-for="(step, index) in state.flowSteps" :key="step.id" class="flow-step modern" :class="{ collapsed: !step.expanded, disabled: step.enabled === false }">
+          <section v-if="state.quickFlow.advancedOpen" class="wide-panel flow-canvas">
+            <div class="panel-title"><div><h2>模块参数</h2><span>只改你关心的参数；其余使用默认值。</span></div><button class="small-button" @click="addFlowStep('frame.run_start')">添加步骤</button></div>
+            <div class="flow-steps compact">
+              <article v-for="(step, index) in state.flowSteps" :key="step.id" class="flow-step modern" :class="{ disabled: step.enabled === false }">
                 <div class="card-head">
                   <div class="flow-node-title">
                     <span class="flow-index">{{ String(index + 1).padStart(2, "0") }}</span>
-                    <div>
-                      <h3>{{ step.name }}</h3>
-                      <b>{{ step.skill }}</b>
-                    </div>
+                    <div><h3>{{ step.name }}</h3><b>{{ step.skill }}</b></div>
                   </div>
                   <div class="button-row">
-                    <button class="small-button ghost" @click="step.expanded = !step.expanded">{{ step.expanded ? "收起" : "展开" }}</button>
+                    <button class="small-button ghost" @click="openFlowStepConfig(index)">参数</button>
                     <button class="small-button" @click="moveFlowStep(index, 'up')">上移</button>
                     <button class="small-button" @click="moveFlowStep(index, 'down')">下移</button>
                     <button class="small-button danger" @click="removeFlowStep(index)">删除</button>
                   </div>
                 </div>
-
                 <div class="step-summary">
                   <span>{{ flowModuleMeta(step.skill).subtitle }}</span>
                   <label class="toggle-field compact-toggle"><input v-model="step.enabled" type="checkbox" /><span>启用</span></label>
                 </div>
+                <div class="flow-glance"><span v-for="item in stepArgumentSummary(step)" :key="item">{{ item }}</span></div>
+              </article>
+            </div>
+          </section>
 
-                <div v-if="step.expanded" class="flow-step-grid modern">
-                  <label><span>步骤 ID</span><input v-model="step.id" /></label>
-                  <label><span>显示名称</span><input v-model="step.name" /></label>
-                  <label class="wide-field"><span>后端模块</span><select v-model="step.skill" @change="onFlowSkillChange(step)"><option v-for="skill in flowSkills" :key="skill">{{ skill }}</option></select></label>
-                  <label v-for="field in flowStepFields(step)" :key="field.key" :class="{ 'wide-field': field.type === 'path' }">
-                    <span>{{ field.label }}</span>
-                    <div v-if="field.type === 'path'" class="path-input">
-                      <input v-model="step.arguments[field.key]" :placeholder="String(field.value || '')" />
-                      <button class="small-button" @click="openPathPicker({ target: `flowstep:${index}:${field.key}`, mode: field.pathMode || 'dir', current: step.arguments[field.key] })">浏览</button>
-                    </div>
-                    <label v-else-if="field.type === 'checkbox'" class="toggle-field"><input v-model="step.arguments[field.key]" type="checkbox" /><span>{{ field.help }}</span></label>
-                    <input v-else v-model="step.arguments[field.key]" :type="field.type" :placeholder="String(field.value ?? '')" />
-                    <small v-if="field.type !== 'checkbox'">{{ field.help }}</small>
-                  </label>
-                </div>
+          <section class="wide-panel flow-status-panel">
+            <div class="panel-title"><div><h2>执行状态</h2><span>{{ customPipelineRun.run_id || "尚未启动" }} {{ customPipelineRun.status ? `· ${customPipelineRun.status}` : "" }}</span></div><button class="small-button ghost" @click="state.detail = { title: '自定义流程原始详情', payload: customPipelineRun }">原始详情</button></div>
+            <div class="flow-status-grid">
+              <article v-for="step in customFlowStepCards" :key="step.id" class="flow-status-card" :class="statusClass(step.status)">
+                <div class="step-head"><span>{{ String(step.index).padStart(2, "0") }}</span><b class="pill" :class="statusClass(step.status)">{{ step.status }}</b></div>
+                <h3>{{ step.title }}</h3>
+                <small>{{ step.skill }}</small>
+                <p>{{ step.result }}</p>
+                <button class="small-button ghost" @click="state.detail = { title: step.title, payload: step.payload }">结果</button>
               </article>
             </div>
           </section>
 
           <section v-if="state.flowResultSummary" class="wide-panel flow-result-panel">
             <div class="panel-title"><h2>{{ state.flowResultSummary.title }}</h2><button class="small-button ghost" @click="state.detail = { title: '流程原始详情', payload: state.flowResult }">查看原始详情</button></div>
-            <div class="summary-grid">
-              <article class="summary-card" :class="state.flowResultSummary.tone">
-                <p v-for="line in state.flowResultSummary.lines" :key="line">{{ line }}</p>
-              </article>
-            </div>
+            <div class="summary-grid"><article class="summary-card" :class="state.flowResultSummary.tone"><p v-for="line in state.flowResultSummary.lines" :key="line">{{ line }}</p></article></div>
           </section>
         </section>
-
-        <aside class="workflow-side">
-          <section class="wide-panel module-palette">
-            <div class="panel-title"><h2>模块库</h2><span>{{ flowModules.length }}</span></div>
-            <button v-for="module in flowModules" :key="module.key" class="module-palette-card" @click="addFlowStep(module.key)">
-              <strong>{{ module.title }}</strong>
-              <span>{{ module.subtitle }}</span>
-              <b>{{ module.key }}</b>
-            </button>
-          </section>
-
-          <section class="wide-panel saved-flows">
-            <div class="panel-title"><h2>已保存流程</h2><button class="small-button" @click="loadFlowDefinitions">刷新</button></div>
-            <article v-if="!state.flowDefinitions.length" class="log-item"><h3>暂无保存记录</h3><pre>保存后会出现在这里。</pre></article>
-            <article v-for="flow in state.flowDefinitions" :key="flow.name" class="saved-flow-card">
-              <div><h3>{{ flow.name }}</h3><span>{{ flow.description || flow.path }}</span></div>
-              <button class="small-button" @click="loadFlowDefinition(flow.name)">载入</button>
-            </article>
-          </section>
-        </aside>
       </section>
 
       <section v-if="state.view === 'voice'" class="view active split-layout">
@@ -1604,14 +2368,38 @@ onMounted(async () => {
 
       <section v-if="state.view === 'p4'" class="view active">
         <section class="wide-panel p4-hero">
-          <div class="panel-title"><div><h2>P4 工作区</h2><span>查看当前 workspace、opened、reconcile、depot 对比。</span></div><button class="small-button" @click="runP4('status')">刷新 P4</button></div>
+          <div class="panel-title"><div><h2>P4 发布助手</h2><span>只做 UI 动画资源的安全检查、预览和 Shelve，不做 submit。</span></div><div class="button-row"><button class="small-button ghost" @click="state.p4Advanced = !state.p4Advanced">{{ state.p4Advanced ? "收起高级" : "高级设置" }}</button><button class="small-button" :disabled="isBusy('p4:status')" @click="runP4('status')">{{ isBusy('p4:status') ? "读取中" : "读取状态" }}</button></div></div>
           <div class="status-strip">
             <article v-for="card in p4Display.cards" :key="card[0]" class="status-card"><h3>{{ card[0] }}</h3><b>{{ card[1] }}</b></article>
           </div>
         </section>
+        <section v-if="state.p4Advanced" class="wide-panel p4-control-panel">
+          <div class="panel-title"><div><h2>高级参数</h2><span>平时不用填；只有指定 workspace、复用 CL 或覆盖 shelf 时才改。</span></div></div>
+          <div class="p4-form-grid">
+            <label><span>Workflow</span><input v-model="state.p4Form.workflow" placeholder="可留空，例如 spark_client_ui" /></label>
+            <label><span>Workspace</span><input v-model="state.p4Form.workspace" placeholder="可留空，使用后端默认 P4CLIENT" /></label>
+            <label><span>CL 编号</span><input v-model="state.p4Form.cl" placeholder="例如 123456；shelve/report/reconcile 必填" /></label>
+            <label><span>CL 描述</span><input v-model="state.p4Form.description" placeholder="[UI Emoji Import] ..." /></label>
+            <label class="toggle-field"><input v-model="state.p4Form.allow_delete" type="checkbox" /><span>允许删除文件。默认不勾选，delete 会被安全阻断。</span></label>
+            <label class="toggle-field"><input v-model="state.p4Form.force" type="checkbox" /><span>Shelve 时允许覆盖已有 shelf。</span></label>
+          </div>
+        </section>
         <section class="wide-panel">
-          <div class="panel-title"><div><h2>P4 快速检查</h2><span>{{ p4Display.title }}</span></div><button class="small-button ghost" @click="state.detail = { title: 'P4 原始详情', payload: state.p4Result || unwrap(state.status.p4) }">查看原始详情</button></div>
-          <div class="button-row"><button class="small-button" @click="runP4('inventory')">拓扑</button><button class="small-button" @click="runP4('workspace_details')">Workspace 详情</button><button class="small-button" @click="runP4('compare_depot')">对比 Depot</button><button class="small-button" @click="runP4('list_workflows')">工作流列表</button></div>
+          <div class="panel-title"><div><h2>推荐操作</h2><span>{{ p4Display.title }}</span></div><button class="small-button ghost" @click="state.detail = { title: 'P4 原始详情', payload: state.p4Result || unwrap(state.status.p4) }">原始详情</button></div>
+          <div class="p4-action-grid">
+            <button v-for="action in p4PrimaryActions" :key="action.kind" class="p4-action-card" :disabled="isBusy(`p4:${action.kind}`)" @click="runP4Action(action)">
+              <b>{{ isBusy(`p4:${action.kind}`) ? "处理中..." : action.title }}</b>
+              <span>{{ action.subtitle }}</span>
+              <small>{{ action.kind === "shelve_ui_import" ? "自动完成安全流程" : action.skill }}</small>
+            </button>
+          </div>
+          <div v-if="state.p4Advanced" class="p4-action-grid compact">
+            <button v-for="action in p4AdvancedActions" :key="action.kind" class="p4-action-card" :disabled="isBusy(`p4:${action.kind}`)" @click="runP4Action(action)">
+              <b>{{ isBusy(`p4:${action.kind}`) ? "处理中..." : action.title }}</b>
+              <span>{{ action.subtitle }}</span>
+              <small>{{ action.skill }}</small>
+            </button>
+          </div>
           <div class="p4-summary" :class="p4Display.tone">
             <section v-for="section in p4Display.sections" :key="section.title" class="summary-section" :class="section.tone">
               <h3>{{ section.title }}</h3>
@@ -1623,10 +2411,16 @@ onMounted(async () => {
 
       <section v-if="state.view === 'memory'" class="view active split-layout">
         <section class="wide-panel memory-console">
-          <div class="panel-title"><div><h2>记忆检索</h2><span>读取同一 conversation_id 的摘要、近期对话和长期记忆。</span></div><div class="inline-fields"><input v-model="state.memoryScope" class="search" placeholder="记忆 scope，例如 global" /><input v-model="state.memoryConversation" class="search" placeholder="会话 ID，例如 test" /><button class="small-button" @click="loadMemory">读取</button><button class="small-button" @click="compactMemory">手动压缩</button></div></div>
+          <div class="panel-title"><div><h2>记忆检索</h2><span>直接看当前对话的摘要、最近消息和长期记忆；工程字段收在高级设置里。</span></div><div class="button-row"><button class="small-button" @click="state.memoryScope = 'global'; state.memoryConversation = 'test'; loadMemory()">读取当前 WebUI 对话</button><button class="small-button danger" @click="cleanupWithConfirm('memory', '当前 scope 记忆', { scope: state.memoryScope })">清空记忆</button><button class="small-button ghost" @click="state.memoryAdvanced = !state.memoryAdvanced">{{ state.memoryAdvanced ? "收起高级" : "高级设置" }}</button></div></div>
+          <div v-if="state.memoryAdvanced" class="inline-fields memory-advanced">
+            <label><span>记忆范围</span><input v-model="state.memoryScope" class="search" placeholder="默认 global" /></label>
+            <label><span>对话编号</span><input v-model="state.memoryConversation" class="search" placeholder="默认 test；飞书会话通常是 feishu:..." /></label>
+            <button class="small-button" @click="loadMemory">读取</button>
+            <button class="small-button" @click="compactMemory">手动压缩</button>
+          </div>
           <div class="memory-guide">
-            <article><h3>怎么用</h3><p>Scope 用来查看长期记忆条目；conversation_id 用来读取某个对话的上下文包。WebUI 对话默认是 test，飞书会话会是 feishu:chat:user 这种格式。</p></article>
-            <article><h3>后端逻辑</h3><p>当前是“全量消息 + 滚动摘要 + RAG/记忆条目”的混合结构。页面默认展示中文摘要，原始 JSON 放进详情。</p></article>
+            <article><h3>怎么用</h3><p>平时直接点“读取当前 WebUI 对话”。只有要查某个飞书会话时，才打开高级设置填写对话编号。</p></article>
+            <article><h3>后端逻辑</h3><p>当前是“全量消息 + 滚动摘要 + RAG/记忆条目”的混合结构。页面默认只展示中文摘要，原始 JSON 放进详情。</p></article>
           </div>
           <section class="summary-grid">
             <article class="summary-card info"><h3>上下文摘要</h3><p v-for="line in memorySummary" :key="line">{{ line }}</p><button class="small-button ghost" @click="state.detail = { title: 'RAG Context Pack 原始详情', payload: state.memoryPack }">查看原始详情</button></article>
@@ -1645,18 +2439,33 @@ onMounted(async () => {
       </section>
 
       <section v-if="state.view === 'logs'" class="view active">
-        <div class="panel-title"><div><h2>操作日志</h2><span>Agent 对话与后端技能调用。</span></div><div class="inline-fields"><input v-model="state.conversationId" class="search" /><button class="small-button" @click="loadLogs">读取</button></div></div>
+        <div class="panel-title"><div><h2>操作日志</h2><span>默认只读取最近记录，避免大日志把页面拖慢。</span></div><div class="inline-fields"><input v-model="state.conversationId" class="search" /><button class="small-button danger" @click="cleanupWithConfirm('brain_messages', '当前会话对话日志', { conversation_id: state.conversationId })">清空对话</button><button class="small-button danger" @click="cleanupWithConfirm('skill_calls', '技能调用日志')">清空技能日志</button><button class="small-button" :disabled="state.logsLoading" @click="loadLogs">{{ state.logsLoading ? "读取中" : "读取" }}</button></div></div>
+        <article v-if="state.logsLoading" class="loading-panel">
+          <b>正在读取日志</b>
+          <span>日志量大时后端可能需要几十秒；页面没有卡死，你可以切到其它页面继续看状态。</span>
+          <div class="indeterminate-progress"><span style="width: 72%"></span></div>
+        </article>
         <article v-if="state.logError" class="log-item"><h3>日志接口不可用</h3><pre>{{ state.logError }}</pre></article>
         <div class="tabs"><button class="chip" :class="{ active: state.logTab === 'brain' }" @click="state.logTab = 'brain'">Agent 对话</button><button class="chip" :class="{ active: state.logTab === 'skills' }" @click="state.logTab = 'skills'">技能调用</button></div>
-        <div v-if="state.logTab === 'brain'" class="log-table"><div class="log-row header"><span>时间</span><span>用户输入</span><span>Agent 回复</span><span>工具</span></div><div v-for="item in state.logs" :key="item.id || item.created_at" class="log-row"><span>{{ item.created_at || "-" }}</span><span>{{ item.message_text || "-" }}</span><span>{{ item.response_text || "-" }}</span><button class="small-button ghost" @click="state.detail = { title: '工具调用', payload: item.tool_calls_json }">详情</button></div></div>
-        <div v-else class="log-table"><div class="log-row header"><span>时间</span><span>技能</span><span>请求方</span><span>结果</span></div><div v-for="item in state.skillCalls" :key="item.id || item.created_at" class="log-row"><span>{{ item.created_at || "-" }}</span><span>{{ item.skill }}</span><span>{{ item.requested_by }}</span><button class="small-button" :class="{ danger: !item.ok }" @click="state.detail = { title: item.skill, payload: item }">{{ item.ok ? "成功" : "失败" }}</button></div></div>
+        <div v-if="state.logTab === 'brain'" class="log-table">
+          <div class="log-row header"><span>时间</span><span>用户输入</span><span>Agent 回复</span><span>工具</span></div>
+          <article v-if="!state.logsLoading && !state.logs.length" class="log-empty">暂无对话日志。</article>
+          <div v-for="item in visibleLogs" :key="item.id || item.created_at" class="log-row"><span>{{ item.created_at || "-" }}</span><span>{{ item.message_text || "-" }}</span><span>{{ item.response_text || "-" }}</span><button class="small-button ghost" @click="state.detail = { title: '工具调用', payload: item.tool_calls_json }">详情</button></div>
+          <button v-if="state.logs.length > visibleLogs.length" class="small-button ghost load-more" @click="state.logVisibleLimit += VISIBLE_LOG_LIMIT">显示更多 {{ state.logs.length - visibleLogs.length }} 条</button>
+        </div>
+        <div v-else class="log-table">
+          <div class="log-row header"><span>时间</span><span>技能</span><span>请求方</span><span>结果</span></div>
+          <article v-if="!state.logsLoading && !state.skillCalls.length" class="log-empty">暂无技能调用日志。</article>
+          <div v-for="item in visibleSkillCalls" :key="item.id || item.created_at" class="log-row"><span>{{ item.created_at || "-" }}</span><span>{{ item.skill }}</span><span>{{ item.requested_by }}</span><button class="small-button" :class="{ danger: !item.ok }" @click="state.detail = { title: item.skill, payload: item }">{{ item.ok ? "成功" : "失败" }}</button></div>
+          <button v-if="state.skillCalls.length > visibleSkillCalls.length" class="small-button ghost load-more" @click="state.logVisibleLimit += VISIBLE_LOG_LIMIT">显示更多 {{ state.skillCalls.length - visibleSkillCalls.length }} 条</button>
+        </div>
       </section>
     </main>
   </div>
 
-  <div v-if="state.configModule" class="modal-backdrop" @click.self="state.configModule = ''">
+  <div v-if="state.configModule" class="modal-backdrop" @click.self="closeAllModals">
     <aside class="drawer">
-      <div class="drawer-head"><div><h2>{{ modules[state.configModule].title }}</h2><span>{{ modules[state.configModule].subtitle }}</span></div><button class="icon-button" @click="state.configModule = ''">×</button></div>
+      <div class="drawer-head"><div><h2>{{ modules[state.configModule].title }}</h2><span>{{ modules[state.configModule].subtitle }}</span></div><button class="icon-button" @click="closeAllModals">×</button></div>
       <div class="config-form drawer-form">
         <label v-for="field in modules[state.configModule].fields" :key="field.key" :class="{ 'wide-field': field.type === 'path' }">
           <span>{{ field.label }}</span>
@@ -1671,37 +2480,94 @@ onMounted(async () => {
     </aside>
   </div>
 
-  <div v-if="state.pathPicker" class="modal-backdrop" @click.self="state.pathPicker = null">
+  <div v-if="selectedFlowStep" class="modal-backdrop" @click.self="closeAllModals">
+    <aside class="drawer">
+      <div class="drawer-head">
+        <div><h2>{{ selectedFlowStep.name }}</h2><span>这是流程里这一小步的参数，只影响当前自定义流程。</span></div>
+        <button class="icon-button" @click="closeAllModals">×</button>
+      </div>
+      <div class="config-form drawer-form">
+        <label><span>步骤 ID</span><input v-model="selectedFlowStep.id" /></label>
+        <label><span>显示名称</span><input v-model="selectedFlowStep.name" /></label>
+        <label class="wide-field"><span>后端模块</span><select v-model="selectedFlowStep.skill" @change="onFlowSkillChange(selectedFlowStep)"><option v-for="skill in flowSkills" :key="skill">{{ skill }}</option></select><small>这里只选择用哪个模块。模块默认参数可在“总控”里调整。</small></label>
+        <label v-for="field in flowStepFields(selectedFlowStep)" :key="field.key" :class="{ 'wide-field': field.type === 'path' }">
+          <span>{{ field.label }}</span>
+          <div v-if="field.type === 'path'" class="path-input">
+            <input v-model="selectedFlowStep.arguments[field.key]" :placeholder="String(field.value || '')" />
+            <button class="small-button" @click="openPathPicker({ target: `flowstep:${state.flowStepConfigIndex}:${field.key}`, mode: field.pathMode || 'dir', current: selectedFlowStep.arguments[field.key] })">浏览</button>
+          </div>
+          <label v-else-if="field.type === 'checkbox'" class="toggle-field"><input v-model="selectedFlowStep.arguments[field.key]" type="checkbox" /><span>{{ field.help }}</span></label>
+          <input v-else v-model="selectedFlowStep.arguments[field.key]" :type="field.type" :placeholder="String(field.value ?? '')" />
+          <small v-if="field.type !== 'checkbox'">{{ field.help }}</small>
+        </label>
+      </div>
+      <div class="drawer-actions"><button class="small-button" @click="closeAllModals">关闭</button><button class="send-button" @click="closeAllModals">保存到流程</button></div>
+    </aside>
+  </div>
+
+  <div v-if="state.pathPicker" class="modal-backdrop" @click.self="closeAllModals">
     <aside class="drawer path-drawer">
-      <div class="drawer-head"><div><h2>选择本机路径</h2><span>这里选的是后端机器可访问的路径，不是浏览器沙盒路径。</span></div><button class="icon-button" @click="state.pathPicker = null">×</button></div>
+      <div class="drawer-head"><div><h2>手动填写路径</h2><span>系统选择器取消或不可用时，用这里直接填后端可访问的 Windows 路径。</span></div><button class="icon-button" @click="closeAllModals">×</button></div>
       <section class="path-hero">
-        <label><span>当前地址</span><div class="path-input"><input v-model="state.pathManual" @keydown.enter.prevent="browsePath(state.pathManual)" /><button class="small-button" @click="browsePath(state.pathManual)">打开</button></div></label>
-        <div class="path-toolbar"><button class="small-button" @click="browsePath(parentPath(state.pathPicker.current))">上级</button><button class="small-button" @click="browsePath('D:/')">D:</button><button class="small-button" @click="browsePath('E:/')">E:</button><button class="small-button" @click="browsePath('F:/')">F:</button><button class="small-button" @click="browsePath('Z:/')">Z:</button><button class="send-button" @click="choosePath({ path: state.pathManual || state.pathPicker.current })">选择当前路径</button></div>
-        <p class="muted">常用动画目录建议：{{ pathInWorkspace() }}。后端安全规则会拦住 `.env`、系统目录和未授权目录。</p>
+        <article v-if="state.pathDialogError" class="inline-alert warn">{{ state.pathDialogError }}</article>
+        <label><span>路径</span><div class="path-input"><input v-model="state.pathManual" @keydown.enter.prevent="choosePath({ path: state.pathManual || state.pathPicker.current })" /><button class="send-button" @click="choosePath({ path: state.pathManual || state.pathPicker.current })">使用</button></div></label>
+        <div class="path-toolbar"><button class="small-button" @click="openPathPicker({ target: state.pathPicker.target, mode: state.pathPicker.mode, current: state.pathManual || state.pathPicker.current })">重新打开系统选择器</button><button class="small-button" @click="state.pathManual = workspacePath()">当天工作区</button><button class="small-button" @click="state.pathManual = 'E:/'">E:</button><button class="small-button" @click="state.pathManual = 'D:/'">D:</button></div>
+        <p class="muted">不会再自动扫描目录；这里仅把路径填回表单，实际权限由后端执行时判断。</p>
       </section>
-      <div v-if="state.pathLoading" class="path-empty"><b>正在读取目录...</b><span>如果目录很大，后端可能需要几秒。</span></div>
-      <div v-else-if="!state.pathItems.length" class="path-empty"><b>这里没有可展示的条目</b><span>可能是空目录，也可能是后端安全规则不允许列出。你仍然可以手动输入路径后点“选择当前路径”。</span></div>
-      <div v-else class="path-list"><button v-for="item in state.pathItems" :key="item.path" class="path-row" @click="item.is_dir ? browsePath(item.path) : choosePath(item)"><span>{{ item.is_dir ? "目录" : "文件" }}</span><b>{{ item.name }}</b><small>{{ item.path }}</small></button></div>
+      <div class="path-empty"><b>路径选择已改为系统窗口优先</b><span>如果你刚刚取消了 Windows 选择器，可以直接在上面粘贴路径。</span></div>
     </aside>
   </div>
 
-  <div v-if="state.settingsOpen" class="modal-backdrop" @click.self="state.settingsOpen = false">
+  <div v-if="state.settingsOpen" class="modal-backdrop" @click.self="closeAllModals">
     <aside class="drawer settings-drawer">
-      <div class="drawer-head"><div><h2>连接设置</h2><span>通常不用改。后端开启 skill API 校验时才需要这里。</span></div><button class="icon-button" @click="state.settingsOpen = false">×</button></div>
-      <label><span>X-Skill-Token 覆盖值</span><input v-model="state.token" type="password" placeholder="通常留空，代理会读取项目 .env" @change="onTokenChange" /><small>它只是 `/skills/v1/call` 的本机鉴权头，不是业务参数。现在由 Vite/Python 本机代理自动读取项目 `.env` 的 `SKILL_API_TOKEN` 注入；只有你想手动覆盖时才填这里。</small></label>
+      <div class="drawer-head"><div><h2>高级设置</h2><span>连接、指令面板、模块库和已保存流程都收在这里。</span></div><button class="icon-button" @click="closeAllModals">×</button></div>
+      <section class="advanced-section">
+        <h3>指令面板</h3>
+        <input v-model="state.commandQuery" class="command-search" placeholder="输入：状态 / 流程 / 日志 / 路径 / ASR / P4 ..." />
+        <div class="command-list compact"><button v-for="command in filteredCommands" :key="command.id" class="command-item" @click="runCommand(command)"><span>{{ command.title }}</span><b>{{ command.hint }}</b></button></div>
+      </section>
+      <section class="advanced-section">
+        <h3>连接</h3>
+        <label><span>X-Skill-Token 覆盖值</span><input v-model="state.token" type="password" placeholder="通常留空，代理会读取项目 .env" @change="onTokenChange" /><small>只有后端开启 skill API 校验并且你要手动覆盖时才填。</small></label>
+      </section>
+      <section class="advanced-section">
+        <h3>维护清理</h3>
+        <div class="button-row wrap">
+          <button class="small-button danger" @click="cleanupWithConfirm('agent_jobs', 'Agent 后台 job 状态')">清 Agent Jobs</button>
+          <button class="small-button danger" @click="cleanupWithConfirm('production_runs', '生产任务历史')">清生产队列</button>
+          <button class="small-button danger" @click="cleanupWithConfirm('custom_pipeline_runs', '自定义流程运行记录')">清流程运行</button>
+          <button class="small-button danger" @click="cleanupWithConfirm('all_brain_messages', '全部对话日志')">清全部对话</button>
+          <button class="small-button danger" @click="cleanupWithConfirm('skill_calls', '全部技能日志')">清技能日志</button>
+          <button class="small-button danger" @click="cleanupWithConfirm('all_memory', '全部记忆和摘要')">清全部记忆</button>
+        </div>
+      </section>
+      <section class="advanced-section">
+        <div class="panel-title"><h3>已保存流程</h3><button class="small-button" @click="loadFlowDefinitions">刷新</button></div>
+        <article v-if="!state.flowDefinitions.length" class="log-item"><h3>暂无保存记录</h3><pre>保存后会出现在这里。</pre></article>
+        <article v-for="flow in state.flowDefinitions" :key="flow.name" class="saved-flow-card">
+          <div><h3>{{ flow.name }}</h3><span>{{ flow.description || flow.path }}</span></div>
+          <button class="small-button" @click="loadFlowDefinition(flow.name); closeAllModals(); switchView('builder')">载入</button>
+        </article>
+      </section>
+      <section class="advanced-section">
+        <h3>模块库</h3>
+        <button v-for="module in flowModules" :key="module.key" class="module-palette-card" @click="addFlowStep(module.key); switchView('builder'); closeAllModals()">
+          <strong>{{ module.title }}</strong><span>{{ module.subtitle }}</span><b>{{ module.key }}</b>
+        </button>
+      </section>
     </aside>
   </div>
 
-  <div v-if="state.commandOpen" class="modal-backdrop" @click.self="state.commandOpen = false">
+  <div v-if="state.commandOpen" class="modal-backdrop" @click.self="closeAllModals">
     <aside class="command-dialog">
-      <div class="drawer-head"><div><h2>Miku 指令面板</h2><span>搜索页面、后端动作、流程操作。</span></div><button class="icon-button" @click="state.commandOpen = false">×</button></div>
+      <div class="drawer-head"><div><h2>Miku 指令面板</h2><span>搜索页面、后端动作、流程操作。</span></div><button class="icon-button" @click="closeAllModals">×</button></div>
       <input v-model="state.commandQuery" class="command-search" placeholder="输入：状态 / 流程 / 日志 / 路径 / ASR / RAG ..." />
       <div class="command-list"><button v-for="command in filteredCommands" :key="command.id" class="command-item" @click="runCommand(command)"><span>{{ command.title }}</span><b>{{ command.hint }}</b></button></div>
     </aside>
   </div>
 
-  <div v-if="state.detail" class="modal-backdrop" @click.self="state.detail = null">
-    <aside class="drawer detail-drawer"><div class="drawer-head"><h2>{{ state.detail.title }}</h2><button class="icon-button" @click="state.detail = null">×</button></div><pre class="json-box">{{ JSON.stringify(state.detail.payload, null, 2) }}</pre></aside>
+  <div v-if="state.detail" class="modal-backdrop" @click.self="closeAllModals">
+    <aside class="drawer detail-drawer"><div class="drawer-head"><h2>{{ state.detail.title }}</h2><button class="icon-button" @click="closeAllModals">×</button></div><pre class="json-box">{{ JSON.stringify(state.detail.payload, null, 2) }}</pre></aside>
   </div>
 
   <div class="toast-host"><div v-for="item in state.toasts" :key="item.id" class="toast" :class="item.type"><b>{{ item.type === "bad" ? "注意" : item.type === "ok" ? "完成" : "提示" }}</b><span>{{ item.message }}</span></div></div>

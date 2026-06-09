@@ -8,6 +8,8 @@ from pathlib import Path
 def main() -> int:
     config_path = Path(sys.argv[1]).resolve()
     tool_dir = Path(sys.argv[2]).resolve() if len(sys.argv) > 2 else config_path.parent
+    root_dir = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root_dir))
     sys.path.insert(0, str(tool_dir))
     from workflow import Workflow, load_config
 

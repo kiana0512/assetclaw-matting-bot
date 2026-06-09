@@ -95,7 +95,7 @@ def dedup_folder(folder: str, diff_threshold: float = 2.5,
 
 
 def _renumber(folder: str, kept: List[str], log: Callable[[str], None]) -> None:
-    """把保留的帧重新连续编号为 0001.png、0002.png ...（两阶段重命名防冲突）。"""
+    """把保留的帧重新连续编号为 0000.png、0001.png ...（两阶段重命名防冲突）。"""
     width = max(4, len(str(len(kept))))
     # 阶段一：先改成临时名，避免与现有文件名冲突
     tmp_names = []
@@ -104,7 +104,7 @@ def _renumber(folder: str, kept: List[str], log: Callable[[str], None]) -> None:
         os.rename(os.path.join(folder, name), os.path.join(folder, tmp))
         tmp_names.append(tmp)
     # 阶段二：临时名 -> 最终连续编号
-    for i, tmp in enumerate(tmp_names, start=1):
+    for i, tmp in enumerate(tmp_names):
         final = f"{i:0{width}d}.png"
         os.rename(os.path.join(folder, tmp), os.path.join(folder, final))
-    log(f"已重新编号为 {1:0{width}d}.png ~ {len(kept):0{width}d}.png")
+    log(f"已重新编号为 {0:0{width}d}.png ~ {len(kept) - 1:0{width}d}.png")

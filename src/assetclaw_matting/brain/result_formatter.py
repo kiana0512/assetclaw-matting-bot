@@ -255,7 +255,12 @@ def format_skill_results(results: list[dict[str, Any]], max_items: int = 8) -> s
                 lines.append(f"工作区：{payload.get('workspace_root')}")
             lines.append(f"下载目录：{payload.get('download_dir')}")
             lines.append(f"抽帧输出：{payload.get('export_dir')}")
-            lines.append(f"fps：{payload.get('fps')}，最多帧数：{payload.get('max_frames') or '不限'}，相似阈值：{payload.get('diff_threshold')}")
+            lines.append(
+                f"fps：{payload.get('fps')}，最多帧数：{payload.get('max_frames') or '不限'}，"
+                f"剔除关键帧：{'开' if payload.get('dedup_enabled') else '关'}，相似阈值：{payload.get('diff_threshold')}"
+            )
+            if payload.get("selection_root") or payload.get("selection_emotions"):
+                lines.append(f"筛选：{payload.get('selection_root') or '全部'}/{'、'.join(payload.get('selection_emotions') or ['全部'])}")
             lines.append("范围：所有带动画视频附件的记录")
         elif skill == "frame.run_start":
             lines.append(f"抽帧任务已启动：{payload.get('run_id')}")
@@ -280,6 +285,21 @@ def format_skill_results(results: list[dict[str, Any]], max_items: int = 8) -> s
         elif skill == "pipeline.run_list":
             lines.extend(_format_pipeline_list(payload, max_items))
         elif skill == "pipeline.run_cancel":
+            lines.append(f"{payload.get('run_id')}：{payload.get('status')}")
+        elif skill.startswith("unity_import."):
+            lines.extend(_format_unity_import(payload))
+        elif skill == "animation_flow.preview":
+            lines.extend(_format_animation_flow(payload, preview=True))
+        elif skill == "animation_flow.start":
+            lines.extend(_format_animation_flow(payload))
+        elif skill == "animation_flow.status":
+            lines.extend(_format_animation_flow(payload))
+        elif skill == "animation_flow.list":
+            items = payload.get("items") or []
+            lines.append(f"完整动画流程任务：{payload.get('count', len(items))} 个")
+            for entry in items[:max_items]:
+                lines.append(f"- {entry.get('run_id')}：{entry.get('status')} / {entry.get('current_stage')}")
+        elif skill == "animation_flow.cancel":
             lines.append(f"{payload.get('run_id')}：{payload.get('status')}")
         elif skill == "animation.status":
             lines.extend(_format_animation_status(payload))
@@ -589,6 +609,20 @@ def _format_pipeline_preview(payload: dict[str, Any]) -> list[str]:
         f"抠图输出：{payload.get('matte_output_dir')}",
         f"平滑输出：{payload.get('smooth_output_dir')}",
     ])
+    frame = payload.get("frame") or {}
+    if frame:
+        lines.append(
+            f"抽帧：{frame.get('fps')}fps，最多帧数 {frame.get('max_frames') or '不限'}，"
+            f"剔除关键帧 {'开' if frame.get('dedup_enabled') else '关'}"
+        )
+        if frame.get("selection_root") or frame.get("selection_emotions"):
+            lines.append(f"筛选：{frame.get('selection_root') or '全部'}/{'、'.join(frame.get('selection_emotions') or ['全部'])}")
+    cherry = payload.get("cherry") or {}
+    if cherry:
+        lines.append(
+            f"后处理：{cherry.get('resize_width')}x{cherry.get('resize_height')}，"
+            f"时序平滑 {'开' if cherry.get('use_smooth') else '关'}"
+        )
     return lines
 
 
@@ -634,6 +668,54 @@ def _format_pipeline_list(payload: dict[str, Any], max_items: int) -> list[str]:
     for item in items[:max_items]:
         lines.append(f"- {item.get('run_id')} {item.get('status')} 当前：{item.get('current_step')}")
         lines.append(f"  输出：{item.get('smooth_output_dir')}")
+    return lines
+
+
+def _format_unity_import(payload: dict[str, Any]) -> list[str]:
+    lines = ["Unity 动画贴图导入："]
+    if payload.get("unity_ready"):
+        lines.append(f"unity_ready：{payload.get('unity_ready')}")
+    if payload.get("unity_project"):
+        lines.append(f"Unity Project：{payload.get('unity_project')}")
+    api = payload.get("api") or {}
+    if api:
+        lines.append(f"MCP：{'可用' if api.get('available') else '不可用'} {api.get('url') or ''}".rstrip())
+    for package in payload.get("packages") or []:
+        lines.append(
+            f"- {package.get('package')}：任务 {package.get('task_count', 0)}，"
+            f"图片 {package.get('frame_count', 0)}"
+        )
+    if payload.get("error"):
+        lines.append(f"暂停原因：{payload.get('error')}")
+    if payload.get("message"):
+        lines.append(str(payload.get("message")))
+    return lines
+
+
+def _format_animation_flow(payload: dict[str, Any], preview: bool = False) -> list[str]:
+    title = "完整动画自动化流程预览：" if preview else f"完整动画自动化流程：{payload.get('run_id') or ''}".rstrip()
+    lines = [title]
+    if payload.get("status"):
+        lines.append(f"状态：{payload.get('status')}，当前：{payload.get('current_stage')}")
+    lines.append(f"工作区：{payload.get('date_root')}")
+    lines.append(f"unity_ready：{payload.get('unity_ready')}")
+    lines.append("步骤：")
+    for stage in payload.get("stages") or []:
+        lines.append(f"- {stage.get('status')} {stage.get('label')}")
+    children = payload.get("children") or {}
+    if children.get("pipeline_run_id"):
+        lines.append(f"1-4 子流程：{children.get('pipeline_run_id')}")
+    unity = children.get("unity_import") or {}
+    if unity:
+        lines.append(f"Unity 导入：{'完成' if unity.get('ok') else unity.get('error')}")
+    p4 = payload.get("p4") or {}
+    if p4.get("next_steps"):
+        lines.append("P4 下一步需要分步确认：")
+        for step in p4.get("next_steps", [])[:6]:
+            lines.append(f"- {step.get('skill')} {step.get('arguments')}")
+    if payload.get("error"):
+        lines.append(f"暂停/错误：{payload.get('error')}")
+    lines.append("P4 submit：disabled")
     return lines
 
 

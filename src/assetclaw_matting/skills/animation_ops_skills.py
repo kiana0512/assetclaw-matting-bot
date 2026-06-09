@@ -50,6 +50,9 @@ def manual_smooth_current(
     output_dir: str | None = None,
     skip_existing: bool = False,
     notify_interval_seconds: int = 300,
+    use_smooth: bool = False,
+    resize_width: int = 384,
+    resize_height: int = 512,
 ) -> dict[str, Any]:
     from assetclaw_matting.skills.cherry_skills import run_start
 
@@ -63,6 +66,9 @@ def manual_smooth_current(
         max_images=50000,
         skip_existing=bool(skip_existing),
         notify_interval_seconds=int(notify_interval_seconds),
+        use_smooth=bool(use_smooth),
+        resize_width=int(resize_width),
+        resize_height=int(resize_height),
     )
     return {
         "ok": True,
@@ -141,6 +147,7 @@ def preview_manual_smooth_current_confirmation(arguments: dict[str, Any], confir
             f"输出：{dst}",
             f"当前可处理图片：{total} 张",
             f"跳过已有输出：{'是' if arguments.get('skip_existing') else '否'}",
+            f"后处理：{int(arguments.get('resize_width') or 384)}x{int(arguments.get('resize_height') or 512)}，时序平滑：{'开' if arguments.get('use_smooth') else '关'}",
             f"回复：确认执行 {confirmation_id}",
         ]
         return "\n".join(lines)

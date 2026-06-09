@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     brain_memory_compact_after_messages: int = 20
     brain_memory_compact_keep_messages: int = 8
     brain_memory_compact_max_chars: int = 2400
+    agent_queue_enabled: bool = True
+    agent_queue_max_workers: int = 2
+    agent_queue_poll_seconds: float = 0.25
+    agent_queue_dispatch_grace_seconds: float = 2.0
+    skill_threadpool_workers: int = 8
 
     llm_proxy_enabled: bool = True
     llm_proxy_base_url: str = "https://llm-proxy.lilithgames.com"

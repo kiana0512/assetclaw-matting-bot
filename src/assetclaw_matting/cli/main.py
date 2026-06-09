@@ -43,14 +43,38 @@ def cmd_worker(_: argparse.Namespace) -> None:
     run_forever()
 
 
+def cmd_build_unity_ready(args: argparse.Namespace) -> None:
+    from pathlib import Path
+    from tools.animation_automation.core import build_unity_ready, format_unity_ready_summary
+
+    init_runtime()
+    date_root = Path(args.date_root).resolve()
+    report = build_unity_ready(
+        date_root=date_root,
+        overwrite=bool(args.overwrite),
+        copy_mode=args.copy_mode,
+        include_empty_types=bool(args.include_empty_types),
+        scene_unity_category=args.scene_unity_category,
+        missing_smooth_is_error=not bool(args.missing_smooth_warning),
+    )
+    print(format_unity_ready_summary(date_root, report))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="AssetClaw Win3090 Animation Butler")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("init-db")
     sub.add_parser("gateway")
     sub.add_parser("worker")
+    ready = sub.add_parser("build-unity-ready")
+    ready.add_argument("--date-root", required=True)
+    ready.add_argument("--overwrite", action="store_true")
+    ready.add_argument("--copy-mode", choices=("copy", "hardlink"), default="copy")
+    ready.add_argument("--include-empty-types", action="store_true")
+    ready.add_argument("--scene-unity-category", default="角色动画")
+    ready.add_argument("--missing-smooth-warning", action="store_true")
     args = parser.parse_args()
-    dispatch = {"init-db": cmd_init_db, "gateway": cmd_gateway, "worker": cmd_worker}
+    dispatch = {"init-db": cmd_init_db, "gateway": cmd_gateway, "worker": cmd_worker, "build-unity-ready": cmd_build_unity_ready}
     if args.command not in dispatch:
         parser.print_help()
         sys.exit(1)

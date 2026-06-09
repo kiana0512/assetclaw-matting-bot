@@ -84,8 +84,8 @@ class LocalFrameExtractor:
                         else:
                             keep = False
                     if keep:
-                        out_idx += 1
                         _save_png(os.path.join(dest, f"{out_idx:04d}.png"), frame)
+                        out_idx += 1
                         if self.max_frames and out_idx >= self.max_frames:
                             break
                     frame_idx += 1

@@ -28,6 +28,7 @@ def test_frame_tool_info_and_preview_are_safe() -> None:
     preview = frame_preview(download_dir="E:\\raw_videos", export_dir="E:\\output_frames", fps=24, diff_threshold=0.2)
     assert preview["export_dir"] == "E:\\output_frames"
     assert preview["diff_threshold"] == 0.2
+    assert preview["dedup_enabled"] is False
 
     text = format_skill_results([{"ok": True, "skill": "frame.run_preview", "result": preview}])
     assert "抽帧任务预览" in text
@@ -41,15 +42,23 @@ def test_pipeline_preview_registry_and_router() -> None:
         smooth_output_dir="E:\\output_smooth",
     )
     assert preview["steps"][0].startswith("1.")
+    assert preview["frame"]["dedup_enabled"] is False
+    assert preview["frame"]["selection_root"] == ""
+    assert preview["frame"]["selection_emotions"] == []
+    assert preview["cherry"]["resize_width"] == 384
+    assert preview["cherry"]["resize_height"] == 512
+    assert preview["cherry"]["use_smooth"] is False
     assert get_skill_meta("pipeline.run_start")["requires_confirmation"] is True
     assert get_skill_meta("frame.run_start")["requires_confirmation"] is True
 
     brain = LocalCommandBrain()
     assert brain._infer_tool_calls("开始飞书抽帧，下载到 E:\\raw_videos，抽帧输出 E:\\output_frames")[0].skill == "frame.run_start"
-    assert brain._infer_tool_calls("执行动画自动化流程 E:\\raw_videos E:\\output_frames E:\\output_matting E:\\output_smooth")[0].skill == "pipeline.run_start"
+    assert brain._infer_tool_calls("执行旧三步流程 E:\\raw_videos E:\\output_frames E:\\output_matting E:\\output_smooth")[0].skill == "pipeline.run_start"
 
     text = format_skill_results([{"ok": True, "skill": "pipeline.run_preview", "result": preview}])
     assert "抽帧 -> ComfyUI 抠图 -> Cherry 平滑" in text
+    assert "384x512" in text
+    assert "时序平滑 关" in text
 
 
 def test_default_animation_workspace_paths_are_on_e_drive() -> None:
@@ -110,7 +119,7 @@ def test_frame_workflow_processes_video_records_without_progress_filter(tmp_path
         def process_video(self, video_path: str, out_subdir: str) -> str:
             dst = self.export_dir / out_subdir
             dst.mkdir(parents=True, exist_ok=True)
-            (dst / "0001.png").write_bytes(b"png")
+            (dst / "0000.png").write_bytes(b"png")
             return str(dst)
 
     class FakeClient:
@@ -166,9 +175,100 @@ def test_frame_workflow_processes_video_records_without_progress_filter(tmp_path
             else:
                 sys.modules[name] = module
 
-    assert (tmp_path / "videos" / "gary" / "idle" / "gary_idle.mp4").exists()
-    assert (tmp_path / "frames" / "gary" / "idle" / "0001.png").exists()
-    assert (tmp_path / "frames" / "_pipeline_manifest.json").exists()
+    assert (tmp_path / "emoji" / "default" / "videos" / "gary-idle" / "source.mp4").exists()
+    assert (tmp_path / "emoji" / "default" / "frames" / "gary-idle" / "0000.png").exists()
+    assert (tmp_path / "emoji" / "default" / "frames" / "_pipeline_manifest.json").exists()
+
+
+def test_frame_workflow_can_filter_scene_idle_records(tmp_path) -> None:
+    tool_dir = Path("E:/assetclaw-matting-bot/feishu_frame_tool")
+    if str(tool_dir) not in sys.path:
+        sys.path.insert(0, str(tool_dir))
+
+    class FakeExtractor:
+        def __init__(self, export_dir: str, fps: int, max_frames: int, logger):
+            self.export_dir = Path(export_dir)
+
+        def process_video(self, video_path: str, out_subdir: str) -> str:
+            dst = self.export_dir / out_subdir
+            dst.mkdir(parents=True, exist_ok=True)
+            (dst / "0000.png").write_bytes(b"png")
+            return str(dst)
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.records = [
+                {"record_id": "rec_scene", "fields": {"角色": "场景动画"}},
+                {"record_id": "rec_expr", "fields": {"角色": "表情动画"}},
+                {
+                    "record_id": "rec_scene_role",
+                    "fields": {"角色": "gary", "父記錄": [{"record_ids": ["rec_scene"]}]},
+                },
+                {
+                    "record_id": "rec_scene_idle",
+                    "fields": {
+                        "角色": "idle",
+                        "父記錄": [{"record_ids": ["rec_scene_role"]}],
+                        "动画": [{"name": "scene.mp4", "type": "video/mp4"}],
+                    },
+                },
+                {
+                    "record_id": "rec_expr_role",
+                    "fields": {"角色": "gary", "父記錄": [{"record_ids": ["rec_expr"]}]},
+                },
+                {
+                    "record_id": "rec_expr_idle",
+                    "fields": {
+                        "角色": "idle",
+                        "父記錄": [{"record_ids": ["rec_expr_role"]}],
+                        "动画": [{"name": "expr.mp4", "type": "video/mp4"}],
+                    },
+                },
+            ]
+
+        def list_records(self):
+            return self.records
+
+        def download_attachment(self, attachment, dest_dir, field_name="", record_id="", save_name=""):
+            dst = Path(dest_dir) / save_name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(record_id.encode("utf-8"))
+            return str(dst)
+
+    fake_client = FakeClient()
+    fake_feishu = types.SimpleNamespace(FeishuClient=types.SimpleNamespace(from_feishu_config=lambda *args, **kwargs: fake_client))
+    fake_extractor = types.SimpleNamespace(LocalFrameExtractor=FakeExtractor)
+    fake_dedup = types.SimpleNamespace(dedup_folder=lambda *args, **kwargs: None)
+    old_modules = {name: sys.modules.get(name) for name in ("feishu_client", "extractor", "dedup", "workflow")}
+    sys.modules["feishu_client"] = fake_feishu
+    sys.modules["extractor"] = fake_extractor
+    sys.modules["dedup"] = fake_dedup
+    sys.modules.pop("workflow", None)
+    try:
+        from workflow import Workflow
+
+        workflow = Workflow(
+            {
+                "feishu": {},
+                "fields": {"animation": "动画", "role": "角色", "parent": "父記錄"},
+                "paths": {"download_dir": str(tmp_path / "videos"), "export_dir": str(tmp_path / "frames")},
+                "selection": {"root": "场景动画", "emotions": ["idle"]},
+                "dedup": {"enabled": False},
+                "framepacker": {"fps": 24, "max_frames": 24},
+            }
+        )
+        workflow.run()
+    finally:
+        for name, module in old_modules.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+    assert (tmp_path / "scene" / "default" / "videos" / "gary-idle" / "source.mp4").read_bytes() == b"rec_scene_idle"
+    manifest = (tmp_path / "scene" / "default" / "frames" / "_pipeline_manifest.json").read_text(encoding="utf-8")
+    assert "rec_scene_idle" in manifest
+    assert "rec_expr_idle" not in manifest
 
 
 def test_frame_workflow_refuses_video_record_without_character_emotion() -> None:

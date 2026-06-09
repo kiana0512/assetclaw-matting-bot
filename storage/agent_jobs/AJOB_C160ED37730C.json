@@ -1,0 +1,24 @@
+{
+  "ok": true,
+  "job_id": "AJOB_C160ED37730C",
+  "id": "AJOB_C160ED37730C",
+  "channel": "brain_test",
+  "conversation_id": "test",
+  "user_id": "local",
+  "trace_id": "d87e2e8c0a5a4d3d85beab35de122276",
+  "status": "DONE",
+  "queued_at": "2026-06-09T16:59:37",
+  "started_at": "2026-06-09T16:59:39",
+  "finished_at": "2026-06-09T16:59:40",
+  "error": "",
+  "response": {
+    "text": "这句我接住了。想让我陪你聊会儿，还是直接说想做什么？",
+    "tool_calls": [],
+    "raw": {
+      "llm_tool_json": "{\"type\":\"final\",\"content\":\"这句我接住了。想让我陪你聊会儿，还是直接说想做什么？\"}"
+    },
+    "provider": "deepseek"
+  },
+  "last_progress": "正在理解意图并选择可用技能",
+  "text_preview": "我了个豆"
+}

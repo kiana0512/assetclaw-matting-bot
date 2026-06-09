@@ -1,0 +1,38 @@
+{
+  "ok": true,
+  "job_id": "AJOB_22AE3F6F39FC",
+  "id": "AJOB_22AE3F6F39FC",
+  "channel": "brain_test",
+  "conversation_id": "test",
+  "user_id": "local",
+  "trace_id": "6711e5b95b9243b2973b20b1c0ee6708",
+  "status": "DONE",
+  "queued_at": "2026-06-09T11:57:03",
+  "started_at": "2026-06-09T11:57:05",
+  "finished_at": "2026-06-09T11:57:07",
+  "error": "",
+  "response": {
+    "text": "image.ocr 失败：path does not exist: storage\\feishu_inbox\\20260602-154409.jpg",
+    "tool_calls": [
+      {
+        "skill": "image.ocr",
+        "arguments": {
+          "image_path": "storage\\feishu_inbox\\20260602-154409.jpg"
+        }
+      }
+    ],
+    "raw": {
+      "llm_tool_json": "{\"type\":\"tool_calls\",\"tool_calls\":[{\"name\":\"image.ocr\",\"arguments\":{\"image_path\":\"storage\\\\feishu_inbox\\\\20260602-154409.jpg\"}}]}",
+      "skill_results": [
+        {
+          "ok": false,
+          "skill": "image.ocr",
+          "error": "path does not exist: storage\\feishu_inbox\\20260602-154409.jpg"
+        }
+      ]
+    },
+    "provider": "deepseek"
+  },
+  "last_progress": "工具执行完成，正在整理回复",
+  "text_preview": "111\n\n[WebUI 附件已上传到本机后端：20260602-154409.jpg。]"
+}

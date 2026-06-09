@@ -32,14 +32,43 @@ def run_preview(
     fps: int = 24,
     max_frames: int = 0,
     diff_threshold: float = 0.2,
+    dedup_enabled: bool = False,
+    dedup_renumber: bool = False,
+    selection_root: str | None = None,
+    selection_emotions: list[str] | None = None,
+    selection_types: list[str] | None = None,
+    progress_include: list[str] | None = None,
+    progress_exclude: list[str] | None = None,
+    use_smooth: bool = False,
+    resize_width: int = 384,
+    resize_height: int = 512,
+    resource_json_enabled: bool = True,
+    resource_json_output_path: str | None = None,
+    resource_json_types: list[str] | None = None,
 ) -> dict[str, Any]:
     paths = _resolve_pipeline_paths(input_dir, frame_output_dir, matte_output_dir, smooth_output_dir)
+    frame_options = _frame_options(
+        fps,
+        max_frames,
+        diff_threshold,
+        dedup_enabled,
+        dedup_renumber,
+        selection_root,
+        selection_emotions,
+        selection_types,
+        progress_include,
+        progress_exclude,
+    )
+    cherry_options = _cherry_options(use_smooth, resize_width, resize_height)
+    resource_json = _resource_json_options(resource_json_enabled, resource_json_output_path, resource_json_types)
     return {
         "ok": True,
         **paths,
         "workflow_path": workflow_path,
         "steps": ["1. 飞书表格下载视频并抽帧", "2. ComfyUI 批量抠图", "3. Cherry 帧序列平滑/缩放/锐化"],
-        "frame": {"fps": int(fps), "max_frames": int(max_frames), "diff_threshold": float(diff_threshold)},
+        "frame": frame_options,
+        "cherry": cherry_options,
+        "resource_json": resource_json,
     }
 
 
@@ -52,18 +81,53 @@ def run_start(
     fps: int = 24,
     max_frames: int = 0,
     diff_threshold: float = 0.2,
+    dedup_enabled: bool = False,
+    dedup_renumber: bool = False,
+    selection_root: str | None = None,
+    selection_emotions: list[str] | None = None,
+    selection_types: list[str] | None = None,
+    progress_include: list[str] | None = None,
+    progress_exclude: list[str] | None = None,
+    use_smooth: bool = False,
+    resize_width: int = 384,
+    resize_height: int = 512,
+    resource_json_enabled: bool = True,
+    resource_json_output_path: str | None = None,
+    resource_json_types: list[str] | None = None,
     notify_interval_seconds: int = 60,
 ) -> dict[str, Any]:
     from assetclaw_matting.db.sqlite import get_connection
     from assetclaw_matting.runtime_context import get_runtime_context
 
-    preview = run_preview(input_dir, frame_output_dir, matte_output_dir, smooth_output_dir, workflow_path, fps, max_frames, diff_threshold)
+    preview = run_preview(
+        input_dir,
+        frame_output_dir,
+        matte_output_dir,
+        smooth_output_dir,
+        workflow_path,
+        fps,
+        max_frames,
+        diff_threshold,
+        dedup_enabled,
+        dedup_renumber,
+        selection_root,
+        selection_emotions,
+        selection_types,
+        progress_include,
+        progress_exclude,
+        use_smooth,
+        resize_width,
+        resize_height,
+        resource_json_enabled,
+        resource_json_output_path,
+        resource_json_types,
+    )
     run_id = _run_id()
     ctx = get_runtime_context()
     options = {
-        "fps": int(fps),
-        "max_frames": int(max_frames),
-        "diff_threshold": float(diff_threshold),
+        **preview["frame"],
+        "cherry": preview["cherry"],
+        "resource_json": preview["resource_json"],
         "notify_interval_seconds": max(30, min(int(notify_interval_seconds), 3600)),
         "chat_id": (ctx.get("chat_id") or "") if ctx.get("channel") == "feishu" else "",
         "archived": False,
@@ -179,7 +243,15 @@ def preview_run_start_confirmation(arguments: dict[str, Any], confirmation_id: s
         f"抽帧输出：{preview['frame_output_dir']}",
         f"抠图输出：{preview['matte_output_dir']}",
         f"平滑输出：{preview['smooth_output_dir']}",
-        f"fps：{preview['frame']['fps']}，最多帧数：{preview['frame']['max_frames']}，相似阈值：{preview['frame']['diff_threshold']}",
+        (
+            f"fps：{preview['frame']['fps']}，最多帧数：{preview['frame']['max_frames']}，"
+            f"剔除关键帧：{'开' if preview['frame']['dedup_enabled'] else '关'}，"
+            f"筛选：{preview['frame']['selection_root'] or '全部'}/{','.join(preview['frame']['selection_emotions'] or ['全部'])}"
+        ),
+        (
+            f"后处理：{preview['cherry']['resize_width']}x{preview['cherry']['resize_height']}，"
+            f"时序平滑：{'开' if preview['cherry']['use_smooth'] else '关'}"
+        ),
         f"回复：确认执行 {confirmation_id}",
     ]
     return "\n".join(lines)
@@ -201,12 +273,81 @@ def _resolve_pipeline_paths(
     }
 
 
+def _frame_options(
+    fps: int,
+    max_frames: int,
+    diff_threshold: float,
+    dedup_enabled: bool,
+    dedup_renumber: bool,
+    selection_root: str,
+    selection_emotions: list[str] | None,
+    selection_types: list[str] | None,
+    progress_include: list[str] | None,
+    progress_exclude: list[str] | None,
+) -> dict[str, Any]:
+    return {
+        "fps": int(fps),
+        "max_frames": int(max_frames),
+        "diff_threshold": float(diff_threshold),
+        "dedup_enabled": bool(dedup_enabled),
+        "dedup_renumber": bool(dedup_renumber),
+        "selection_root": str(selection_root or ""),
+        "selection_emotions": list(selection_emotions or []),
+        "selection_types": list(selection_types or []),
+        "progress_include": list(progress_include or []),
+        "progress_exclude": list(progress_exclude or []),
+    }
+
+
+def _cherry_options(use_smooth: bool, resize_width: int, resize_height: int) -> dict[str, Any]:
+    return {
+        "use_smooth": bool(use_smooth),
+        "resize_width": int(resize_width),
+        "resize_height": int(resize_height),
+    }
+
+
+def _resource_json_options(
+    enabled: bool,
+    output_path: str | None,
+    types: list[str] | None,
+) -> dict[str, Any]:
+    return {
+        "enabled": bool(enabled),
+        "output_path": output_path or "",
+        "types": list(types or []),
+    }
+
+
 def _workspace_root_from_paths(*paths: str) -> str:
     for raw in paths:
         path = Path(str(raw or ""))
         if path.name.lower() in {"videos", "frames", "matte", "smooth"}:
             return str(path.parent)
     return ""
+
+
+def _split_route_roots(workspace_root: str) -> list[Path]:
+    if not workspace_root:
+        return []
+    root = Path(workspace_root)
+    routes = []
+    for asset_kind in ("scene", "emoji"):
+        for variant in ("default", "temporal_smooth"):
+            route = root / asset_kind / variant
+            if route.exists():
+                routes.append(route)
+    return routes
+
+
+def _route_cherry_options(route: Path) -> dict[str, Any] | None:
+    parts = [part.lower() for part in route.parts]
+    asset_kind = "scene" if "scene" in parts else ("emoji" if "emoji" in parts else "")
+    variant = "temporal_smooth" if "temporal_smooth" in parts else "default"
+    if not asset_kind:
+        return None
+    width, height = (384, 512) if asset_kind == "scene" else (256, 256)
+    return _cherry_options(variant == "temporal_smooth", width, height)
 
 
 def _start_worker(run_id: str) -> None:
@@ -230,7 +371,21 @@ def _worker(run_id: str) -> None:
         from assetclaw_matting.skills.frame_skills import run_start as frame_start, run_status as frame_status
 
         _notify(run_id, "动画自动化流程：开始飞书下载和抽帧")
-        frame = frame_start(download_dir=row["input_dir"], export_dir=row["frame_output_dir"], fps=opts["fps"], max_frames=opts.get("max_frames", 0), diff_threshold=opts["diff_threshold"], notify_interval_seconds=opts["notify_interval_seconds"])
+        frame = frame_start(
+            download_dir=row["input_dir"],
+            export_dir=row["frame_output_dir"],
+            fps=opts["fps"],
+            max_frames=opts.get("max_frames", 0),
+            diff_threshold=opts["diff_threshold"],
+            dedup_enabled=opts.get("dedup_enabled", False),
+            dedup_renumber=opts.get("dedup_renumber", False),
+            root=opts.get("selection_root") or None,
+            emotions=opts.get("selection_emotions") or None,
+            types=opts.get("selection_types") or None,
+            progress_include=opts.get("progress_include") or None,
+            progress_exclude=opts.get("progress_exclude") or None,
+            notify_interval_seconds=opts["notify_interval_seconds"],
+        )
         _update_ids(run_id, frame_run_id=frame["run_id"], current_step="frame")
         if not _wait_until_done(lambda: frame_status(frame["run_id"]), run_id):
             return
@@ -238,51 +393,76 @@ def _worker(run_id: str) -> None:
         if status.get("status") != "DONE":
             _fail(run_id, f"抽帧失败：{status.get('error') or status.get('status')}")
             return
-        if not any(Path(row["frame_output_dir"]).rglob("*.png")):
+        route_roots = _split_route_roots(
+            _workspace_root_from_paths(row["input_dir"], row["frame_output_dir"], row["matte_output_dir"], row["smooth_output_dir"])
+        )
+        active_routes = [route for route in route_roots if any((route / "frames").rglob("*.png"))]
+        if not any(Path(row["frame_output_dir"]).rglob("*.png")) and not active_routes:
             _fail(run_id, "抽帧没有产出图片。请确认飞书表格里有“动画”视频附件，并且角色/情绪父子记录对应正确。")
             return
+        resource_json = opts.get("resource_json") or {}
+        if resource_json.get("enabled", True) and (Path(row["frame_output_dir"]) / "_pipeline_manifest.json").exists():
+            output_path = resource_json.get("output_path") or str(Path(row["frame_output_dir"]).parent / "animation_resource_manifest.json")
+            _export_resource_json(
+                Path(row["frame_output_dir"]) / "_pipeline_manifest.json",
+                output_path,
+                resource_json.get("types") or [],
+            )
 
         from assetclaw_matting.skills.comfyui_skills import run_start as comfy_start, run_status as comfy_status
 
         _notify(run_id, f"动画自动化流程：抽帧完成，开始 ComfyUI 抠图\n已登记视频：{status.get('manifest_count', 0)} 条")
-        comfy = comfy_start(
-            workflow_path=row["workflow_path"] or None,
-            input_dir=row["frame_output_dir"],
-            output_dir=row["matte_output_dir"],
-            recursive=True,
-            preserve_structure=True,
-            max_images=50000,
-            skip_existing=True,
-            notify_interval_seconds=opts["notify_interval_seconds"],
-        )
-        _update_ids(run_id, comfyui_run_id=comfy["run_id"], current_step="comfyui")
-        if not _wait_until_done(lambda: comfy_status(comfy["run_id"], include_gpu=False), run_id):
-            return
-        status = comfy_status(comfy["run_id"], include_gpu=False)
-        if status.get("status") not in {"DONE", "DONE_WITH_ERRORS"}:
-            _fail(run_id, f"抠图失败：{status.get('error') or status.get('status')}")
-            return
+        comfy_routes = active_routes or [Path(row["frame_output_dir"]).parent]
+        for route in comfy_routes:
+            frames_dir = route / "frames" if (route / "frames").is_dir() else Path(row["frame_output_dir"])
+            matte_dir = route / "matte" if (route / "matte").parent.exists() else Path(row["matte_output_dir"])
+            if not any(frames_dir.rglob("*.png")):
+                continue
+            comfy = comfy_start(
+                workflow_path=row["workflow_path"] or None,
+                input_dir=str(frames_dir),
+                output_dir=str(matte_dir),
+                recursive=True,
+                preserve_structure=True,
+                max_images=50000,
+                skip_existing=True,
+                notify_interval_seconds=opts["notify_interval_seconds"],
+            )
+            _update_ids(run_id, comfyui_run_id=str(comfy["run_id"]), current_step="comfyui")
+            if not _wait_until_done(lambda rid=str(comfy["run_id"]): comfy_status(rid, include_gpu=False), run_id):
+                return
+            status = comfy_status(str(comfy["run_id"]), include_gpu=False)
+            if status.get("status") not in {"DONE", "DONE_WITH_ERRORS"}:
+                _fail(run_id, f"抠图失败：{status.get('error') or status.get('status')}")
+                return
 
         from assetclaw_matting.skills.cherry_skills import run_start as cherry_start, run_status as cherry_status
 
         detail = status.get("last_completed_detail") or {}
         suffix = f"\n最后抠图：{detail.get('role')}/{detail.get('emotion')}/{detail.get('frame')}" if detail else ""
         _notify(run_id, f"动画自动化流程：抠图完成，开始 Cherry 平滑{suffix}")
-        cherry = cherry_start(
-            input_dir=row["matte_output_dir"],
-            output_dir=row["smooth_output_dir"],
-            recursive=True,
-            max_images=50000,
-            skip_existing=True,
-            notify_interval_seconds=opts["notify_interval_seconds"],
-        )
-        _update_ids(run_id, cherry_run_id=cherry["run_id"], current_step="cherry")
-        if not _wait_until_done(lambda: cherry_status(cherry["run_id"], include_gpu=False), run_id):
-            return
-        status = cherry_status(cherry["run_id"], include_gpu=False)
-        if status.get("status") not in {"DONE", "DONE_WITH_ERRORS"}:
-            _fail(run_id, f"平滑失败：{status.get('error') or status.get('status')}")
-            return
+        for route in comfy_routes:
+            matte_dir = route / "matte" if (route / "matte").is_dir() else Path(row["matte_output_dir"])
+            smooth_dir = route / "smooth" if (route / "smooth").parent.exists() else Path(row["smooth_output_dir"])
+            if not any(matte_dir.rglob("*.png")):
+                continue
+            cherry_options = _route_cherry_options(route) or (opts.get("cherry") or _cherry_options(False, 384, 512))
+            cherry = cherry_start(
+                input_dir=str(matte_dir),
+                output_dir=str(smooth_dir),
+                recursive=True,
+                max_images=50000,
+                skip_existing=True,
+                notify_interval_seconds=opts["notify_interval_seconds"],
+                **cherry_options,
+            )
+            _update_ids(run_id, cherry_run_id=str(cherry["run_id"]), current_step="cherry")
+            if not _wait_until_done(lambda rid=str(cherry["run_id"]): cherry_status(rid, include_gpu=False), run_id):
+                return
+            status = cherry_status(str(cherry["run_id"]), include_gpu=False)
+            if status.get("status") not in {"DONE", "DONE_WITH_ERRORS"}:
+                _fail(run_id, f"平滑失败：{status.get('error') or status.get('status')}")
+                return
         _set_status(run_id, "DONE")
         _notify(run_id, f"动画自动化流程完成：{run_id}\n最终输出：{row['smooth_output_dir']}")
     except Exception as exc:
@@ -314,6 +494,12 @@ def _detail_lines(payload: dict[str, Any]) -> list[str]:
         if detail:
             lines.append(f"当前位置：平滑刚完成 {detail.get('role')}/{detail.get('emotion')}/{detail.get('frame')}")
     return lines
+
+
+def _export_resource_json(manifest_path: Path, output_path: str, types: list[str]) -> None:
+    from scripts.export_animation_resource_json import export_from_manifest
+
+    export_from_manifest(manifest_path, Path(output_path), types=types)
 
 
 def _wait_until_done(fn, pipeline_id: str) -> bool:

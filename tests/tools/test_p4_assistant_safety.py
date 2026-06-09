@@ -34,6 +34,7 @@ def test_path_allowlist_judgement() -> None:
     ws = _workspace()
     assert is_path_allowed("Assets/Art/UI/SpritesAnim/Emoji/happy/a.png", ws.managed_paths)
     assert is_path_allowed("//depot/main/Assets/Art/UI/SpritesAnim/CharacterAnim/a.anim", ws.managed_paths)
+    assert is_path_allowed("//streams/main/Client/Assets/Art/UI/SpritesAnim/CharacterAnim/a.anim", ws.managed_paths)
     assert not is_path_allowed("Assets/Art/Character/hero/a.png", ws.managed_paths)
 
 

@@ -1,35 +1,72 @@
 # P4 Shelve Assistant
 
-Use this skill when the user wants to inspect P4 status, manage Unity UI emoji / character animation import results, create a changelist, reconcile managed UI asset paths, shelve a changelist, or generate a Feishu-ready report.
+Use this skill for the final Unity import P4 stage: status, workspace/stream inspection, switch-stream preview, get latest, reconcile preview, single-step changelist creation, single-step reconcile, single-step shelve, and Feishu-ready report.
 
-Do not use this skill when the user asks to submit, merge/copy into main or trunk, create streams, process non-UI managed directories, bypass the allowlist, or save a P4 password. Refuse submit-like requests with: "当前 P4 助手是 Shelve-only 模式，不支持 submit。请使用 shelve 并把 changelist ID / shelf ID 交给负责人 review。"
+The animation automation default stream is `//streams/rel_0.0.1`. Do not use `//streams/0.0.1`; that is not the current Spark Client stream.
 
-Default safety boundaries:
+## Red Lines
 
-- Shelve-only.
-- No submit.
-- Managed paths only:
-  - `Assets/Art/UI/SpritesAnim/Emoji/...`
-  - `Assets/Art/UI/SpritesAnim/CharacterAnim/...`
-- No password storage.
-- Delete requires explicit `--allow-delete`.
+- Submit is disabled forever.
+- Do not run merge/copy/integrate.
+- Do not create streams.
+- Do not save passwords, tokens, tickets, or P4PASSWD.
+- Real `create-cl`, `reconcile`, `shelve`, and real stream switch require explicit user confirmation.
+- Do not batch `create-cl`, `reconcile`, and `shelve` behind one confirmation.
+- Tests must mock P4Runner for write operations.
 
-Recommended commands:
+If the user asks to submit, refuse with:
 
-```bash
-python -m tools.p4_assistant.cli status --workspace spark_client_ui
-python -m tools.p4_assistant.cli check --workspace spark_client_ui
-python -m tools.p4_assistant.cli preview --workspace spark_client_ui
-python -m tools.p4_assistant.cli create-cl --workspace spark_client_ui --desc "..."
-python -m tools.p4_assistant.cli reconcile --workspace spark_client_ui --cl <CL>
-python -m tools.p4_assistant.cli shelve --workspace spark_client_ui --cl <CL>
-python -m tools.p4_assistant.cli report --workspace spark_client_ui --cl <CL>
+```text
+当前 P4 助手是 shelve-only 模式，submit 是红线操作。请只生成 changelist / shelve / report，由负责人后续处理。
 ```
 
-Agent reply templates:
+## Safe Read-Only Commands
 
-- After preview: summarize add/edit/delete/move counts, list notable files, and say no P4 state was changed.
-- After shelve: provide CL, shelf ID, stats, and paste the generated Feishu report text.
-- If delete appears: stop unless the user explicitly confirms `--allow-delete`; list delete files clearly.
-- If outside allowlist appears: block the operation and tell the user which files must be removed or handled separately.
-- If login is missing: ask the user to run `p4 login`; never ask for or store the password.
+```bash
+python -m tools.p4_assistant.cli status --workspace spark_client
+python -m tools.p4_assistant.cli workspace-info --workspace spark_client
+python -m tools.p4_assistant.cli streams --workspace spark_client
+python -m tools.p4_assistant.cli preview --workspace spark_client
+python -m tools.p4_assistant.cli report --workspace spark_client --cl 123456
+python -m tools.p4_assistant.cli switch-stream --workspace spark_client --stream "//streams/rel_0.0.1" --preview
+python -m tools.p4_assistant.cli get-latest --workspace spark_client --scope managed --preview
+```
+
+## Commands That Need Confirmation
+
+```bash
+python -m tools.p4_assistant.cli create-cl --workspace spark_client --desc "..." --yes
+python -m tools.p4_assistant.cli reconcile --workspace spark_client --cl 123456 --yes
+python -m tools.p4_assistant.cli shelve --workspace spark_client --cl 123456 --yes
+python -m tools.p4_assistant.cli switch-stream --workspace spark_client --stream "//streams/rel_0.0.1" --yes
+python -m tools.p4_assistant.cli get-latest --workspace spark_client --scope all --yes
+```
+
+`get-latest --scope managed` only syncs configured managed paths. `--scope all` must be explicitly confirmed.
+
+`shelve-ui-import` is plan-only: it may run check and preview, then prints the separate confirmed commands. It must not create a CL, reconcile, or shelve by itself.
+
+## Managed Paths
+
+Default managed paths include imported textures, animation clips, override controllers, and importer manifests:
+
+- `Assets/Art/UI/SpritesAnim/Emoji/...`
+- `Assets/Art/UI/SpritesAnim/CharacterAnim/...`
+- `Assets/Art/UI/Animation/Emoji/...`
+- `Assets/Art/Character/Animation/...`
+- `Assets/Res/UI/Animator/EmojiOverride/...`
+- `Assets/Res/Character/Animation/Override/...`
+- `Assets/Modules/UepUtility/AnimTextureImporter/Editor/Manifests/...`
+
+Forbidden paths include project settings, packages, plugins, editor folders, library/temp/user settings/logs. Any forbidden path blocks shelve.
+
+## Report Template
+
+Reports must say:
+
+- `Submit: DISABLED`
+- managed paths only status
+- forbidden paths status
+- delete warning/blocking
+- files list
+- optional Unity Ready summary when `--unity-ready-manifest` is provided

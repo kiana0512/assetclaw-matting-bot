@@ -88,7 +88,7 @@ class DeepSeekBrain(LLMProxyBrain):
                     json=payload,
                     timeout=settings.deepseek_timeout_seconds,
                 )
-                log.info(
+                log.debug(
                     "deepseek.chat status=%s model=%s latency_ms=%s",
                     response.status_code,
                     payload.get("model"),

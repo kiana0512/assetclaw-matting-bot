@@ -15,7 +15,7 @@ from tools.p4_assistant.config import (
 )
 from tools.p4_assistant.models import P4Workspace, WorkflowConfig
 
-PASSWORD_KEYS = {"password", "passwd", "p4passwd", "P4PASSWD"}
+PASSWORD_KEYS = {"password", "passwd", "p4passwd", "P4PASSWD", "token", "ticket", "p4ticket"}
 
 
 class WorkspaceRegistry:

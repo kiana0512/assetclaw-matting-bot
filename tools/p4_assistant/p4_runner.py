@@ -89,8 +89,31 @@ class P4Runner:
             raise ValueError("workspace is required")
         return self.run(["client", "-o", self.workspace.p4client])
 
+    def workspace_where(self, paths: list[str] | None = None) -> P4CommandResult:
+        return self.run(["where", *(paths or [])], check=False)
+
+    def pending_changelists(self) -> P4CommandResult:
+        return self.run(["changes", "-s", "pending", "-u", self.workspace.p4user, "-c", self.workspace.p4client], check=False)
+
+    def shelved_changelists(self) -> P4CommandResult:
+        return self.run(["changes", "-s", "shelved", "-u", self.workspace.p4user, "-c", self.workspace.p4client], check=False)
+
+    def streams(self) -> P4CommandResult:
+        return self.run(["streams"], check=False)
+
     def reconcile_preview(self, paths: list[str]) -> P4CommandResult:
         return self.run(["reconcile", "-n", *paths])
+
+    def sync_preview(self, paths: list[str]) -> P4CommandResult:
+        return self.run(["sync", "-n", *paths], timeout_seconds=300, check=False)
+
+    def sync(self, paths: list[str]) -> P4CommandResult:
+        return self.run(["sync", *paths], confirmation=True, timeout_seconds=1800)
+
+    def switch_stream(self, stream: str) -> P4CommandResult:
+        if not self.workspace:
+            raise ValueError("workspace is required")
+        return self.run(["client", "-s", "-S", stream, self.workspace.p4client], confirmation=True, timeout_seconds=300)
 
     def create_changelist(self, description: str) -> str:
         result = self.run(["change", "-i"], confirmation=True, stdin_text=_change_spec(description))
@@ -101,6 +124,9 @@ class P4Runner:
 
     def reconcile_to_changelist(self, cl: str | int, paths: list[str]) -> P4CommandResult:
         return self.run(["reconcile", "-c", str(cl), *paths], confirmation=True)
+
+    def reopen_to_changelist(self, cl: str | int, paths: list[str]) -> P4CommandResult:
+        return self.run(["reopen", "-c", str(cl), *paths], confirmation=True)
 
     def opened(self, cl: str | int | None = None) -> P4CommandResult:
         return self.run(["opened", "-c", str(cl)] if cl else ["opened"], check=False)

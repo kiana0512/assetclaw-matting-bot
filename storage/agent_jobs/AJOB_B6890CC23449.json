@@ -1,0 +1,52 @@
+{
+  "ok": true,
+  "job_id": "AJOB_B6890CC23449",
+  "id": "AJOB_B6890CC23449",
+  "channel": "brain_test",
+  "conversation_id": "webui_proxy_stress_2",
+  "user_id": "local",
+  "trace_id": "7e80f810719543e3a0e675237deba308",
+  "status": "DONE",
+  "queued_at": "2026-06-09T11:28:04",
+  "started_at": "2026-06-09T11:59:39",
+  "finished_at": "2026-06-09T11:59:40",
+  "error": "",
+  "response": {
+    "text": "GPU 状态：\nGPU 0 NVIDIA GeForce RTX 3090：显存 14484/24576 MB，利用率 31%，温度 56°C，功耗 37.91 W",
+    "tool_calls": [
+      {
+        "skill": "system.gpu_status",
+        "arguments": {}
+      }
+    ],
+    "raw": {
+      "llm_tool_json": "{\"tool_calls\":[{\"skill\":\"system.gpu_status\",\"arguments\":{}}],\"text\":\"GPU 状态：\\nGPU 0 NVIDIA GeForce RTX 3090：显存 14464/24576 MB，利用率 30%，温度 55°C，功耗 37.8 W\"}",
+      "skill_results": [
+        {
+          "ok": true,
+          "skill": "system.gpu_status",
+          "result": {
+            "ok": true,
+            "available": true,
+            "gpus": [
+              {
+                "index": "0",
+                "name": "NVIDIA GeForce RTX 3090",
+                "driver_version": "610.47",
+                "memory_total_mb": 24576,
+                "memory_used_mb": 14484,
+                "memory_free_mb": 9842,
+                "utilization_gpu_percent": 31,
+                "temperature_c": 56,
+                "power_draw_w": 37.91
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "provider": "deepseek"
+  },
+  "last_progress": "工具执行完成，正在整理回复",
+  "text_preview": "webui proxy stress status ping 66"
+}

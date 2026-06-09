@@ -143,6 +143,7 @@ class ReportData:
     safety: SafetyResult = field(default_factory=lambda: SafetyResult(ok=True))
     stream_or_branch: str = ""
     note: str = ""
+    unity_ready_manifest: str = ""
 
 
 @dataclass(frozen=True)

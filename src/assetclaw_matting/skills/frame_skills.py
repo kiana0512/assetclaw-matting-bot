@@ -34,6 +34,8 @@ def default_automation_paths(day: str | None = None) -> dict[str, str]:
         "frame_dir": str(root / "frames"),
         "matte_dir": str(root / "matte"),
         "smooth_dir": str(root / "smooth"),
+        "source_manifest": str(root / "source_manifest.json"),
+        "unity_ready_dir": str(root / "unity_ready"),
     }
 
 
@@ -65,6 +67,11 @@ def run_preview(
     diff_threshold: float | None = None,
     dedup_enabled: bool | None = None,
     dedup_renumber: bool | None = None,
+    root: str | None = None,
+    emotions: list[str] | None = None,
+    types: list[str] | None = None,
+    progress_include: list[str] | None = None,
+    progress_exclude: list[str] | None = None,
 ) -> dict[str, Any]:
     defaults = default_automation_paths()
     cfg = _build_config(
@@ -75,6 +82,11 @@ def run_preview(
         diff_threshold=diff_threshold,
         dedup_enabled=dedup_enabled,
         dedup_renumber=dedup_renumber,
+        root=root,
+        emotions=emotions,
+        types=types,
+        progress_include=progress_include,
+        progress_exclude=progress_exclude,
     )
     return {
         "ok": True,
@@ -85,6 +97,11 @@ def run_preview(
         "max_frames": cfg["framepacker"].get("max_frames", 0),
         "dedup_enabled": cfg.get("dedup", {}).get("enabled", False),
         "diff_threshold": cfg.get("dedup", {}).get("diff_threshold", 0.2),
+        "selection_root": cfg.get("selection", {}).get("root", ""),
+        "selection_emotions": cfg.get("selection", {}).get("emotions", []),
+        "selection_types": cfg.get("selection", {}).get("types", []),
+        "progress_include": cfg.get("selection", {}).get("progress_include", []),
+        "progress_exclude": cfg.get("selection", {}).get("progress_exclude", []),
         "selection": "all_records_with_animation",
     }
 
@@ -97,6 +114,11 @@ def run_start(
     diff_threshold: float | None = None,
     dedup_enabled: bool | None = None,
     dedup_renumber: bool | None = None,
+    root: str | None = None,
+    emotions: list[str] | None = None,
+    types: list[str] | None = None,
+    progress_include: list[str] | None = None,
+    progress_exclude: list[str] | None = None,
     notify_interval_seconds: int = 60,
 ) -> dict[str, Any]:
     from assetclaw_matting.config import settings
@@ -111,6 +133,11 @@ def run_start(
         diff_threshold=diff_threshold,
         dedup_enabled=dedup_enabled,
         dedup_renumber=dedup_renumber,
+        root=root,
+        emotions=emotions,
+        types=types,
+        progress_include=progress_include,
+        progress_exclude=progress_exclude,
     )
     run_id = _run_id()
     run_dir = Path(settings.storage_dir) / "frame_runs" / run_id
@@ -408,6 +435,11 @@ def _build_config(
     diff_threshold: float | None,
     dedup_enabled: bool | None = None,
     dedup_renumber: bool | None = None,
+    root: str | None = None,
+    emotions: list[str] | None = None,
+    types: list[str] | None = None,
+    progress_include: list[str] | None = None,
+    progress_exclude: list[str] | None = None,
 ) -> dict[str, Any]:
     cfg = _load_base_config()
     defaults = default_automation_paths()
@@ -428,6 +460,16 @@ def _build_config(
         cfg.setdefault("dedup", {})["enabled"] = bool(dedup_enabled)
     if dedup_renumber is not None:
         cfg.setdefault("dedup", {})["renumber"] = bool(dedup_renumber)
+    if root is not None:
+        cfg.setdefault("selection", {})["root"] = str(root)
+    if emotions is not None:
+        cfg.setdefault("selection", {})["emotions"] = [str(item) for item in emotions]
+    if types is not None:
+        cfg.setdefault("selection", {})["types"] = [str(item) for item in types]
+    if progress_include is not None:
+        cfg.setdefault("selection", {})["progress_include"] = [str(item) for item in progress_include]
+    if progress_exclude is not None:
+        cfg.setdefault("selection", {})["progress_exclude"] = [str(item) for item in progress_exclude]
     return cfg
 
 

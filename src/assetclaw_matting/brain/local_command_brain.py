@@ -134,6 +134,34 @@ class LocalCommandBrain(BrainProvider):
             return [ToolCall(skill="file.list_allowed", arguments={"path": settings.shared_matting_root})]
         if any(kw in lowered for kw in ("nvidia-smi", "gpu")) or any(kw in text for kw in ("显卡", "显存", "gpu", "GPU")):
             return [ToolCall(skill="system.gpu_status", arguments={})]
+        animation_flow_paths = re.findall(r"([A-Za-z]:\\[^\s，。]*)", text)
+        is_full_animation_flow = (
+            "动画自动化流程" in text
+            or "动画流程自动机" in text
+            or "自动化流程" in text
+            or "完整动画流程" in text
+            or "完整动画自动化" in text
+            or "7步动画" in text
+            or "七步动画" in text
+            or "unity_ready" in lowered
+            or ("unity" in lowered and "p4" in lowered)
+        )
+        if is_full_animation_flow and any(kw in text for kw in ("哪些任务", "任务列表", "当前任务", "有哪些任务")):
+            return [ToolCall(skill="animation_flow.list", arguments={"include_finished": any(kw in text for kw in ("全部", "历史", "已结束"))})]
+        if is_full_animation_flow and any(kw in text for kw in ("终止", "取消", "停止")):
+            match = re.search(r"(AFLOW_[A-Fa-f0-9]{12})", text)
+            return [ToolCall(skill="animation_flow.cancel", arguments={"run_id": match.group(1) if match else None})]
+        if is_full_animation_flow and any(kw in text for kw in ("进度", "状态", "哪里了", "跑到")):
+            match = re.search(r"(AFLOW_[A-Fa-f0-9]{12})", text)
+            return [ToolCall(skill="animation_flow.status", arguments={"run_id": match.group(1) if match else None})]
+        if is_full_animation_flow and any(kw in text for kw in ("预览", "看看", "检查", "计划")):
+            paths = animation_flow_paths
+            args = {"date_root": paths[0]} if paths else {}
+            return [ToolCall(skill="animation_flow.preview", arguments=args)]
+        if is_full_animation_flow and any(kw in text for kw in ("启动", "开始", "执行", "跑")):
+            paths = animation_flow_paths
+            args = {"date_root": paths[0]} if paths else {}
+            return [ToolCall(skill="animation_flow.start", arguments=args)]
         animation_root = _animation_root_from_text(text)
         is_animation_ops = (
             "animation_automation" in lowered
@@ -159,7 +187,7 @@ class LocalCommandBrain(BrainProvider):
                 args["input_dir"] = paths[0]
                 args["output_dir"] = str(paths[0].rstrip("\\")[:-5] + "smooth")
             return [ToolCall(skill="animation.manual_smooth_current", arguments=args)]
-        is_pipeline = "自动化流程" in text or "动画流程" in text or "完整流程" in text or "三步流程" in text
+        is_pipeline = "旧三步" in text or "三步流程" in text or "旧pipeline" in lowered or "legacy pipeline" in lowered
         if is_pipeline and any(kw in text for kw in ("哪些任务", "任务列表", "当前任务", "有哪些任务")):
             return [ToolCall(skill="pipeline.run_list", arguments={"include_finished": any(kw in text for kw in ("全部", "历史", "已结束"))})]
         if is_pipeline and any(kw in text for kw in ("终止", "取消", "停止")):
