@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import types
 from pathlib import Path
@@ -11,7 +12,6 @@ from assetclaw_matting.brain.result_formatter import format_skill_results
 from assetclaw_matting.db.schema import create_tables
 from assetclaw_matting.db.sqlite import init_db
 from assetclaw_matting.skills.frame_skills import default_automation_paths, info as frame_info, run_preview as frame_preview
-from assetclaw_matting.skills.pipeline_skills import run_preview as pipeline_preview
 from assetclaw_matting.skills.registry import get_skill_meta
 
 
@@ -34,31 +34,22 @@ def test_frame_tool_info_and_preview_are_safe() -> None:
     assert "抽帧任务预览" in text
 
 
-def test_pipeline_preview_registry_and_router() -> None:
-    preview = pipeline_preview(
-        input_dir="E:\\raw_videos",
-        frame_output_dir="E:\\output_frames",
-        matte_output_dir="E:\\output_matting",
-        smooth_output_dir="E:\\output_smooth",
-    )
-    assert preview["steps"][0].startswith("1.")
-    assert preview["frame"]["dedup_enabled"] is False
-    assert preview["frame"]["selection_root"] == ""
-    assert preview["frame"]["selection_emotions"] == []
-    assert preview["cherry"]["resize_width"] == 384
-    assert preview["cherry"]["resize_height"] == 512
-    assert preview["cherry"]["use_smooth"] is False
-    assert get_skill_meta("pipeline.run_start")["requires_confirmation"] is True
+def test_animation_flow_registry_and_router_replaces_legacy_pipeline() -> None:
+    assert get_skill_meta("pipeline.run_start") is None
+    assert get_skill_meta("animation_flow.start")["requires_confirmation"] is True
     assert get_skill_meta("frame.run_start")["requires_confirmation"] is True
 
     brain = LocalCommandBrain()
     assert brain._infer_tool_calls("开始飞书抽帧，下载到 E:\\raw_videos，抽帧输出 E:\\output_frames")[0].skill == "frame.run_start"
-    assert brain._infer_tool_calls("执行旧三步流程 E:\\raw_videos E:\\output_frames E:\\output_matting E:\\output_smooth")[0].skill == "pipeline.run_start"
-
-    text = format_skill_results([{"ok": True, "skill": "pipeline.run_preview", "result": preview}])
-    assert "抽帧 -> ComfyUI 抠图 -> Cherry 平滑" in text
-    assert "384x512" in text
-    assert "时序平滑 关" in text
+    flow_call = brain._infer_tool_calls("动画自动化20260610 替换 faker")[0]
+    assert flow_call.skill == "animation_flow.start"
+    assert flow_call.arguments["unity_import_mode"] == "iteration"
+    assert flow_call.arguments["fake_matting_from_frames"] is True
+    simple_flow_call = brain._infer_tool_calls("启动动画流程 20260610 faker")[0]
+    assert simple_flow_call.skill == "animation_flow.start"
+    assert simple_flow_call.arguments["date_root"] == "E:\\animation_automation\\2026-06-10"
+    assert simple_flow_call.arguments["fake_matting_from_frames"] is True
+    assert brain._infer_tool_calls("执行旧三步流程 E:\\raw_videos E:\\output_frames E:\\output_matting E:\\output_smooth") == []
 
 
 def test_default_animation_workspace_paths_are_on_e_drive() -> None:
@@ -68,13 +59,6 @@ def test_default_animation_workspace_paths_are_on_e_drive() -> None:
     assert defaults["frame_dir"].endswith("\\frames")
     assert defaults["matte_dir"].endswith("\\matte")
     assert defaults["smooth_dir"].endswith("\\smooth")
-
-    preview = pipeline_preview()
-    assert preview["workspace_root"].startswith("E:\\animation_automation\\")
-    assert preview["input_dir"].endswith("\\videos")
-    assert preview["frame_output_dir"].endswith("\\frames")
-    assert preview["matte_output_dir"].endswith("\\matte")
-    assert preview["smooth_output_dir"].endswith("\\smooth")
 
 
 def test_frame_workflow_builds_role_emotion_identity() -> None:
@@ -131,8 +115,26 @@ def test_frame_workflow_processes_video_records_without_progress_filter(tmp_path
                     "fields": {
                         "角色": "idle",
                         "父記錄": [{"record_ids": ["rec_role"], "text": "gary"}],
-                        "进度": "",
+                        "进度": "整理中",
                         "动画": [{"name": "source.mp4", "type": "video/mp4"}],
+                    },
+                },
+                {
+                    "record_id": "rec_done",
+                    "fields": {
+                        "角色": "done",
+                        "父記錄": [{"record_ids": ["rec_role"], "text": "gary"}],
+                        "进度": "已完成",
+                        "动画": [{"name": "done.mp4", "type": "video/mp4"}],
+                    },
+                },
+                {
+                    "record_id": "rec_ignore",
+                    "fields": {
+                        "角色": "ignore",
+                        "父記錄": [{"record_ids": ["rec_role"], "text": "gary"}],
+                        "进度": "不处理",
+                        "动画": [{"name": "ignore.mp4", "type": "video/mp4"}],
                     },
                 },
             ]
@@ -175,9 +177,14 @@ def test_frame_workflow_processes_video_records_without_progress_filter(tmp_path
             else:
                 sys.modules[name] = module
 
-    assert (tmp_path / "emoji" / "default" / "videos" / "gary-idle" / "source.mp4").exists()
-    assert (tmp_path / "emoji" / "default" / "frames" / "gary-idle" / "0000.png").exists()
-    assert (tmp_path / "emoji" / "default" / "frames" / "_pipeline_manifest.json").exists()
+    assert (tmp_path / "emoji" / "videos" / "gary-idle" / "source.mp4").exists()
+    assert (tmp_path / "emoji" / "frames" / "gary-idle" / "0000.png").exists()
+    assert not (tmp_path / "emoji" / "frames" / "gary-done").exists()
+    assert not (tmp_path / "emoji" / "frames" / "gary-ignore").exists()
+    assert (tmp_path / "emoji" / "frames" / "_pipeline_manifest.json").exists()
+    source_manifest = json.loads((tmp_path / "source_manifest.json").read_text(encoding="utf-8"))
+    skipped = {item["animation"]: item["reason"] for item in source_manifest["skipped"]}
+    assert skipped == {"done": "progress is 已完成", "ignore": "progress is 不处理"}
 
 
 def test_frame_workflow_can_filter_scene_idle_records(tmp_path) -> None:
@@ -265,8 +272,8 @@ def test_frame_workflow_can_filter_scene_idle_records(tmp_path) -> None:
             else:
                 sys.modules[name] = module
 
-    assert (tmp_path / "scene" / "default" / "videos" / "gary-idle" / "source.mp4").read_bytes() == b"rec_scene_idle"
-    manifest = (tmp_path / "scene" / "default" / "frames" / "_pipeline_manifest.json").read_text(encoding="utf-8")
+    assert (tmp_path / "scene" / "videos" / "gary-idle" / "source.mp4").read_bytes() == b"rec_scene_idle"
+    manifest = (tmp_path / "scene" / "frames" / "_pipeline_manifest.json").read_text(encoding="utf-8")
     assert "rec_scene_idle" in manifest
     assert "rec_expr_idle" not in manifest
 

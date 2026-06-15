@@ -12,7 +12,7 @@ import requests
 from requests import HTTPError
 
 from assetclaw_matting.config import settings
-from assetclaw_matting.comfyui.workflow_patch import patch_load_image, prepare_api_prompt_for_run
+from assetclaw_matting.comfyui.workflow_patch import find_primary_save_image_node_id, patch_load_image, prepare_api_prompt_for_run
 from assetclaw_matting.comfyui.output_resolver import resolve_first_output
 
 log = logging.getLogger(__name__)
@@ -235,6 +235,9 @@ class ComfyUIClient:
         with wf_path.open("r", encoding="utf-8") as fh:
             workflow: dict[str, Any] = json.load(fh)
         workflow = patch_load_image(copy.deepcopy(workflow), uploaded_filename)
+        final_save_image_node_id = find_primary_save_image_node_id(workflow)
+        if not final_save_image_node_id:
+            raise ValueError("当前 ComfyUI workflow 没有找到 SaveImage/保存图像 节点，拒绝下载输出。")
 
         # 4. Submit
         prompt_id = self.submit_prompt(prepare_api_prompt_for_run(workflow))
@@ -251,7 +254,7 @@ class ComfyUIClient:
 
         # 7. Resolve + download output
         try:
-            output_info = resolve_first_output(history, prompt_id)
+            output_info = resolve_first_output(history, prompt_id, final_save_image_node_id=final_save_image_node_id)
         except ValueError:
             raise
 

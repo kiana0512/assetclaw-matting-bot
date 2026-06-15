@@ -7,8 +7,9 @@ import pytest
 import requests
 
 from assetclaw_matting.brain.deepseek_brain import DeepSeekBrain
+from assetclaw_matting.brain.pre_llm_router import handle_pre_llm_message
 from assetclaw_matting.brain.router import get_provider, handle_message
-from assetclaw_matting.brain.schemas import BrainMessage
+from assetclaw_matting.brain.schemas import BrainMessage, BrainResponse, ToolCall
 from assetclaw_matting.db.schema import create_tables
 from assetclaw_matting.db.sqlite import init_db
 
@@ -191,6 +192,40 @@ def test_deepseek_brain_generates_tool_call(monkeypatch) -> None:
     response = handle_message(BrainMessage(text="看看 E 盘有哪些文件"))
     assert response.provider == "deepseek"
     assert response.tool_calls[0].skill == "file.list_allowed"
+
+
+def test_animation_flow_command_is_routed_before_deepseek_llm() -> None:
+    class FakeDeepSeekProvider:
+        name = "deepseek"
+
+        def __init__(self) -> None:
+            self.calls: list[ToolCall] = []
+            self.logged: BrainResponse | None = None
+
+        def execute_tool_calls(
+            self,
+            tool_calls: list[ToolCall],
+            conversation_id: str = "",
+            user_id: str = "",
+        ) -> list[dict]:
+            self.calls = tool_calls
+            return [{"ok": True, "skill": tool_calls[0].skill, "result": {"ok": True, "run_id": "AFLOW_TEST"}}]
+
+        def log_message(self, message: BrainMessage, response: BrainResponse, raw: dict | None = None) -> None:
+            self.logged = response
+
+    provider = FakeDeepSeekProvider()
+    response = handle_pre_llm_message(
+        provider,
+        BrainMessage(conversation_id="c", user_id="u", text="启动动画流程 20260610 替换 faker"),
+    )
+
+    assert response is not None
+    assert provider.calls[0].skill == "animation_flow.start"
+    assert provider.calls[0].arguments["date_root"] == "E:\\animation_automation\\2026-06-10"
+    assert provider.calls[0].arguments["unity_import_mode"] == "iteration"
+    assert provider.calls[0].arguments["fake_matting_from_frames"] is True
+    assert response.raw["deterministic_plan"] == "deterministic animation_flow route before LLM"
 
 
 def test_dangerous_skill_still_requires_confirmation(monkeypatch) -> None:

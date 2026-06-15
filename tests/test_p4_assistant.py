@@ -293,6 +293,8 @@ def test_p4_skills_registered_and_local_brain_routes() -> None:
     assert get_skill_meta("p4.preview_sync")
     assert get_skill_meta("p4.preview_reconcile")
     assert get_skill_meta("p4.build_changelist")
+    assert get_skill_meta("p4.list_cls")
+    assert get_skill_meta("p4.cleanup_cl")["requires_confirmation"] is True
 
     brain = LocalCommandBrain()
     help_call = brain._infer_tool_calls("p4现在功能有哪些")
@@ -319,6 +321,11 @@ def test_p4_skills_registered_and_local_brain_routes() -> None:
 
     changelist_call = brain._infer_tool_calls("帮我生成这次 changelist 描述")
     assert changelist_call[0].skill == "p4.build_changelist"
+    list_cl_call = brain._infer_tool_calls("现在工作区有哪些 CL 的 id")
+    assert list_cl_call[0].skill == "p4.list_cls"
+    cleanup_call = brain._infer_tool_calls("这个版本不对，帮我删除 CL 6901")
+    assert cleanup_call[0].skill == "p4.cleanup_cl"
+    assert cleanup_call[0].arguments["cl"] == "6901"
     setup_call = brain._infer_tool_calls("预览创建 p4 workspace")
     assert setup_call[0].skill == "p4.preview_setup_workspace"
 

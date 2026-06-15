@@ -43,7 +43,10 @@ if ($port5180) {
   Write-Host "WebUI: not running on port 5180"
 }
 
-# 4. Stop ws_receiver python processes (those with ws_receiver in command line)
+# 4. Stop Unity MCP local HTTP server
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\stop_unity_mcp.ps1 2>&1 | Write-Host
+
+# 5. Stop ws_receiver python processes (those with ws_receiver in command line)
 $pyProcs = Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'python3.exe' OR Name = 'pythonw.exe'" -ErrorAction SilentlyContinue
 $killed = 0
 foreach ($proc in $pyProcs) {

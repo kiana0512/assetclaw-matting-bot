@@ -189,22 +189,21 @@ storage\feishu_inbox\日期\会话\
 | `frame.run_status` | 查看抽帧任务进度 | readonly |
 | `frame.run_list` | 查看抽帧任务列表 | readonly |
 | `frame.run_cancel` | 终止抽帧任务 | write_safe |
-| `animation_flow.preview` | 预览完整 7 步动画自动化流程 | readonly |
-| `animation_flow.start` | 执行飞书下载 -> 抽帧 -> 抠图 -> Cherry -> unity_ready -> Unity 导入 -> P4 Shelve-only，启动前需确认 | write_safe |
-| `animation_flow.status` | 查看完整 7 步流程和子任务进度 | readonly |
-| `animation_flow.list` | 查看完整 7 步流程任务列表 | readonly |
-| `animation_flow.cancel` | 终止完整 7 步流程及当前子任务 | write_safe |
+| `animation_flow.preview` | 预览完整 6 步动画自动化流程 | readonly |
+| `animation_flow.start` | 执行飞书下载 -> 抽帧 -> 抠图 -> unity_ready -> Unity 导入 -> P4 Shelve-only，启动前需确认 | write_safe |
+| `animation_flow.status` | 查看完整 6 步流程和子任务进度 | readonly |
+| `animation_flow.list` | 查看完整 6 步流程任务列表 | readonly |
+| `animation_flow.cancel` | 终止完整 6 步流程及当前子任务 | write_safe |
 | `unity_ready.preview` | 预览 unity_ready scene/emoji 输出结构 | readonly |
 | `unity_ready.build` | 单独生成 unity_ready，启动前需确认 | write_safe |
 | `unity_ready.status` | 查看 unity_ready JSON 和帧数量 | readonly |
 | `unity_import.preview` | 预览 Unity 插件导入路径 | readonly |
 | `unity_import.run` | 调用 Unity 插件 API 导入引擎，启动前需确认 | write_safe |
 | `unity_import.status` | 查看 Unity 导入准备状态 | readonly |
-| `pipeline.run_preview` | 预览旧三步动画流程 | readonly |
-| `pipeline.run_start` | 旧入口：固定顺序执行抽帧 -> ComfyUI 抠图 -> Cherry 平滑，启动前需确认 | write_safe |
-| `pipeline.run_status` | 查看旧三步流程和子任务进度 | readonly |
-| `pipeline.run_list` | 查看旧三步流程任务列表 | readonly |
-| `pipeline.run_cancel` | 终止旧三步流程及当前子任务 | write_safe |
+| `unity_tools.atlas_status` | 查看 Unity 图集大小报告文件状态 | readonly |
+| `unity_tools.atlas_report` | 调用 Unity 图集统计工具生成报告，启动前需确认 | write_safe |
+| `unity_tools.rename_preview` | 预览动画贴图批量重命名流水线 | readonly |
+| `unity_tools.rename_run` | 执行动画贴图批量重命名流水线，启动前需确认 | write_safe |
 | `system.gpu_status` | 查询 nvidia-smi GPU 显存/利用率/温度/功耗 | readonly |
 | `system.process_status` | 查询匹配进程状态 | readonly |
 
@@ -263,8 +262,14 @@ storage\feishu_inbox\日期\会话\
 查看飞书抽帧工具状态
 开始飞书抽帧，下载到 E:\raw_videos，抽帧输出 E:\output_frames
 抽帧任务跑到哪里了
-执行动画自动化流程 E:\raw_videos E:\output_frames E:\output_matting E:\output_smooth
-自动化流程现在跑到哪里了
+开始动画自动化流程
+动画自动化20260610 迭代
+动画自动化 2026-06-10 导入
+完整动画流程现在跑到哪里了
+查看 Unity 图集大小报告
+生成 Unity 图集大小统计报告
+预览动画贴图批量重命名
+执行动画贴图重命名流水线
 共享盘抠图任务现在跑到哪里了
 查看当前系统状态
 现在显卡使用情况怎么样
@@ -275,7 +280,21 @@ ComfyUI 状态
 
 Cherry 帧序列处理工具位于 `E:\assetclaw-matting-bot\Cherry_帧序列处理工具`。Agent 调用时会递归读取输入目录图片，按父文件夹分组做时序 Alpha 平滑、缩放、锐化，输出到目标目录并保留相同相对结构。实际处理使用秋叶环境 `C:\Users\lilithgames\Downloads\ComfyUI-aki-v3\python\python.exe`，不要求 bot 的 conda 环境安装 torch。启动前会给图片数、序列数、参数摘要并要求确认。
 
-飞书抽帧工具位于 `E:\assetclaw-matting-bot\feishu_frame_tool`。完整动画自动化流程固定为三步：`frame.run_start` 抽帧输出到 `E:\output_frames`，再由 `comfyui.run_start` 抠图输出到 `E:\output_matting`，最后由 `cherry.run_start` 平滑输出到 `E:\output_smooth`。总流程会保存每个子任务 run_id，方便单独查错和返工。
+Cherry / animation flow 这类长任务不能用短生命周期的 `python -c "run_start(...)"` 当作真实执行方式。`run_start` 会在当前进程里启动后台 worker/thread；如果 `python -c` 进程立刻退出，数据库可能显示 `RUNNING`，但输出目录会保持空、进度停在 `0/total`。手动补跑或测试时必须使用常驻 Gateway/Agent，或使用前台 worker，例如：
+
+```powershell
+C:\Users\lilithgames\miniconda3\envs\assetclaw\python.exe scripts\run_cherry_worker_once.py CHERRY_xxxxxxxxxxxx
+```
+
+验收 Cherry 输出时必须检查 `cherry.run_status` 已到 `DONE`，并确认输出 PNG 数量和关键样本尺寸。
+
+飞书抽帧工具位于 `E:\assetclaw-matting-bot\feishu_frame_tool`。完整动画自动化流程现在固定为 6 步：飞书下载、抽帧、抠图、unity_ready、Unity 插件导入/迭代、P4 shelve-only。Cherry 仍可单独补跑，但不再属于主流程。飞书表格进度只跳过 `已完成` 和 `不处理`，其他状态都会重新下载并抽帧。总流程会保存每个子任务 run_id，方便单独查进度和返工。
+
+Unity 附加工具已独立 skills 化，但暂不并入 6 步主流程：
+
+- `unity_tools.atlas_status` / `unity_tools.atlas_report` 对应 `Assets/Modules/UepUtility/SpriteAtlasGen/Editor/SpriteAtlasGeneratorTool.cs`，用于生成和读取 `Assets/TATest/AtlasSizeReport.json` 图集体积统计。
+- `unity_tools.rename_preview` / `unity_tools.rename_run` 对应 `E:\assetclaw-matting-bot\anim-texture-rename-pipeline`，用于动画贴图重命名流程的预览和执行。
+- 写入类动作仍走二次确认；这些工具只作为单独能力调用，不影响动画自动化 6 步主线。
 
 ## 暂不实现
 

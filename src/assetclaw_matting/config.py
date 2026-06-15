@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     comfyui_dir: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3/ComfyUI")
     comfyui_python_dir: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3/python")
     comfyui_url: str = "http://127.0.0.1:8188"
-    comfyui_workflow_path: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3/ComfyUI/user/default/workflows/软边缘测试-动画批量.json")
+    comfyui_workflow_path: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3/ComfyUI/user/default/workflows/软边缘抠图-动画专属.json")
     comfyui_timeout_seconds: int = 600
     comfyui_poll_interval_seconds: int = 2
 

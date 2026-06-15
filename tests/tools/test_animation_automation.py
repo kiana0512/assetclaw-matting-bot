@@ -33,7 +33,7 @@ def _record(character: str, animation: str, asset: str, variant: str, types: lis
         "processOption": "时序平滑" if variant == "temporal_smooth" else "",
         "processVariant": variant,
         "types": types or ["剧情"],
-        "attachments": [{"name": "a.mp4", "localPath": f"{asset}/{variant}/videos/{character}-{animation}/source.mp4"}],
+        "attachments": [{"name": "a.mp4", "localPath": f"{asset}/videos/{character}-{animation}/source.mp4"}],
         "taskKey": task_key(character, animation),
         "skipped": False,
         "skipReason": "",
@@ -44,8 +44,8 @@ def test_routing_classifies_asset_kind_and_process_variant() -> None:
     assert classify_asset_kind({"类型": "场景动画"}) == "scene"
     assert classify_asset_kind({"分类": ["表情动画"]}) == "emoji"
     assert classify_asset_kind({"category": "订单 剧情"}) == "emoji"
-    assert classify_process_variant({"处理选项": "时序平滑"}) == "temporal_smooth"
-    assert classify_process_variant({"处理选项": "temporal smooth"}) == "temporal_smooth"
+    assert classify_process_variant({"处理选项": "时序平滑"}) == "default"
+    assert classify_process_variant({"处理选项": "temporal smooth"}) == "default"
     assert classify_process_variant({}) == "default"
     assert task_key("Jessica", "idle") == "Jessica-idle"
 
@@ -56,7 +56,7 @@ def test_unity_types_default_scene_and_empty_emoji() -> None:
     assert unity_types({}, "emoji") == []
 
 
-def test_build_unity_ready_merges_four_routes_to_two_packages(tmp_path: Path) -> None:
+def test_build_unity_ready_merges_scene_and_emoji_packages(tmp_path: Path) -> None:
     date_root = tmp_path / "2026-06-09"
     records = [
         _record("heather", "idle", "scene", "temporal_smooth", ["角色动画"]),
@@ -113,7 +113,7 @@ def test_same_package_same_source_merges_types(tmp_path: Path) -> None:
     assert manifest["items"]["creamy"]["happy"]["types"] == ["订单", "剧情"]
 
 
-def test_same_package_duplicate_conflicts(tmp_path: Path) -> None:
+def test_same_package_duplicate_merges_without_process_variant_split(tmp_path: Path) -> None:
     date_root = tmp_path / "2026-06-09"
     records = [
         _record("heather", "idle", "emoji", "default", ["剧情"]),
@@ -123,8 +123,10 @@ def test_same_package_duplicate_conflicts(tmp_path: Path) -> None:
         _png(routed_stage_dir(date_root, record["assetKind"], record["processVariant"], "smooth", record["taskKey"]) / "0000.png")
     write_source_manifest(date_root, {"date": "2026-06-09", "feishu": {}, "records": records, "skipped": []})
 
-    with pytest.raises(ValueError, match="重复任务 heather-idle"):
-        build_unity_ready(date_root)
+    build_unity_ready(date_root)
+
+    manifest = json.loads((date_root / "unity_ready/emoji/animation_resource_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["items"]["heather"]["idle"]["types"] == ["剧情", "订单"]
 
 
 def test_existing_output_requires_overwrite(tmp_path: Path) -> None:
@@ -154,17 +156,17 @@ def test_source_manifest_records_skip_and_download_path(tmp_path: Path) -> None:
     path = write_source_manifest(date_root, {"date": "2026-06-09", "feishu": {"tableId": "tbl"}, "records": [record, skipped], "skipped": [skipped]})
     payload = json.loads(path.read_text(encoding="utf-8"))
 
-    assert payload["records"][0]["attachments"][0]["localPath"] == "emoji/default/videos/Jessica-idle/source.mp4"
+    assert payload["records"][0]["attachments"][0]["localPath"] == "emoji/videos/Jessica-idle/source.mp4"
     assert payload["records"][0]["processVariant"] == "default"
     assert payload["skipped"][0]["reason"] == "progress is 已完成"
 
 
-def test_missing_frame_warns_and_missing_smooth_errors(tmp_path: Path) -> None:
+def test_missing_frame_warns_and_missing_source_errors(tmp_path: Path) -> None:
     date_root = tmp_path / "2026-06-09"
     record = _record("Jessica", "idle", "emoji", "default", ["剧情"])
-    smooth = routed_stage_dir(date_root, "emoji", "default", "smooth", "Jessica-idle")
-    _png(smooth / "0000.png")
-    _png(smooth / "0002.png")
+    source = routed_stage_dir(date_root, "emoji", "default", "smooth", "Jessica-idle")
+    _png(source / "0000.png")
+    _png(source / "0002.png")
     write_source_manifest(date_root, {"date": "2026-06-09", "feishu": {}, "records": [record], "skipped": []})
     report = build_unity_ready(date_root)
     assert any("0032" not in warning and "0001.png" in warning for warning in report["warnings"])

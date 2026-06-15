@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 import uuid
@@ -39,12 +40,15 @@ def run_preview(
     selection_types: list[str] | None = None,
     progress_include: list[str] | None = None,
     progress_exclude: list[str] | None = None,
+    priority_characters: list[str] | None = None,
     use_smooth: bool = False,
     resize_width: int = 384,
     resize_height: int = 512,
     resource_json_enabled: bool = True,
     resource_json_output_path: str | None = None,
     resource_json_types: list[str] | None = None,
+    run_cherry: bool = True,
+    fake_matting_from_frames: bool = False,
 ) -> dict[str, Any]:
     paths = _resolve_pipeline_paths(input_dir, frame_output_dir, matte_output_dir, smooth_output_dir)
     frame_options = _frame_options(
@@ -58,6 +62,7 @@ def run_preview(
         selection_types,
         progress_include,
         progress_exclude,
+        priority_characters,
     )
     cherry_options = _cherry_options(use_smooth, resize_width, resize_height)
     resource_json = _resource_json_options(resource_json_enabled, resource_json_output_path, resource_json_types)
@@ -65,9 +70,12 @@ def run_preview(
         "ok": True,
         **paths,
         "workflow_path": workflow_path,
-        "steps": ["1. 飞书表格下载视频并抽帧", "2. ComfyUI 批量抠图", "3. Cherry 帧序列平滑/缩放/锐化"],
+        "steps": ["1. 飞书表格下载视频并抽帧", "2. 抽帧结果作为抠图输出" if fake_matting_from_frames else "2. ComfyUI 批量抠图"]
+        + (["3. Cherry 帧序列平滑/缩放/锐化"] if run_cherry else []),
         "frame": frame_options,
         "cherry": cherry_options,
+        "run_cherry": bool(run_cherry),
+        "fake_matting_from_frames": bool(fake_matting_from_frames),
         "resource_json": resource_json,
     }
 
@@ -88,6 +96,7 @@ def run_start(
     selection_types: list[str] | None = None,
     progress_include: list[str] | None = None,
     progress_exclude: list[str] | None = None,
+    priority_characters: list[str] | None = None,
     use_smooth: bool = False,
     resize_width: int = 384,
     resize_height: int = 512,
@@ -95,6 +104,8 @@ def run_start(
     resource_json_output_path: str | None = None,
     resource_json_types: list[str] | None = None,
     notify_interval_seconds: int = 60,
+    run_cherry: bool = True,
+    fake_matting_from_frames: bool = False,
 ) -> dict[str, Any]:
     from assetclaw_matting.db.sqlite import get_connection
     from assetclaw_matting.runtime_context import get_runtime_context
@@ -115,18 +126,23 @@ def run_start(
         selection_types,
         progress_include,
         progress_exclude,
+        priority_characters,
         use_smooth,
         resize_width,
         resize_height,
         resource_json_enabled,
         resource_json_output_path,
         resource_json_types,
+        run_cherry,
+        fake_matting_from_frames,
     )
     run_id = _run_id()
     ctx = get_runtime_context()
     options = {
         **preview["frame"],
         "cherry": preview["cherry"],
+        "run_cherry": bool(preview.get("run_cherry", True)),
+        "fake_matting_from_frames": bool(preview.get("fake_matting_from_frames", False)),
         "resource_json": preview["resource_json"],
         "notify_interval_seconds": max(30, min(int(notify_interval_seconds), 3600)),
         "chat_id": (ctx.get("chat_id") or "") if ctx.get("channel") == "feishu" else "",
@@ -159,7 +175,8 @@ def run_start(
                 created,
             ),
         )
-    _notify(run_id, "动画自动化流程已启动：抽帧 -> 抠图 -> 平滑")
+    matting_label = "抽帧当抠图" if options["fake_matting_from_frames"] else "抠图"
+    _notify(run_id, "动画自动化流程已启动：抽帧 -> " + matting_label + (" -> 平滑" if options["run_cherry"] else ""))
     _start_worker(run_id)
     return {"ok": True, "run_id": run_id, "status": "RUNNING", **preview}
 
@@ -284,6 +301,7 @@ def _frame_options(
     selection_types: list[str] | None,
     progress_include: list[str] | None,
     progress_exclude: list[str] | None,
+    priority_characters: list[str] | None,
 ) -> dict[str, Any]:
     return {
         "fps": int(fps),
@@ -296,11 +314,22 @@ def _frame_options(
         "selection_types": list(selection_types or []),
         "progress_include": list(progress_include or []),
         "progress_exclude": list(progress_exclude or []),
+        "priority_characters": list(priority_characters or []),
     }
 
 
 def _cherry_options(use_smooth: bool, resize_width: int, resize_height: int) -> dict[str, Any]:
     return {
+        "use_denoise": True,
+        "use_blur": True,
+        "use_resize1": True,
+        "resize1_width": max(int(resize_width) * 2, int(resize_width)),
+        "resize1_height": max(int(resize_height) * 2, int(resize_height)),
+        "use_sharp1": True,
+        "use_resize2": True,
+        "resize2_width": int(resize_width),
+        "resize2_height": int(resize_height),
+        "use_sharp2": True,
         "use_smooth": bool(use_smooth),
         "resize_width": int(resize_width),
         "resize_height": int(resize_height),
@@ -333,6 +362,9 @@ def _split_route_roots(workspace_root: str) -> list[Path]:
     root = Path(workspace_root)
     routes = []
     for asset_kind in ("scene", "emoji"):
+        route = root / asset_kind
+        if route.exists():
+            routes.append(route)
         for variant in ("default", "temporal_smooth"):
             route = root / asset_kind / variant
             if route.exists():
@@ -384,6 +416,7 @@ def _worker(run_id: str) -> None:
             types=opts.get("selection_types") or None,
             progress_include=opts.get("progress_include") or None,
             progress_exclude=opts.get("progress_exclude") or None,
+            priority_characters=opts.get("priority_characters") or None,
             notify_interval_seconds=opts["notify_interval_seconds"],
         )
         _update_ids(run_id, frame_run_id=frame["run_id"], current_step="frame")
@@ -393,6 +426,7 @@ def _worker(run_id: str) -> None:
         if status.get("status") != "DONE":
             _fail(run_id, f"抽帧失败：{status.get('error') or status.get('status')}")
             return
+        _notify(run_id, _format_frame_stage_summary(row, status))
         route_roots = _split_route_roots(
             _workspace_root_from_paths(row["input_dir"], row["frame_output_dir"], row["matte_output_dir"], row["smooth_output_dir"])
         )
@@ -409,36 +443,68 @@ def _worker(run_id: str) -> None:
                 resource_json.get("types") or [],
             )
 
-        from assetclaw_matting.skills.comfyui_skills import run_start as comfy_start, run_status as comfy_status
-
-        _notify(run_id, f"动画自动化流程：抽帧完成，开始 ComfyUI 抠图\n已登记视频：{status.get('manifest_count', 0)} 条")
         comfy_routes = active_routes or [Path(row["frame_output_dir"]).parent]
-        for route in comfy_routes:
-            frames_dir = route / "frames" if (route / "frames").is_dir() else Path(row["frame_output_dir"])
-            matte_dir = route / "matte" if (route / "matte").parent.exists() else Path(row["matte_output_dir"])
-            if not any(frames_dir.rglob("*.png")):
-                continue
-            comfy = comfy_start(
-                workflow_path=row["workflow_path"] or None,
-                input_dir=str(frames_dir),
-                output_dir=str(matte_dir),
-                recursive=True,
-                preserve_structure=True,
-                max_images=50000,
-                skip_existing=True,
-                notify_interval_seconds=opts["notify_interval_seconds"],
-            )
-            _update_ids(run_id, comfyui_run_id=str(comfy["run_id"]), current_step="comfyui")
-            if not _wait_until_done(lambda rid=str(comfy["run_id"]): comfy_status(rid, include_gpu=False), run_id):
+        detail: dict[str, Any] = {}
+        if opts.get("fake_matting_from_frames"):
+            _update_ids(run_id, current_step="comfyui")
+            _notify(run_id, f"动画自动化流程：抽帧完成，FAKER 抠图开始\n已登记视频：{status.get('manifest_count', 0)} 条")
+            total_copied = 0
+            for route in comfy_routes:
+                frames_dir = route / "frames" if (route / "frames").is_dir() else Path(row["frame_output_dir"])
+                matte_dir = route / "matte" if (route / "matte").parent.exists() else Path(row["matte_output_dir"])
+                copied = _copy_frames_as_matte(frames_dir, matte_dir)
+                total_copied += copied
+                _notify(run_id, f"步骤3 FAKER 抠图完成：{route.name}\n输入：{frames_dir}\n输出：{matte_dir}\n复制：{copied} 张")
+            if total_copied <= 0:
+                _fail(run_id, "FAKER 抠图没有产出图片。请确认抽帧目录存在 PNG。")
                 return
-            status = comfy_status(str(comfy["run_id"]), include_gpu=False)
-            if status.get("status") not in {"DONE", "DONE_WITH_ERRORS"}:
-                _fail(run_id, f"抠图失败：{status.get('error') or status.get('status')}")
-                return
+            detail = {"role": "faker", "emotion": "frames-as-matte", "frame": f"{total_copied} png"}
+        else:
+            from assetclaw_matting.skills.comfyui_skills import run_start as comfy_start, run_status as comfy_status
+
+            matte_size = _workflow_output_size(row["workflow_path"])
+            size_line = f"本次抠图输出尺寸：{matte_size}" if matte_size else "本次抠图输出尺寸：未能从 workflow 自动识别"
+            _notify(run_id, f"动画自动化流程：抽帧完成，开始 ComfyUI 抠图\n已登记视频：{status.get('manifest_count', 0)} 条\n{size_line}\n工作流：{row['workflow_path']}")
+            for route in comfy_routes:
+                frames_dir = route / "frames" if (route / "frames").is_dir() else Path(row["frame_output_dir"])
+                matte_dir = route / "matte" if (route / "matte").parent.exists() else Path(row["matte_output_dir"])
+                if not any(frames_dir.rglob("*.png")):
+                    continue
+                _notify(run_id, f"步骤3 抠图开始：{route.name}\n{size_line}\n输入：{frames_dir}\n输出：{matte_dir}")
+                comfy = comfy_start(
+                    workflow_path=row["workflow_path"] or None,
+                    input_dir=str(frames_dir),
+                    output_dir=str(matte_dir),
+                    recursive=True,
+                    preserve_structure=True,
+                    max_images=50000,
+                    skip_existing=True,
+                    priority_characters=opts.get("priority_characters") or None,
+                    notify_interval_seconds=opts["notify_interval_seconds"],
+                )
+                _update_ids(run_id, comfyui_run_id=str(comfy["run_id"]), current_step="comfyui")
+                if not _wait_until_done(lambda rid=str(comfy["run_id"]): comfy_status(rid, include_gpu=False), run_id):
+                    return
+                status = comfy_status(str(comfy["run_id"]), include_gpu=False)
+                if status.get("status") not in {"DONE", "DONE_WITH_ERRORS"}:
+                    _fail(run_id, f"抠图失败：{status.get('error') or status.get('status')}")
+                    return
+                _notify(
+                    run_id,
+                    "步骤3 抠图完成："
+                    f"{status.get('completed', 0)}/{status.get('total', 0)} 张，"
+                    f"失败 {status.get('failed', 0)}，状态 {status.get('status')}\n"
+                    f"输出：{status.get('output_dir')}",
+                )
+            detail = status.get("last_completed_detail") or {}
+        if not opts.get("run_cherry", True):
+            suffix = f"\n最后抠图：{detail.get('role')}/{detail.get('emotion')}/{detail.get('frame')}" if detail else ""
+            _set_status(run_id, "DONE")
+            _notify(run_id, f"动画自动化流程完成：{run_id}\n最终输出：{row['matte_output_dir']}{suffix}")
+            return
 
         from assetclaw_matting.skills.cherry_skills import run_start as cherry_start, run_status as cherry_status
 
-        detail = status.get("last_completed_detail") or {}
         suffix = f"\n最后抠图：{detail.get('role')}/{detail.get('emotion')}/{detail.get('frame')}" if detail else ""
         _notify(run_id, f"动画自动化流程：抠图完成，开始 Cherry 平滑{suffix}")
         for route in comfy_routes:
@@ -447,6 +513,7 @@ def _worker(run_id: str) -> None:
             if not any(matte_dir.rglob("*.png")):
                 continue
             cherry_options = _route_cherry_options(route) or (opts.get("cherry") or _cherry_options(False, 384, 512))
+            _notify(run_id, _format_cherry_stage_start(route, matte_dir, smooth_dir, cherry_options))
             cherry = cherry_start(
                 input_dir=str(matte_dir),
                 output_dir=str(smooth_dir),
@@ -463,6 +530,13 @@ def _worker(run_id: str) -> None:
             if status.get("status") not in {"DONE", "DONE_WITH_ERRORS"}:
                 _fail(run_id, f"平滑失败：{status.get('error') or status.get('status')}")
                 return
+            _notify(
+                run_id,
+                "步骤4 Cherry 完成："
+                f"{status.get('completed', 0)}/{status.get('total', 0)} 张，"
+                f"失败 {status.get('failed', 0)}，状态 {status.get('status')}\n"
+                f"输出：{status.get('output_dir')}",
+            )
         _set_status(run_id, "DONE")
         _notify(run_id, f"动画自动化流程完成：{run_id}\n最终输出：{row['smooth_output_dir']}")
     except Exception as exc:
@@ -494,6 +568,96 @@ def _detail_lines(payload: dict[str, Any]) -> list[str]:
         if detail:
             lines.append(f"当前位置：平滑刚完成 {detail.get('role')}/{detail.get('emotion')}/{detail.get('frame')}")
     return lines
+
+
+def _copy_frames_as_matte(frames_dir: Path, matte_dir: Path) -> int:
+    if not frames_dir.is_dir():
+        return 0
+    count = 0
+    for src in sorted(frames_dir.rglob("*.png")):
+        rel = src.relative_to(frames_dir)
+        dst = matte_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        count += 1
+    return count
+
+
+def _workflow_output_size(workflow_path: str | None) -> str:
+    if not workflow_path:
+        return ""
+    try:
+        workflow = json.loads(Path(workflow_path).read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if isinstance(workflow.get("nodes"), list):
+        for node in workflow.get("nodes") or []:
+            if not isinstance(node, dict) or str(node.get("type") or "") != "CherryPSResize":
+                continue
+            widgets = node.get("widgets_values") if isinstance(node.get("widgets_values"), list) else []
+            if len(widgets) >= 3:
+                return f"{int(widgets[1])}x{int(widgets[2])}"
+    if isinstance(workflow, dict):
+        for node in workflow.values():
+            if not isinstance(node, dict) or str(node.get("class_type") or "") != "CherryPSResize":
+                continue
+            inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+            width = inputs.get("目标宽度") or inputs.get("width") or inputs.get("target_width")
+            height = inputs.get("目标高度") or inputs.get("height") or inputs.get("target_height")
+            if width and height:
+                return f"{int(width)}x{int(height)}"
+    return ""
+
+
+def _format_frame_stage_summary(row: Any, status: dict[str, Any]) -> str:
+    root = Path(_workspace_root_from_paths(row["input_dir"], row["frame_output_dir"], row["matte_output_dir"], row["smooth_output_dir"]))
+    summary = _source_manifest_summary(root / "source_manifest.json")
+    lines = [
+        "步骤1/2 飞书下载 + 抽帧完成：",
+        f"记录：{status.get('processed_records', 0)}/{status.get('total_records', 0)}，已登记视频 {status.get('manifest_count', 0)} 条",
+        f"视频附件：下载 {summary['attachment_count']} 个，跳过 {summary['skipped_count']} 条",
+        f"抽帧输出：{status.get('export_dir')}",
+    ]
+    if summary["skip_reasons"]:
+        reasons = "；".join(f"{reason} x{count}" for reason, count in summary["skip_reasons"].items())
+        lines.append(f"跳过原因：{reasons}")
+    lines.append("状态策略：只跳过 已完成 / 不处理；其他状态均重新下载并抽帧")
+    return "\n".join(lines)
+
+
+def _source_manifest_summary(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {"attachment_count": 0, "skipped_count": 0, "skip_reasons": {}}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    records = data.get("records") or []
+    skipped = data.get("skipped") or []
+    skip_reasons: dict[str, int] = {}
+    for item in skipped:
+        reason = str(item.get("reason") or item.get("skipReason") or "unknown")
+        skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+    attachment_count = 0
+    for item in records:
+        if item.get("skipped"):
+            continue
+        attachment_count += len(item.get("attachments") or [])
+    return {
+        "attachment_count": attachment_count,
+        "skipped_count": len(skipped),
+        "skip_reasons": skip_reasons,
+    }
+
+
+def _format_cherry_stage_start(route: Path, matte_dir: Path, smooth_dir: Path, options: dict[str, Any]) -> str:
+    variant = "时序平滑" if options.get("use_smooth") else "普通后处理"
+    size = f"{options.get('resize_width')}x{options.get('resize_height')}"
+    return "\n".join(
+        [
+            f"步骤4 Cherry 开始：{route.name}",
+            f"模式：{variant}，分辨率：{size}",
+            f"输入：{matte_dir}",
+            f"输出：{smooth_dir}",
+        ]
+    )
 
 
 def _export_resource_json(manifest_path: Path, output_path: str, types: list[str]) -> None:

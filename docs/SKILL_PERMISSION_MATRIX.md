@@ -221,24 +221,31 @@ E:\assetclaw-matting-bot\README.md 是否存在
 | `frame.run_status` | frame | readonly | Yes | No | No | 查看抽帧任务进度 |
 | `frame.run_list` | frame | readonly | Yes | No | No | 列出抽帧任务 |
 | `frame.run_cancel` | frame | write_safe | Yes | No | No | 终止抽帧任务 |
-| `animation_flow.preview` | animation_flow | readonly | Yes | No | No | 预览完整 7 步动画自动化流程 |
-| `animation_flow.start` | animation_flow | write_safe | Yes | No | Yes | 执行飞书下载 -> 抽帧 -> 抠图 -> Cherry -> unity_ready -> Unity 导入 -> P4 Shelve-only |
-| `animation_flow.status` | animation_flow | readonly | Yes | No | No | 查看完整 7 步流程和子任务进度 |
-| `animation_flow.list` | animation_flow | readonly | Yes | No | No | 列出完整 7 步流程任务 |
-| `animation_flow.cancel` | animation_flow | write_safe | Yes | No | No | 终止完整 7 步流程和当前子任务 |
+| `animation_flow.preview` | animation_flow | readonly | Yes | No | No | 预览完整 6 步动画自动化流程 |
+| `animation_flow.start` | animation_flow | write_safe | Yes | No | Yes | 执行飞书下载 -> 抽帧 -> 抠图 -> unity_ready -> Unity 导入 -> P4 Shelve-only |
+| `animation_flow.status` | animation_flow | readonly | Yes | No | No | 查看完整 6 步流程和子任务进度 |
+| `animation_flow.list` | animation_flow | readonly | Yes | No | No | 列出完整 6 步流程任务 |
+| `animation_flow.cancel` | animation_flow | write_safe | Yes | No | No | 终止完整 6 步流程和当前子任务 |
 | `unity_ready.preview` | unity_ready | readonly | Yes | No | No | 预览 unity_ready 输出结构 |
 | `unity_ready.build` | unity_ready | write_safe | Yes | No | Yes | 生成 unity_ready/scene 和 unity_ready/emoji |
 | `unity_ready.status` | unity_ready | readonly | Yes | No | No | 查看 unity_ready JSON 和帧数量 |
 | `unity_import.preview` | unity | readonly | Yes | No | No | 预览 Unity 插件导入路径 |
 | `unity_import.run` | unity | write_safe | Yes | No | Yes | 调用 Unity 插件 API 导入引擎 |
 | `unity_import.status` | unity | readonly | Yes | No | No | 查看 Unity 导入准备状态 |
-| `pipeline.run_preview` | pipeline | readonly | Yes | No | No | 预览旧三步动画流程 |
-| `pipeline.run_start` | pipeline | write_safe | Yes | No | Yes | 旧入口：执行抽帧 -> 抠图 -> 平滑三步流程 |
-| `pipeline.run_status` | pipeline | readonly | Yes | No | No | 查看旧三步流程和子任务进度 |
-| `pipeline.run_list` | pipeline | readonly | Yes | No | No | 列出旧三步流程任务 |
-| `pipeline.run_cancel` | pipeline | write_safe | Yes | No | No | 终止旧三步流程和当前子任务 |
+| `unity_tools.atlas_status` | unity | readonly | Yes | No | No | 查看 `Assets/TATest/AtlasSizeReport.json` 图集报告状态 |
+| `unity_tools.atlas_report` | unity | write_safe | Yes | No | Yes | 调用 Unity 图集统计工具生成报告 |
+| `unity_tools.rename_preview` | unity | readonly | Yes | No | No | 预览动画贴图批量重命名流水线 |
+| `unity_tools.rename_run` | unity | write_safe | Yes | No | Yes | 执行动画贴图批量重命名流水线 |
 | `system.gpu_status` | system | readonly | Yes | No | No | nvidia-smi GPU 显存/利用率/温度/功耗 |
 | `system.process_status` | system | readonly | Yes | No | No | 查询匹配进程状态 |
+
+**Unity 附加工具自然语言示例**：
+```
+查看 Unity 图集大小报告
+生成 Unity 图集大小统计报告
+预览动画贴图批量重命名
+执行动画贴图重命名流水线
+```
 
 ---
 

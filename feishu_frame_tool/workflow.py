@@ -121,9 +121,19 @@ class Workflow:
             for item in selection.get("emotions", [])
             if str(item or "").strip()
         }
+        self.selection_characters = {
+            _safe_name(item)
+            for item in selection.get("characters", [])
+            if str(item or "").strip()
+        }
         self.selection_types = {str(item).strip() for item in selection.get("types", []) if str(item or "").strip()}
         self.progress_include = {str(item).strip() for item in selection.get("progress_include", []) if str(item or "").strip()}
         self.progress_exclude = {str(item).strip() for item in selection.get("progress_exclude", []) if str(item or "").strip()}
+        self.priority_characters = [
+            _safe_name(item)
+            for item in selection.get("priority_characters", [])
+            if str(item or "").strip()
+        ]
         self.rec_map: dict = {}
         self.manifest_items: list[dict] = []
 
@@ -198,6 +208,7 @@ class Workflow:
             r for r in records
             if _attachments(r.get("fields", {}).get(self.f_animation))
         ]
+        animation_records = self._prioritize_records(animation_records)
         self.log(f"发现 {len(animation_records)} 条有动画附件的记录")
 
         processed = 0
@@ -246,6 +257,8 @@ class Workflow:
         parts = self._hierarchy_parts(rid)
         if self.selection_root and (not parts or parts[0] != _safe_name(self.selection_root)):
             return False
+        if self.selection_characters and (len(parts) < 2 or parts[-2] not in self.selection_characters):
+            return False
         if self.selection_emotions and (not parts or parts[-1] not in self.selection_emotions):
             return False
         types = set(_field_texts(fields.get(self.f_type)))
@@ -257,6 +270,19 @@ class Workflow:
         if self.progress_exclude and (progress & self.progress_exclude):
             return False
         return True
+
+    def _prioritize_records(self, records: list[dict]) -> list[dict]:
+        if not self.priority_characters:
+            return records
+        priority = {name: index for index, name in enumerate(self.priority_characters)}
+
+        def key(record: dict) -> tuple[int, int]:
+            parts = self._hierarchy_parts(record.get("record_id", ""))
+            root = _safe_name(parts[0]) if parts else ""
+            rank = priority.get(root, len(priority))
+            return rank, 0
+
+        return sorted(records, key=key)
 
     def _record_identity(self, rid: str, fields: dict) -> dict:
         hierarchy = self._hierarchy_parts(rid)
@@ -341,7 +367,7 @@ class Workflow:
             suffix = Path(raw_name).suffix or ".mp4"
             stem = "source" if index == 0 else f"source_{index + 1:02d}"
             save_name = stem + suffix
-            self.log(f"下载视频：{identity['label']} -> {os.path.join(asset_kind, process_variant, 'videos', key, save_name)}")
+            self.log(f"下载视频：{identity['label']} -> {os.path.join(asset_kind, 'videos', key, save_name)}")
             path = self.client.download_attachment(
                 att, rec_dir, field_name=self.f_animation, record_id=rid, save_name=save_name)
             downloaded.append(path)

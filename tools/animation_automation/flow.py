@@ -29,10 +29,8 @@ class FlowPlan:
                     "description": "飞书文档读取并下载视频，写入 source_manifest.json。",
                     "outputs": [
                         str(self.date_root / "source_manifest.json"),
-                        str(self.date_root / "scene/default/videos"),
-                        str(self.date_root / "scene/temporal_smooth/videos"),
-                        str(self.date_root / "emoji/default/videos"),
-                        str(self.date_root / "emoji/temporal_smooth/videos"),
+                        str(self.date_root / "scene/videos"),
+                        str(self.date_root / "emoji/videos"),
                     ],
                 },
                 {
@@ -40,38 +38,23 @@ class FlowPlan:
                     "name": "extract_frames",
                     "description": "按分流目录抽帧，帧号从 0000.png 开始。",
                     "outputs": [
-                        str(self.date_root / "scene/default/frames"),
-                        str(self.date_root / "scene/temporal_smooth/frames"),
-                        str(self.date_root / "emoji/default/frames"),
-                        str(self.date_root / "emoji/temporal_smooth/frames"),
+                        str(self.date_root / "scene/frames"),
+                        str(self.date_root / "emoji/frames"),
                     ],
                 },
                 {
                     "id": 3,
                     "name": "matting",
-                    "description": "ComfyUI 抠图，同一路 frames -> matte。",
+                    "description": "ComfyUI 抠图，同一路 frames -> matte；后处理已集成在抠图工作流中。",
                     "outputs": [
-                        str(self.date_root / "scene/default/matte"),
-                        str(self.date_root / "scene/temporal_smooth/matte"),
-                        str(self.date_root / "emoji/default/matte"),
-                        str(self.date_root / "emoji/temporal_smooth/matte"),
+                        str(self.date_root / "scene/matte"),
+                        str(self.date_root / "emoji/matte"),
                     ],
                 },
                 {
                     "id": 4,
-                    "name": "postprocess_cherry",
-                    "description": "Cherry 后处理。scene 使用 384x512，emoji 使用 256x256；temporal_smooth 开启平滑。",
-                    "outputs": [
-                        str(self.date_root / "scene/default/smooth"),
-                        str(self.date_root / "scene/temporal_smooth/smooth"),
-                        str(self.date_root / "emoji/default/smooth"),
-                        str(self.date_root / "emoji/temporal_smooth/smooth"),
-                    ],
-                },
-                {
-                    "id": 5,
                     "name": "unity_ready",
-                    "description": "把四路前处理结果汇总为 Unity 插件可读的 scene / emoji 两包。",
+                    "description": "把抠图结果汇总为 Unity 插件可读的 scene / emoji 两包。",
                     "command": f'python -m tools.animation_automation.cli build-unity-ready --date-root "{self.date_root}"',
                     "outputs": [
                         str(ready / "manifest.json"),
@@ -82,7 +65,7 @@ class FlowPlan:
                     ],
                 },
                 {
-                    "id": 6,
+                    "id": 5,
                     "name": "unity_import",
                     "description": "调用 Unity 插件导入 scene / emoji 包。当前项目不修改插件源码；如无 batchmode 入口则只生成导入参数。",
                     "command": f'python -m tools.animation_automation.cli import-unity-ready --unity-ready "{ready}" --package both',
@@ -94,7 +77,7 @@ class FlowPlan:
                     ],
                 },
                 {
-                    "id": 7,
+                    "id": 6,
                     "name": "p4_shelve",
                     "description": "P4 同步、预览、单步确认 create-cl/reconcile/shelve，最后生成 Feishu 可读报告。submit 永远禁用。",
                     "safe_commands": [

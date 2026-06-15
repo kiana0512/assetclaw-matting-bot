@@ -208,7 +208,9 @@ def _try_handle_confirmation(
     dedup_key: str,
 ) -> FeishuProcessResult | None:
     text = event.text.strip()
-    confirm_like = re.search(r"\b(?:yes|y)\b|确认(?:执行)?", text, re.IGNORECASE)
+    provided_ids = re.findall(r"\b[a-fA-F0-9]{6,}\b", text)
+    bare_confirmation_code = bool(re.fullmatch(r"\s*[a-fA-F0-9]{6,}\s*", text))
+    confirm_like = re.search(r"\b(?:yes|y)\b|确认(?:执行)?", text, re.IGNORECASE) or bare_confirmation_code
     cancel_like = _is_confirmation_cancel(text)
     if not confirm_like and not cancel_like:
         return None
@@ -220,7 +222,6 @@ def _try_handle_confirmation(
         update_event_dedup_status,
     )
 
-    provided_ids = re.findall(r"\b[a-fA-F0-9]{6,}\b", text)
     if provided_ids:
         pending_items = []
         missing = []
@@ -292,7 +293,8 @@ def _try_handle_confirmation(
                 skill=pending["skill"],
                 arguments=pending["arguments"],
             )
-            result = call_skill(pending["skill"], pending["arguments"], requested_by="feishu_confirmed")
+            arguments = _normalize_confirmed_arguments(pending["skill"], dict(pending["arguments"] or {}))
+            result = call_skill(pending["skill"], arguments, requested_by="feishu_confirmed")
             mark_pending_confirmation(pending["id"], "executed" if result.get("ok") else "failed")
             results.append(result)
     finally:
@@ -312,6 +314,25 @@ def _try_handle_confirmation(
         text=text_out,
     )
     return FeishuProcessResult(ok=all(bool(result.get("ok")) for result in results), trace_id=trace_id, reply_text=text_out)
+
+
+def _normalize_confirmed_arguments(skill: str, arguments: dict) -> dict:
+    if skill != "animation_flow.start":
+        return arguments
+    mode = arguments.get("unity_import_mode") or arguments.get("import_mode")
+    if mode is not None:
+        text = str(mode).strip().lower()
+        if text in {"迭代", "资源迭代", "替换", "贴图迭代", "高清化", "直接替换", "iteration", "iterate", "replace", "replacement", "update", "iter"}:
+            arguments["unity_import_mode"] = "iteration"
+            arguments.pop("import_mode", None)
+        elif text in {"导入", "新导入", "批量导入", "import", "new", "batch"}:
+            arguments["unity_import_mode"] = "import"
+            arguments.pop("import_mode", None)
+    priority = arguments.get("priority_characters")
+    if isinstance(priority, str):
+        values = [item.strip() for item in re.split(r"[,，、\s]+", priority) if item.strip()]
+        arguments["priority_characters"] = values
+    return arguments
 
 
 def _is_confirmation_cancel(text: str) -> bool:

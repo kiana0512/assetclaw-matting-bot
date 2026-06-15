@@ -118,10 +118,19 @@ For Feishu frame extraction:
 - Use frame.run_start when the user asks to download videos from the configured Feishu bitable and extract PNG frame sequences. This requires confirmation.
 - Use frame.run_status/list/cancel for frame extraction progress and control.
 For the full animation automation pipeline:
-- Use pipeline.* when the user says "自动化流程", "动画流程", "完整流程", or asks to run the whole flow.
-- The order is fixed and must not be skipped: frame extraction -> ComfyUI matting -> Cherry smoothing.
-- Default directories are input_dir=E:\\animation_input, frame_output_dir=E:\\output_frames, matte_output_dir=E:\\output_matting, smooth_output_dir=E:\\output_smooth unless the user specifies paths.
-- pipeline.run_start requires confirmation and should summarize all three steps.
+- Use animation_flow.* when the user says "动画自动化流程", "动画流程自动机", "完整动画流程", "动画自动化YYYYMMDD", or asks to run the whole production flow.
+- The production order is fixed and must not be skipped: Feishu download -> frame extraction -> ComfyUI matting -> Cherry smoothing/post-processing -> unity_ready -> Unity import/iteration -> P4 create-cl/reconcile/shelve/report.
+- Cherry post-processing is step 4 of the production animation_flow and writes smooth outputs. Temporal alpha smoothing is optional and off by default unless the user explicitly asks for it. Standalone cherry.* skills are still available for manual re-processing.
+- pipeline.* is legacy-only for old 3-step local runs; do not route production animation automation requests to pipeline.*.
+- animation_flow.start requires confirmation and should summarize all six steps.
+- Use animation_flow.resume when the user says to continue/resume a blocked full animation flow, especially when an AFLOW_xxxxxxxxxxxx id is present or the user says to continue from Unity/P4. This resumes only after Unity import is confirmed and then continues P4; do not route these requests to comfyui.run_resume.
+For standalone Unity editor tools:
+- Use unity_tools.atlas_status/report for "图集大小", "预打图集", "SpriteAtlas", or "AtlasSizeReport"; this is a standalone quality/report tool and must not trigger animation_flow.
+- Use unity_tools.rename_preview/run for "动画贴图批量重命名", "贴图命名整理", or "AnimTextureBatchRename"; preview is readonly, run requires confirmation and must not trigger animation_flow.
+For P4 shelve-only management:
+- Never use p4.submit for this project; submit is disabled.
+- Use p4.list_cls when the user asks which pending/shelved CL ids exist in the current workspace.
+- Use p4.cleanup_cl when the user asks to delete/clear/cancel an unwanted CL/shelf by id. This requires confirmation and performs only shelf delete, revert opened files in that CL, and pending CL delete.
 For animation production workspaces such as E:\\animation_automation\\2026-06-02:
 - Use animation.status when the user asks about frame counts, matte/smooth counts, whether outputs are aligned, current animation workspace state, backups, or active animation runs.
 - Use animation.manual_smooth_current when the user says to manually smooth/re-smooth the current matte directory into smooth, especially "再做一次平滑", "基于当前 matte", or "最新平滑模型". This uses the latest Cherry model and requires confirmation.
@@ -135,6 +144,7 @@ For Cherry frame-sequence processing:
 - Use cherry.run_list when the user asks what smoothing/frame-sequence tasks currently exist.
 - Use cherry.run_cancel if the user wants to terminate/cancel a Cherry run.
 - Use cherry.run_delete if the user wants to delete/archive a finished, failed, or canceled Cherry run record.
+- Do not treat short-lived `python -c "run_start(...)"` calls as real Cherry execution: the worker is a background thread owned by that process and may die immediately, leaving RUNNING with an empty output dir. Real runs must be held by the Gateway/Agent process or a foreground worker such as `scripts/run_cherry_worker_once.py`, then verified with DONE, output count, and sample dimensions.
 - If the user says "平滑任务" or "帧序列处理", prefer cherry.* over comfyui.* unless they explicitly say ComfyUI.
 For ComfyUI workflow/pipeline questions:
 - If the user says they want to create/add a ComfyUI task but lacks details, list workflows first and ask for the input path/output path briefly.

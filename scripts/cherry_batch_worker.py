@@ -28,25 +28,7 @@ def main() -> int:
             try:
                 batch_np = [module.decode(path.read_bytes()) for path in process_files]
                 batch = torch.from_numpy(np.stack(batch_np)).float() / 255.0
-                if options.get("use_denoise"):
-                    batch = module.alpha_denoise(
-                        batch,
-                        float(options.get("denoise_threshold", 0.06)),
-                        int(options.get("denoise_radius", 0)),
-                    )
-                if options.get("use_smooth"):
-                    batch = _temporal_smooth(module, batch, options)
-                if options.get("use_resize"):
-                    batch = module.ps_bicubic_sharper(batch, int(options.get("resize_width", 256)), int(options.get("resize_height", 256)))
-                if options.get("use_sharpen"):
-                    batch = module.sharpen(
-                        batch,
-                        float(options.get("sharpen_amount", 2.0)),
-                        int(options.get("sharpen_radius", 2)),
-                        float(options.get("sharpen_threshold", 0.02)),
-                        int(options.get("sharpen_shrink", 4)),
-                        float(options.get("min_alpha", 0.05)),
-                    )
+                batch = _apply_cherry_pipeline(module, batch, options)
                 out_np = (batch.detach().cpu().numpy().clip(0, 1) * 255).astype(np.uint8)
                 for index, image_path in enumerate(process_files):
                     target = dst / image_path.relative_to(src).with_suffix(".png")
@@ -123,12 +105,64 @@ def _temporal_smooth(module, batch, options):
         batch,
         int(options.get("smooth_window", 5)),
         float(options.get("smooth_sigma", 1.0)),
-        bool(options.get("sync_rgb", True)),
+        bool(options.get("sync_rgb", False)),
         float(options.get("min_alpha", 0.05)),
     ]
-    if len(inspect.signature(module.temporal_smooth).parameters) >= 6:
+    parameter_count = len(inspect.signature(module.temporal_smooth).parameters)
+    if parameter_count >= 6:
         args.append(int(options.get("ring_width", 25)))
+    if parameter_count >= 7:
+        args.append(str(options.get("smooth_method", "中值+高斯")))
+    if parameter_count >= 8:
+        args.append(bool(options.get("fill_gap", True)))
+    if parameter_count >= 9:
+        args.append(float(options.get("bg_thresh", 0.02)))
     return module.temporal_smooth(*args)
+
+
+def _apply_cherry_pipeline(module, batch, options):
+    if options.get("use_denoise"):
+        batch = module.alpha_denoise(
+            batch,
+            float(options.get("denoise_threshold", 0.06)),
+            int(options.get("denoise_radius", 0)),
+        )
+    if options.get("use_blur") and hasattr(module, "blur_under_composite"):
+        batch = module.blur_under_composite(batch, int(options.get("blur_radius", 1)), float(options.get("blur_sigma", 10.0)))
+    if options.get("use_resize1"):
+        batch = module.ps_bicubic_sharper(batch, int(options.get("resize1_width", 768)), int(options.get("resize1_height", 1024)))
+    if options.get("use_sharp1"):
+        batch = _sharpen(
+            module,
+            batch,
+            float(options.get("sharp1_amount", 1.0)),
+            int(options.get("sharp1_radius", 2)),
+            float(options.get("sharp1_threshold", 0.02)),
+            int(options.get("sharp1_shrink", 0)),
+            float(options.get("min_alpha", 0.05)),
+        )
+    if options.get("use_resize2"):
+        batch = module.ps_bicubic_sharper(batch, int(options.get("resize2_width", 384)), int(options.get("resize2_height", 512)))
+    if options.get("use_sharp2"):
+        batch = _sharpen(
+            module,
+            batch,
+            float(options.get("sharp2_amount", 1.0)),
+            int(options.get("sharp2_radius", 2)),
+            float(options.get("sharp2_threshold", 0.02)),
+            int(options.get("sharp2_shrink", 5)),
+            float(options.get("min_alpha", 0.05)),
+        )
+    if options.get("use_smooth"):
+        batch = _temporal_smooth(module, batch, options)
+    return batch
+
+
+def _sharpen(module, batch, amount, radius, threshold, shrink, min_alpha):
+    args = [batch, amount, radius, threshold, shrink]
+    if len(inspect.signature(module.sharpen).parameters) >= 6:
+        args.append(min_alpha)
+    return module.sharpen(*args)
 
 
 def _emit(payload: dict) -> None:

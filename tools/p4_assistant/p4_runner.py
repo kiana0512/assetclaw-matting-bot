@@ -141,6 +141,15 @@ class P4Runner:
     def shelve(self, cl: str | int, force: bool = False) -> P4CommandResult:
         return self.run(["shelve", "-f", "-c", str(cl)] if force else ["shelve", "-c", str(cl)], confirmation=True, timeout_seconds=300)
 
+    def delete_shelve(self, cl: str | int) -> P4CommandResult:
+        return self.run(["shelve", "-d", "-c", str(cl)], confirmation=True, timeout_seconds=300, check=False)
+
+    def revert_changelist(self, cl: str | int, paths: list[str]) -> P4CommandResult:
+        return self.run(["revert", "-c", str(cl), *(paths or ["//..."])], confirmation=True, timeout_seconds=300, check=False)
+
+    def delete_changelist(self, cl: str | int) -> P4CommandResult:
+        return self.run(["change", "-d", str(cl)], confirmation=True, timeout_seconds=120, check=False)
+
     def _env_for(self, workspace: P4WorkspaceConfig) -> dict[str, str]:
         env = os.environ.copy()
         env["P4PORT"] = workspace.p4port

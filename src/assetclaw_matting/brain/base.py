@@ -90,6 +90,13 @@ class BrainProvider(ABC):
                         message = preview_run_start_confirmation(args, confirmation_id)
                     except Exception:
                         pass
+                elif tool_call.skill == "animation_flow.resume":
+                    try:
+                        from assetclaw_matting.skills.animation_flow_skills import preview_run_resume_confirmation
+
+                        message = preview_run_resume_confirmation(args, confirmation_id)
+                    except Exception:
+                        pass
                 elif tool_call.skill == "animation.manual_smooth_current":
                     try:
                         from assetclaw_matting.skills.animation_ops_skills import preview_manual_smooth_current_confirmation
@@ -102,6 +109,27 @@ class BrainProvider(ABC):
                         from assetclaw_matting.skills.animation_ops_skills import preview_rerun_from_videos_confirmation
 
                         message = preview_rerun_from_videos_confirmation(args, confirmation_id)
+                    except Exception:
+                        pass
+                elif tool_call.skill == "unity_tools.atlas_report":
+                    try:
+                        from assetclaw_matting.skills.unity_tools_skills import preview_atlas_report_confirmation
+
+                        message = preview_atlas_report_confirmation(args, confirmation_id)
+                    except Exception:
+                        pass
+                elif tool_call.skill == "unity_tools.rename_run":
+                    try:
+                        from assetclaw_matting.skills.unity_tools_skills import preview_rename_confirmation
+
+                        message = preview_rename_confirmation(args, confirmation_id)
+                    except Exception:
+                        pass
+                elif tool_call.skill == "p4.cleanup_cl":
+                    try:
+                        from assetclaw_matting.skills.p4_skills import preview_cleanup_cl_confirmation
+
+                        message = preview_cleanup_cl_confirmation(args, confirmation_id)
                     except Exception:
                         pass
                 result = {

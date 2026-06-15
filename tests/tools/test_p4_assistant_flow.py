@@ -72,6 +72,15 @@ class FakeRunner:
     def describe(self, cl, shelved=False):
         return self._result(["describe", "-S", str(cl)], self.opened_stdout)
 
+    def delete_shelve(self, cl):
+        return self._result(["shelve", "-d", "-c", str(cl)])
+
+    def revert_changelist(self, cl, paths):
+        return self._result(["revert", "-c", str(cl), *paths])
+
+    def delete_changelist(self, cl):
+        return self._result(["change", "-d", str(cl)])
+
     def sync_preview(self, paths):
         return self._result(["sync", "-n", *paths])
 
@@ -108,6 +117,9 @@ workspaces:
 def test_submit_command_is_blocked() -> None:
     with pytest.raises(PermissionError):
         ensure_command_allowed(["submit"], confirmation=True)
+    with pytest.raises(PermissionError):
+        ensure_command_allowed(["revert", "//..."], confirmation=True)
+    ensure_command_allowed(["revert", "-c", "123", "Assets/Art/UI/SpritesAnim/Emoji/..."], confirmation=True)
 
 
 def test_preview_uses_reconcile_n(tmp_path: Path) -> None:
@@ -129,6 +141,25 @@ def test_write_operations_need_confirmation(tmp_path: Path) -> None:
     assert ops.create_changelist(workspace="spark_client", desc="demo")["needs_confirmation"] is True
     assert ops.reconcile_changelist(workspace="spark_client", cl="999")["needs_confirmation"] is True
     assert ops.shelve_changelist(workspace="spark_client", cl="999")["needs_confirmation"] is True
+
+
+def test_list_and_cleanup_changelists(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    runner.opened_stdout = "//depot/main/Assets/Art/UI/SpritesAnim/Emoji/a.png#1 - edit change 999 (binary)"
+    ops, _ = _ops(tmp_path, runner)
+
+    listed = ops.list_changelists(workspace="spark_client")
+    assert listed["ok"] is True
+    assert [item["id"] for item in listed["items"]] == ["124", "123"]
+
+    cleaned = ops.cleanup_changelist(workspace="spark_client", cl="999")
+    assert cleaned["ok"] is True
+    assert cleaned["deleted_shelf"] is True
+    assert cleaned["reverted"] is True
+    assert cleaned["deleted_changelist"] is True
+    assert ["shelve", "-d", "-c", "999"] in runner.calls
+    assert any(call[:3] == ["revert", "-c", "999"] for call in runner.calls)
+    assert ["change", "-d", "999"] in runner.calls
 
 
 def test_batch_shelve_ui_import_never_writes(tmp_path: Path) -> None:

@@ -72,6 +72,7 @@ def run_preview(
     types: list[str] | None = None,
     progress_include: list[str] | None = None,
     progress_exclude: list[str] | None = None,
+    priority_characters: list[str] | None = None,
 ) -> dict[str, Any]:
     defaults = default_automation_paths()
     cfg = _build_config(
@@ -87,6 +88,7 @@ def run_preview(
         types=types,
         progress_include=progress_include,
         progress_exclude=progress_exclude,
+        priority_characters=priority_characters,
     )
     return {
         "ok": True,
@@ -102,6 +104,7 @@ def run_preview(
         "selection_types": cfg.get("selection", {}).get("types", []),
         "progress_include": cfg.get("selection", {}).get("progress_include", []),
         "progress_exclude": cfg.get("selection", {}).get("progress_exclude", []),
+        "priority_characters": cfg.get("selection", {}).get("priority_characters", []),
         "selection": "all_records_with_animation",
     }
 
@@ -119,6 +122,7 @@ def run_start(
     types: list[str] | None = None,
     progress_include: list[str] | None = None,
     progress_exclude: list[str] | None = None,
+    priority_characters: list[str] | None = None,
     notify_interval_seconds: int = 60,
 ) -> dict[str, Any]:
     from assetclaw_matting.config import settings
@@ -138,6 +142,7 @@ def run_start(
         types=types,
         progress_include=progress_include,
         progress_exclude=progress_exclude,
+        priority_characters=priority_characters,
     )
     run_id = _run_id()
     run_dir = Path(settings.storage_dir) / "frame_runs" / run_id
@@ -440,6 +445,7 @@ def _build_config(
     types: list[str] | None = None,
     progress_include: list[str] | None = None,
     progress_exclude: list[str] | None = None,
+    priority_characters: list[str] | None = None,
 ) -> dict[str, Any]:
     cfg = _load_base_config()
     defaults = default_automation_paths()
@@ -470,6 +476,8 @@ def _build_config(
         cfg.setdefault("selection", {})["progress_include"] = [str(item) for item in progress_include]
     if progress_exclude is not None:
         cfg.setdefault("selection", {})["progress_exclude"] = [str(item) for item in progress_exclude]
+    if priority_characters is not None:
+        cfg.setdefault("selection", {})["priority_characters"] = [str(item) for item in priority_characters]
     return cfg
 
 

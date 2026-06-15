@@ -356,4 +356,4 @@ def _is_empty_understanding(text: str) -> bool:
 
 
 def _asks_for_visual_analysis(text: str) -> bool:
-    return any(kw in text for kw in ("分析", "理解", "识别", "看看图", "图里", "画面", "描述", "是什么"))
+    return any(kw in text for kw in ("分析", "理解", "识别", "看看图", "看图", "看一下", "看到", "图里", "画面", "描述", "是什么", "具体内容", "表情包", "附件内容"))

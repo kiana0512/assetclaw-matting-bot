@@ -72,6 +72,12 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "AssetClawWebUI/0.1"
 
     def do_GET(self) -> None:
+        if self.path.startswith("/api/local/animation-flow-runs"):
+            self._local_animation_flow_runs()
+            return
+        if self.path.startswith("/api/local/workspace-summary"):
+            self._local_workspace_summary()
+            return
         if self.path.startswith("/api/"):
             self._proxy()
             return
@@ -169,6 +175,10 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": False, "offline": True, "error": last_error, "tried_agent_urls": tried, "agent_url": tried[0] if tried else ""}, HTTPStatus.BAD_GATEWAY)
 
     def _map_api_path(self, path: str) -> str:
+        if path == "/api/brain/jobs":
+            return "/brain/jobs"
+        if path.startswith("/api/brain/jobs/"):
+            return path.replace("/api", "", 1)
         table = {
             "/api/health": "/health",
             "/api/admin/queue": "/admin/queue",
@@ -181,6 +191,65 @@ class Handler(BaseHTTPRequestHandler):
         }
         return table.get(path, "")
 
+    def _local_animation_flow_runs(self) -> None:
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query, keep_blank_values=True)
+        try:
+            limit = max(1, min(int((qs.get("limit") or ["20"])[0]), 100))
+        except ValueError:
+            limit = 20
+        include_finished = (qs.get("include_finished") or ["true"])[0].lower() != "false"
+        runs_root = ROOT.parent / "storage" / "animation_flow_runs"
+        finished = {"DONE", "FAILED", "CANCELED", "BLOCKED"}
+        items: list[dict] = []
+        if runs_root.exists():
+            files = sorted(runs_root.glob("AFLOW_*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+            for path in files:
+                try:
+                    item = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                if "/storage/debug/current_animation_workflow.json" in str(item.get("workflow_path") or "").replace("\\", "/"):
+                    continue
+                safe_item = _sanitize_animation_flow_run(item)
+                if not include_finished and str(safe_item.get("status") or "").upper() in finished:
+                    continue
+                items.append(safe_item)
+                if len(items) >= limit:
+                    break
+        current = next((item for item in items if str(item.get("status") or "").upper() not in finished), None)
+        self._json({"ok": True, "source": "local_files", "count": len(items), "current": current or (items[0] if items else None), "items": items})
+
+    def _local_workspace_summary(self) -> None:
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query, keep_blank_values=True)
+        root_raw = (qs.get("root") or [""])[0]
+        root = Path(root_raw.replace("/", "\\")) if root_raw else Path("E:/animation_automation")
+        def routed(stage: str) -> list[Path]:
+            return [root / "scene" / stage, root / "emoji" / stage]
+
+        specs = [
+            ("videos", "视频", routed("videos"), {".mp4", ".mov", ".avi", ".mkv", ".webm"}),
+            ("frames", "帧", routed("frames"), {".png", ".jpg", ".jpeg", ".webp"}),
+            ("matte", "抠图", routed("matte"), {".png", ".jpg", ".jpeg", ".webp"}),
+            ("smooth", "后处理", routed("smooth"), {".png", ".jpg", ".jpeg", ".webp"}),
+            ("unity_ready", "Unity Ready", [root / "unity_ready"], {".png", ".json", ".bytes", ".asset"}),
+        ]
+        items = []
+        for key, label, paths, exts in specs:
+            counts = [_count_tree(path, exts) for path in paths]
+            items.append({
+                "key": key,
+                "label": label,
+                "path": " ; ".join(str(path) for path in paths),
+                "exists": any(path.exists() for path in paths),
+                "count": sum(item[0] for item in counts),
+                "folders": sum(item[1] for item in counts),
+            })
+        self._json({"ok": True, "source": "local_files", "root": str(root), "items": items})
+
     def _json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -188,6 +257,176 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+
+def _sanitize_animation_flow_run(item: dict) -> dict:
+    children = item.get("children") if isinstance(item.get("children"), dict) else {}
+    p4 = item.get("p4") if isinstance(item.get("p4"), dict) else {}
+    child_p4 = children.get("p4") if isinstance(children.get("p4"), dict) else {}
+    unity_import = children.get("unity_import") if isinstance(children.get("unity_import"), dict) else {}
+    unity_summary = _summarize_unity_import(unity_import)
+    p4_summary = _summarize_flow_p4(child_p4)
+    status = str(item.get("status") or "").upper() or "UNKNOWN"
+    stages = item.get("stages") if isinstance(item.get("stages"), list) else []
+    if p4_summary and p4_summary.get("shelved") and status in {"RUNNING", "DONE", "UNKNOWN"}:
+        status = "DONE"
+        stages = [_mark_stage_done(stage) for stage in stages]
+    return {
+        "run_id": item.get("id"),
+        "id": item.get("id"),
+        "status": status,
+        "current_stage": "p4_shelve" if status == "DONE" and p4_summary else item.get("current_stage"),
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
+        "date_root": item.get("date_root"),
+        "unity_ready": item.get("unity_ready"),
+        "unity_project": item.get("unity_project"),
+        "package": item.get("package"),
+        "unity_import_mode": item.get("unity_import_mode"),
+        "workflow_path": item.get("workflow_path"),
+        "workflow_name": item.get("workflow_name"),
+        "fps": item.get("fps"),
+        "allow_p4_writes": item.get("allow_p4_writes"),
+        "fake_matting_from_frames": item.get("fake_matting_from_frames"),
+        "p4": {
+            "stream": p4.get("stream"),
+            "submit": p4.get("submit"),
+            "unity_import_mode": p4.get("unity_import_mode"),
+        },
+        "stages": stages,
+        "children": {
+            "pipeline_run_id": children.get("pipeline_run_id"),
+            "unity_import": unity_summary if unity_summary else None,
+            "p4": p4_summary,
+        },
+        "error": item.get("error") or "",
+    }
+
+
+def _mark_stage_done(stage: object) -> object:
+    if not isinstance(stage, dict):
+        return stage
+    updated = dict(stage)
+    updated["status"] = "done"
+    return updated
+
+
+def _summarize_flow_p4(payload: dict) -> dict | None:
+    if not payload:
+        return None
+    create_cl = payload.get("create_cl") if isinstance(payload.get("create_cl"), dict) else {}
+    reconcile = payload.get("reconcile") if isinstance(payload.get("reconcile"), dict) else {}
+    shelve = payload.get("shelve") if isinstance(payload.get("shelve"), dict) else {}
+    report = payload.get("report") if isinstance(payload.get("report"), dict) else {}
+    changelist_id = (
+        payload.get("changelist_id")
+        or shelve.get("changelist_id")
+        or reconcile.get("changelist_id")
+        or create_cl.get("changelist_id")
+    )
+    target_paths = payload.get("target_paths") or reconcile.get("paths")
+    if not changelist_id and not target_paths:
+        return None
+    return {
+        "changelist_id": changelist_id,
+        "target_paths": target_paths,
+        "shelved": bool(shelve.get("ok")),
+        "reported": bool(report.get("ok")),
+        "reconciled": bool(reconcile.get("ok")),
+    }
+
+
+def _summarize_unity_import(payload: dict) -> dict | None:
+    if not payload:
+        return None
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    result_path = str(payload.get("result_path") or "")
+    if not result and result_path:
+        try:
+            path = Path(result_path)
+            if path.is_file():
+                result = json.loads(path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            result = {}
+    packages = result.get("packages") if isinstance(result.get("packages"), list) else []
+    totals = {
+        "tasks": 0,
+        "textures": 0,
+        "replaced": 0,
+        "skipped": 0,
+    }
+    compact_packages = []
+    for package in packages:
+        if not isinstance(package, dict):
+            continue
+        compact = {
+            "package": package.get("package") or package.get("name") or "",
+            "mode": package.get("mode") or result.get("mode") or payload.get("mode") or "",
+            "tasksProcessed": int(package.get("tasksProcessed") or package.get("task_count") or 0),
+            "textures": int(package.get("textures") or package.get("importedTextures") or 0),
+            "replacedTextures": int(package.get("replacedTextures") or 0),
+            "skippedTextures": int(package.get("skippedTextures") or 0),
+            "inferredFromDisk": bool(package.get("inferredFromDisk")),
+        }
+        totals["tasks"] += compact["tasksProcessed"]
+        totals["textures"] += compact["textures"]
+        totals["replaced"] += compact["replacedTextures"]
+        totals["skipped"] += compact["skippedTextures"]
+        compact_packages.append(compact)
+    disk = payload.get("disk_progress") if isinstance(payload.get("disk_progress"), dict) else {}
+    latest = payload.get("latest_status") if isinstance(payload.get("latest_status"), dict) else {}
+    recovered = str(payload.get("error") or "") == "unity_runner_timeout" and bool(result.get("ok"))
+    disk_confirmed = bool(result.get("inferredFromDisk") or payload.get("message") == "Unity result file was late/missing; disk polling confirmed the import outputs.")
+    display_status = "CONFIRMED" if disk_confirmed else ("LATE_RESULT" if recovered else ("OK" if payload.get("ok") else str(payload.get("error") or "PENDING")))
+    return {
+        "ok": payload.get("ok"),
+        "mode": payload.get("mode") or result.get("mode"),
+        "error": payload.get("error") or "",
+        "message": payload.get("message") or "",
+        "request": payload.get("request") or "",
+        "result_path": result_path,
+        "status_path": payload.get("status_path") or "",
+        "recovered": recovered,
+        "disk_confirmed": disk_confirmed,
+        "display_status": display_status,
+        "result": {
+            "ok": result.get("ok"),
+            "mode": result.get("mode") or payload.get("mode"),
+            "inferredFromDisk": bool(result.get("inferredFromDisk")),
+            "packages": compact_packages,
+            "totals": totals,
+        },
+        "disk_progress": {
+            "supported": bool(disk.get("supported")),
+            "complete": bool(disk.get("complete")),
+            "sourceTextures": int(disk.get("sourceTextures") or 0),
+            "replaceableTextures": int(disk.get("replaceableTextures") or 0),
+            "replacedTextures": int(disk.get("replacedTextures") or 0),
+            "skippedTextures": int(disk.get("skippedTextures") or 0),
+        },
+        "latest_status": {
+            "phase": latest.get("phase") or "",
+            "package": latest.get("package") or "",
+            "character": latest.get("character") or "",
+            "updatedAt": latest.get("updatedAt") or "",
+        },
+    }
+
+
+def _count_tree(root: Path, exts: set[str]) -> tuple[int, int]:
+    if not root.exists() or not root.is_dir():
+        return 0, 0
+    count = 0
+    folders: set[Path] = set()
+    try:
+        for item in root.rglob("*"):
+            if not item.is_file() or item.suffix.lower() not in exts:
+                continue
+            count += 1
+            folders.add(item.parent)
+    except Exception:
+        return count, len(folders)
+    return count, len(folders)
 
 
 def main() -> None:

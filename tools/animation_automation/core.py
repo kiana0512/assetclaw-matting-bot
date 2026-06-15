@@ -10,7 +10,7 @@ from typing import Any
 
 
 ASSET_KINDS = ("scene", "emoji")
-PROCESS_VARIANTS = ("default", "temporal_smooth")
+PROCESS_VARIANTS = ("default",)
 SKIP_PROGRESS = {"已完成", "不处理"}
 VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v"}
 
@@ -91,9 +91,8 @@ def classify_asset_kind(fields: dict[str, Any], fallback_texts: list[str] | None
 
 
 def classify_process_variant(fields: dict[str, Any]) -> str:
-    lowered = " ".join(candidate_texts(fields, PROCESS_OPTION_FIELDS)).lower()
-    if any(token in lowered for token in ("时序平滑", "時序平滑", "temporal_smooth", "temporal", "smooth")):
-        return "temporal_smooth"
+    # The main animation automation flow keeps Cherry post-processing as an
+    # explicit smooth stage after ComfyUI matting.
     return "default"
 
 
@@ -130,7 +129,7 @@ def load_source_manifest(date_root: Path) -> dict[str, Any]:
 
 
 def routed_stage_dir(date_root: Path, asset_kind: str, variant: str, stage: str, key: str | None = None) -> Path:
-    path = date_root / asset_kind / variant / stage
+    path = date_root / asset_kind / stage
     return path / key if key else path
 
 
@@ -143,9 +142,8 @@ def write_source_manifest(date_root: Path, manifest: dict[str, Any]) -> Path:
 
 def ensure_split_dirs(date_root: Path) -> None:
     for asset_kind in ASSET_KINDS:
-        for variant in PROCESS_VARIANTS:
-            for stage in ("videos", "frames", "matte", "smooth"):
-                (date_root / asset_kind / variant / stage).mkdir(parents=True, exist_ok=True)
+        for stage in ("videos", "frames", "matte", "smooth"):
+            (date_root / asset_kind / stage).mkdir(parents=True, exist_ok=True)
 
 
 def detect_frame_sequence(files: list[Path]) -> tuple[list[Path], list[str]]:
@@ -208,25 +206,30 @@ def build_unity_ready(
             continue
         key = str(record.get("taskKey") or task_key(record.get("character", ""), record.get("animation", "")))
         variant = str(record.get("processVariant") or "default")
-        smooth_dir = routed_stage_dir(date_root, asset_kind, variant, "smooth", key)
-        if not smooth_dir.is_dir():
-            message = f"missing smooth dir for {asset_kind}/{key}: {smooth_dir}"
+        source_dir = routed_stage_dir(date_root, asset_kind, variant, "smooth", key)
+        if not source_dir.is_dir():
+            matte_dir = routed_stage_dir(date_root, asset_kind, variant, "matte", key)
+            if not missing_smooth_is_error and matte_dir.is_dir():
+                warnings.append(f"missing smooth dir, fallback matte: {asset_kind}/{key}")
+                source_dir = matte_dir
+        if not source_dir.is_dir():
+            message = f"missing source image dir for {asset_kind}/{key}: {source_dir}"
             if missing_smooth_is_error:
                 raise FileNotFoundError(message)
             warnings.append(message)
             continue
-        pngs, seq_warnings = detect_frame_sequence(list(smooth_dir.iterdir()))
+        pngs, seq_warnings = detect_frame_sequence(list(source_dir.iterdir()))
         for warning in seq_warnings:
             warnings.append(f"{key} {warning}")
         if not pngs:
-            raise FileNotFoundError(f"smooth dir has no png for {asset_kind}/{key}: {smooth_dir}")
+            raise FileNotFoundError(f"source image dir has no png for {asset_kind}/{key}: {source_dir}")
         existing = package_tasks[asset_kind].get(key)
         if existing:
-            if Path(existing["sourceSmoothDir"]).resolve() != smooth_dir.resolve():
+            if Path(existing["sourceImageDir"]).resolve() != source_dir.resolve():
                 raise ValueError(
                     f"同一个 unity_ready/{asset_kind} 里出现重复任务 {key}：\n"
-                    f"- {existing['sourceSmoothDir']}\n"
-                    f"- {smooth_dir}\n"
+                    f"- {existing['sourceImageDir']}\n"
+                    f"- {source_dir}\n"
                     "请检查飞书表格是否重复，或手动确认使用哪一条。"
                 )
             merged_types = list(existing["types"])
@@ -241,7 +244,8 @@ def build_unity_ready(
             "displayName": str(record.get("displayName") or ""),
             "types": sorted(set(types), key=types.index),
             "processVariant": variant,
-            "sourceSmoothDir": str(smooth_dir),
+            "sourceImageDir": str(source_dir),
+            "sourceSmoothDir": str(source_dir),
             "frameCount": len(pngs),
             "pngs": pngs,
         }
@@ -276,7 +280,8 @@ def build_unity_ready(
                     "displayName": item["displayName"],
                     "unityCategories": item["types"],
                     "processVariant": item["processVariant"],
-                    "sourceSmoothDir": os.path.relpath(item["sourceSmoothDir"], ready_root).replace("\\", "/"),
+                    "sourceImageDir": os.path.relpath(item["sourceImageDir"], ready_root).replace("\\", "/"),
+                    "sourceSmoothDir": os.path.relpath(item["sourceImageDir"], ready_root).replace("\\", "/"),
                     "readyDir": f"{asset_kind}/frames/{key}",
                     "frameCount": item["frameCount"],
                 }

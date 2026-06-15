@@ -41,12 +41,16 @@ def test_cherry_info_preview_and_real_processing() -> None:
 
     available = info()
     assert available["exists"] is True
-    assert "Cherry_帧序列处理工具_2" in available["source_path"]
+    assert "Cherry_后处理网页_源码_20260615_0658" in available["source_path"]
     assert "去除外部噪点" in available["steps"]
+    assert "透明图模糊白叠加" in available["steps"]
     assert available["defaults"]["use_denoise"] is True
     assert available["defaults"]["denoise_threshold"] == 0.06
-    assert available["defaults"]["resize_width"] == 256
-    assert available["defaults"]["resize_height"] == 256
+    assert available["defaults"]["use_smooth"] is False
+    assert available["defaults"]["resize1_width"] == 768
+    assert available["defaults"]["resize1_height"] == 1024
+    assert available["defaults"]["resize2_width"] == 384
+    assert available["defaults"]["resize2_height"] == 512
 
     preview = run_preview(str(src), str(dst), use_resize=False, use_sharpen=False)
     assert preview["total"] == 2
@@ -77,6 +81,10 @@ def test_cherry_registry_and_router() -> None:
         "Cherry 平滑处理 E:\\animation_automation\\2026-06-02\\matte E:\\animation_automation\\2026-06-02\\smooth 不做时序平滑"
     )[0]
     assert no_temporal.arguments["use_smooth"] is False
+    temporal = LocalCommandBrain()._infer_tool_calls(
+        "Cherry 平滑处理 E:\\animation_automation\\2026-06-02\\matte E:\\animation_automation\\2026-06-02\\smooth 开启时序平滑"
+    )[0]
+    assert temporal.arguments["use_smooth"] is True
     assert LocalCommandBrain()._infer_tool_calls("现在平滑任务到哪里了")[0].skill == "cherry.run_status"
 
     listed = run_list(include_finished=True)

@@ -288,12 +288,18 @@ def format_skill_results(results: list[dict[str, Any]], max_items: int = 8) -> s
             lines.append(f"{payload.get('run_id')}：{payload.get('status')}")
         elif skill.startswith("unity_import."):
             lines.extend(_format_unity_import(payload))
+        elif skill.startswith("unity_tools."):
+            lines.extend(_format_unity_tools(skill, payload))
         elif skill == "animation_flow.preview":
             lines.extend(_format_animation_flow(payload, preview=True))
         elif skill == "animation_flow.start":
             lines.extend(_format_animation_flow(payload))
         elif skill == "animation_flow.status":
             lines.extend(_format_animation_flow(payload))
+        elif skill == "animation_flow.resume":
+            lines.extend(_format_animation_flow(payload))
+            if payload.get("message"):
+                lines.append(str(payload.get("message")))
         elif skill == "animation_flow.list":
             items = payload.get("items") or []
             lines.append(f"完整动画流程任务：{payload.get('count', len(items))} 个")
@@ -505,12 +511,18 @@ def _format_cherry_run_preview(payload: dict[str, Any], max_items: int) -> list[
     steps = []
     if options.get("use_denoise"):
         steps.append(f"去噪 阈值{options.get('denoise_threshold')} 半径{options.get('denoise_radius')}")
+    if options.get("use_blur"):
+        steps.append(f"模糊白叠加 半径{options.get('blur_radius')} 强度{options.get('blur_sigma')}")
+    if options.get("use_resize1"):
+        steps.append(f"缩小① {options.get('resize1_width')}x{options.get('resize1_height')}")
+    if options.get("use_sharp1"):
+        steps.append(f"锐化① 强度{options.get('sharp1_amount')}")
+    if options.get("use_resize2"):
+        steps.append(f"缩小② {options.get('resize2_width')}x{options.get('resize2_height')}")
+    if options.get("use_sharp2"):
+        steps.append(f"锐化② 强度{options.get('sharp2_amount')}")
     if options.get("use_smooth"):
-        steps.append(f"平滑 窗口{options.get('smooth_window')} 强度{options.get('smooth_sigma')}")
-    if options.get("use_resize"):
-        steps.append(f"缩放 {options.get('resize_width')}x{options.get('resize_height')}")
-    if options.get("use_sharpen"):
-        steps.append(f"锐化 强度{options.get('sharpen_amount')}")
+        steps.append(f"时序平滑 窗口{options.get('smooth_window')} 强度{options.get('smooth_sigma')}")
     lines = [
         "Cherry 任务预览：",
         f"输入：{payload.get('input_dir')}",
@@ -673,6 +685,9 @@ def _format_pipeline_list(payload: dict[str, Any], max_items: int) -> list[str]:
 
 def _format_unity_import(payload: dict[str, Any]) -> list[str]:
     lines = ["Unity 动画贴图导入："]
+    mode = payload.get("mode") or payload.get("import_mode")
+    if mode:
+        lines.append(f"模式：{'资源迭代/替换原贴图' if mode == 'iteration' else '新导入'}")
     if payload.get("unity_ready"):
         lines.append(f"unity_ready：{payload.get('unity_ready')}")
     if payload.get("unity_project"):
@@ -692,6 +707,80 @@ def _format_unity_import(payload: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _format_unity_tools(skill: str, payload: dict[str, Any]) -> list[str]:
+    if skill == "unity_tools.atlas_status":
+        lines = ["Unity 图集大小报告："]
+        lines.append(f"Unity Project：{payload.get('unity_project')}")
+        lines.append(f"报告：{payload.get('report_path')}")
+        lines.append(f"存在：{'是' if payload.get('report_exists') else '否'}")
+        report = payload.get("report") or {}
+        if report:
+            lines.extend(_format_atlas_report_summary(report))
+        if payload.get("error"):
+            lines.append(f"错误：{payload.get('error')}")
+        return lines
+    if skill == "unity_tools.atlas_report":
+        result = payload.get("result") or {}
+        lines = ["Unity 图集大小检查完成：" if payload.get("ok") else "Unity 图集大小检查失败："]
+        lines.append(f"Unity Project：{payload.get('unity_project')}")
+        if result.get("reportPath"):
+            lines.append(f"报告：{result.get('reportPath')}")
+        report = result.get("atlasReport") or {}
+        if report:
+            lines.extend(_format_atlas_report_summary(report))
+        if payload.get("error") or result.get("error"):
+            lines.append(f"错误：{payload.get('error') or result.get('error')}")
+        return lines
+    if skill in {"unity_tools.rename_preview", "unity_tools.rename_run"}:
+        result = payload.get("result") or {}
+        applied = bool(result.get("apply"))
+        title = "Unity 动画贴图命名整理完成：" if applied else "Unity 动画贴图命名整理预览："
+        if not payload.get("ok"):
+            title = "Unity 动画贴图命名整理失败："
+        lines = [title]
+        lines.append(f"贴图目录：{result.get('textureFolder') or payload.get('texture_folder') or ''}")
+        lines.append(f"动画目录：{result.get('animationFolder') or payload.get('animation_folder') or ''}")
+        if result.get("errorCount") is not None:
+            lines.append(f"错误项：{result.get('errorCount')}")
+        if applied:
+            lines.append(f"占位回退：{result.get('displacementDone', result.get('displacementCount', 0))}")
+            lines.append(f"动画引用重命名：{result.get('animationRenameDone', result.get('animationRenameCount', 0))}")
+            if result.get("manifestPath"):
+                lines.append(f"Manifest：{result.get('manifestPath')}")
+        else:
+            lines.append(f"占位回退候选：{result.get('displacementCount', 0)}")
+            lines.append(f"动画引用重命名候选：{result.get('animationRenameCount', 0)}")
+        preview = result.get("preview") or []
+        if preview:
+            lines.append("预览前几项：")
+            for item in preview[:5]:
+                lines.append(f"- {item.get('oldPath')} -> {item.get('newPath')}")
+        errors = result.get("errors") or []
+        if errors:
+            lines.append(f"首条错误：{errors[0]}")
+        if payload.get("error") or result.get("error"):
+            lines.append(f"错误：{payload.get('error') or result.get('error')}")
+        return lines
+    return ["Unity 工具执行完成。"]
+
+
+def _format_atlas_report_summary(report: dict[str, Any]) -> list[str]:
+    lines = [
+        f"生成时间：{report.get('generatedAt') or '-'}",
+        f"压缩：{report.get('compressionFormat') or '-'}",
+        f"总量：{report.get('totalEstimatedSizeMB', 0)} MB，图集 {report.get('totalAtlases', 0)}，精灵 {report.get('totalSprites', 0)}",
+    ]
+    summary = report.get("categorySummary") or {}
+    for key, label in (("character", "角色"), ("chat", "剧情"), ("order", "订单")):
+        item = summary.get(key) or {}
+        if item:
+            lines.append(
+                f"{label}：{item.get('estimatedSizeMB', 0)} MB，"
+                f"图集 {item.get('atlasCount', 0)}，精灵 {item.get('spriteCount', 0)}"
+            )
+    return lines
+
+
 def _format_animation_flow(payload: dict[str, Any], preview: bool = False) -> list[str]:
     title = "完整动画自动化流程预览：" if preview else f"完整动画自动化流程：{payload.get('run_id') or ''}".rstrip()
     lines = [title]
@@ -699,15 +788,21 @@ def _format_animation_flow(payload: dict[str, Any], preview: bool = False) -> li
         lines.append(f"状态：{payload.get('status')}，当前：{payload.get('current_stage')}")
     lines.append(f"工作区：{payload.get('date_root')}")
     lines.append(f"unity_ready：{payload.get('unity_ready')}")
+    policy = payload.get("feishu_progress_policy") or {}
+    if policy:
+        skipped = "、".join(policy.get("skip") or [])
+        lines.append(f"飞书状态：跳过 {skipped or '无'}；其他状态重新下载并抽帧")
     lines.append("步骤：")
     for stage in payload.get("stages") or []:
         lines.append(f"- {stage.get('status')} {stage.get('label')}")
     children = payload.get("children") or {}
     if children.get("pipeline_run_id"):
-        lines.append(f"1-4 子流程：{children.get('pipeline_run_id')}")
+        lines.append(f"1-3 子流程：{children.get('pipeline_run_id')}")
     unity = children.get("unity_import") or {}
     if unity:
-        lines.append(f"Unity 导入：{'完成' if unity.get('ok') else unity.get('error')}")
+        mode = unity.get("mode") or payload.get("unity_import_mode")
+        mode_text = "资源迭代" if mode == "iteration" else "新导入"
+        lines.append(f"Unity {mode_text}：{'完成' if unity.get('ok') else unity.get('error')}")
     p4 = payload.get("p4") or {}
     if p4.get("next_steps"):
         lines.append("P4 下一步需要分步确认：")
@@ -860,6 +955,31 @@ def _format_p4(payload: dict[str, Any], skill: str, max_items: int) -> list[str]
     if payload.get("report_text"):
         return [str(payload.get("report_text"))]
     lines = [f"P4：{_p4_operation_label(operation)}"]
+    if operation == "list-cls":
+        if payload.get("p4client"):
+            lines.append(f"P4CLIENT：{payload.get('p4client')}")
+        lines.append(f"Pending：{payload.get('pending_count', 0)}，Shelved：{payload.get('shelved_count', 0)}")
+        items = payload.get("items") or []
+        if not items:
+            lines.append("当前 workspace 没有 pending/shelved CL。")
+        for item in items[:max_items]:
+            marks = []
+            if item.get("pending"):
+                marks.append("pending")
+            if item.get("shelved"):
+                marks.append("shelved")
+            desc = str(item.get("description") or "").strip()
+            lines.append(f"- CL {item.get('id')}：{'+'.join(marks) or '-'}" + (f"，{desc}" if desc else ""))
+        return lines
+    if operation == "cleanup-cl":
+        lines.append(f"CL：{payload.get('changelist_id')}")
+        lines.append(f"Shelf 删除：{'是' if payload.get('deleted_shelf') else '无/未执行'}")
+        lines.append(f"Opened revert：{'是' if payload.get('reverted') else '无/未执行'}")
+        lines.append(f"CL 删除：{'是' if payload.get('deleted_changelist') else '否'}")
+        stats = payload.get("stats") or {}
+        if stats:
+            lines.append(f"涉及文件：add {stats.get('add', 0)}，edit {stats.get('edit', 0)}，delete {stats.get('delete', 0)}，move {stats.get('move', 0)}。")
+        return lines
     if operation in {"status", "check", "preview", "create-cl", "reconcile", "shelve", "report"}:
         if payload.get("p4port"):
             lines.append(f"P4PORT：{payload.get('p4port')}")

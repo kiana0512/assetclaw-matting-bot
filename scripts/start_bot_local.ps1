@@ -70,6 +70,8 @@ function Stop-OldProcesses {
     Where-Object { $_.CommandLine -like "*assetclaw_matting.feishu.ws_receiver*" } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
   Write-Host "old Feishu WS receiver: stopped (if any)"
+
+  pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\stop_unity_mcp.ps1 2>&1 | Write-Host
 }
 
 function Wait-Gateway {
@@ -92,6 +94,21 @@ function Wait-WebUI {
     } catch {}
   }
   return $false
+}
+
+function Test-UnityMcp {
+  $endpoint = "http://127.0.0.1:8080/mcp"
+  try {
+    Invoke-WebRequest $endpoint -UseBasicParsing -TimeoutSec 3 | Out-Null
+    return $true
+  } catch {
+    $response = $_.Exception.Response
+    if ($response -and $response.StatusCode) {
+      $code = [int]$response.StatusCode
+      return ($code -in 200, 400, 405, 406)
+    }
+    return $false
+  }
 }
 
 function Show-Status {
@@ -120,6 +137,8 @@ function Show-Status {
     Write-Host "WebUI health:   FAILED"
   }
 
+  Write-Host "Unity MCP:      $(if (Test-UnityMcp) { "OK http://127.0.0.1:8080/mcp" } else { "FAILED" })"
+
   try {
     $manifest = Invoke-RestMethod "http://127.0.0.1:7865/skills/v1/manifest" -TimeoutSec 3
     $implemented = @($manifest.skills | Where-Object { $_.implemented -eq $true }).Count
@@ -137,6 +156,7 @@ function Show-Status {
   Write-Host "  gateway:      logs\gateway.log"
   Write-Host "  feishu ws:    logs\feishu_ws.log"
   Write-Host "  webui:        logs\webui_console.out.log"
+  Write-Host "  unity mcp:    logs\unity_mcp.out.log / logs\unity_mcp.err.log"
   Write-Host "====================================================="
   Write-Host ""
   if (-not $NoMonitor) {
@@ -190,6 +210,25 @@ Start-Process pwsh `
 if (-not (Wait-Gateway)) {
   Write-Host "Gateway did not become healthy. Check logs\gateway_console.err.log"
   exit 1
+}
+
+Write-Host "Starting Unity MCP server hidden..."
+Start-Process pwsh `
+  -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File scripts\start_unity_mcp.ps1" `
+  -RedirectStandardOutput "logs\unity_mcp_launcher.out.log" `
+  -RedirectStandardError "logs\unity_mcp_launcher.err.log" `
+  -WindowStyle Hidden
+
+$unityMcpReady = $false
+for ($i = 0; $i -lt 60; $i++) {
+  Start-Sleep -Seconds 1
+  if (Test-UnityMcp) {
+    $unityMcpReady = $true
+    break
+  }
+}
+if (-not $unityMcpReady) {
+  Write-Host "Unity MCP did not become ready. Unity import will be refused until http://127.0.0.1:8080/mcp is reachable."
 }
 
 Write-Host "Starting Feishu WS receiver hidden..."

@@ -25,6 +25,24 @@ Remove-Item "storage\README_copy2_moved.md" -Force -ErrorAction SilentlyContinue
 Remove-Item "storage\debug\brain_test_dir" -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item "storage\debug\script_test_dir" -Recurse -Force -ErrorAction SilentlyContinue
 
+Write-Host "Cleaning generated runtime records..."
+$runtimeDirs = @(
+  "storage\agent_jobs",
+  "storage\animation_flow_runner",
+  "storage\animation_flow_runs",
+  "storage\custom_pipeline_runs",
+  "storage\webui_uploads"
+)
+foreach ($dir in $runtimeDirs) {
+  if (Test-Path $dir) {
+    Get-ChildItem $dir -Force -ErrorAction SilentlyContinue |
+      Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
+Write-Host "Cleaning transient root duplicates..."
+Remove-Item "SpriteAtlasGeneratorTool.cs" -Force -ErrorAction SilentlyContinue
+
 Write-Host ""
 Write-Host "Clean done."
-Write-Host "Preserved: .env, data/assetclaw.db, logs/*.log (non-cloudflared), storage/batch_*, src/, tests/, docs/"
+Write-Host "Preserved: .env, data/assetclaw.db, logs/*.log (non-cloudflared), storage/batch_*, src/, tests/, docs/, Unity project assets"

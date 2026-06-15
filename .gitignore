@@ -13,11 +13,15 @@ storage/batch_outputs/*
 storage/batches/*
 storage/tasks/*
 storage/debug/*
+storage/agent_jobs/*
+storage/animation_flow_runner/*
+storage/animation_flow_runs/*
 storage/animation_reruns/*
 storage/cherry_manual_workers/*
 storage/frame_runs/*
 storage/cherry_runs/*
 storage/comfyui_manual_workers/*
+storage/custom_pipeline_runs/*
 storage/feishu_inbox/*
 storage/feishu_table_exports/*
 storage/idle_replacements/*
@@ -27,6 +31,7 @@ storage/missing_frame_repairs/*
 storage/models/*
 storage/real_pipeline_check/*
 storage/tts/*
+storage/webui_uploads/*
 !storage/.gitkeep
 !storage/batch_inputs/.gitkeep
 !storage/batch_outputs/.gitkeep

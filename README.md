@@ -29,13 +29,29 @@ pip install -r requirements.txt
 - `FEISHU_EVENT_MODE=ws`
 - `SKILL_API_TOKEN`
 
-启动本地机器人（长连接模式，无需公网）：
+一键启动/重启本地机器人（长连接模式，无需公网）：
 
 ```powershell
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot_local.ps1
 ```
 
-该命令会后台启动 Gateway 和飞书 WS Receiver，并在当前窗口显示系统状态与 `logs\conversation.log` 实时链路日志。
+该命令会先停止旧的 Gateway、飞书 WS Receiver、WebUI，再后台启动三件套：
+
+- Gateway：`http://127.0.0.1:7865`
+- 飞书 WS Receiver：官方长连接
+- WebUI：`http://127.0.0.1:5180`
+
+当前窗口会显示系统状态与 `logs\conversation.log` 实时链路日志。停止服务：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\stop_bot_local.ps1
+```
+
+清理缓存/运行产物：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\clean_project.ps1
+```
 
 飞书后台配置：**事件与回调 → 事件配置 → 使用长连接接收事件**（无需填写回调 URL）。
 
@@ -75,6 +91,14 @@ E:\assetclaw-matting-bot\README.md 是否存在
 ### 系统 / 帮助
 - `bot.help` / `bot.skills` / `bot.permissions` / `bot.status` / `bot.errors`
 
+### 动画自动化 / Unity
+- 完整 7 步主流程：飞书下载 -> 抽帧 -> ComfyUI 抠图 -> Cherry 平滑后处理 -> unity_ready -> Unity 导入 -> P4 shelve。
+- unity_ready：`unity_ready.preview/build/status`
+- Unity 导入/替换：`unity_import.preview/run/status`
+- 独立 Unity 工具：`unity_tools.atlas_status/atlas_report/rename_preview/rename_run`
+
+`unity_tools.*` 是独立能力，不会触发完整 7 步动画自动化流程。
+
 ### API（本地调试）
 - `GET /health`
 - `POST /brain/test`
@@ -91,6 +115,7 @@ E:\assetclaw-matting-bot\README.md 是否存在
 ## 详细文档
 
 - [飞书接入说明](docs/FEISHU_SETUP.md)
+- [运维启动/停止/清理](docs/OPERATIONS.md)
 - [技能权限矩阵](docs/SKILL_PERMISSION_MATRIX.md)
 - [飞书机器人使用说明](docs/FEISHU_BOT_USAGE.md)
 - [动画自动化到 Unity Ready 流程](docs/ANIMATION_UNITY_READY.md)

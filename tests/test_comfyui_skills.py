@@ -4,11 +4,13 @@ import json
 import time
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 from assetclaw_matting.brain.result_formatter import format_skill_results
 from assetclaw_matting.comfyui.client import ComfyUIClient
-from assetclaw_matting.comfyui.workflow_patch import find_save_image_outputs, inspect_workflow, patch_load_image, prepare_api_prompt_for_run, workflow_to_api_prompt
+from assetclaw_matting.comfyui.output_resolver import resolve_best_output
+from assetclaw_matting.comfyui.workflow_patch import find_primary_save_image_node_id, find_save_image_outputs, inspect_workflow, patch_load_image, prepare_api_prompt_for_run, workflow_to_api_prompt
 from assetclaw_matting.db.schema import create_tables
 from assetclaw_matting.db.sqlite import init_db
 from assetclaw_matting.runtime_context import reset_runtime_context, set_runtime_context
@@ -134,6 +136,99 @@ def test_find_save_image_outputs_prefers_final_output_over_temp() -> None:
     assert outputs[0]["type"] == "output"
 
 
+def test_find_save_image_outputs_uses_primary_save_image_node_not_preview_masks() -> None:
+    workflow = {
+        "1": {"class_type": "LoadImage", "inputs": {"image": "input.png"}},
+        "20": {"class_type": "SaveImage", "_meta": {"title": "保存图像"}, "inputs": {"filename_prefix": "final"}},
+        "30": {"class_type": "SaveImage", "_meta": {"title": "预览遮罩"}, "inputs": {"filename_prefix": "mask"}},
+        "31": {"class_type": "SaveImage", "_meta": {"title": "预览校色遮罩范围"}, "inputs": {"filename_prefix": "mask_scope"}},
+    }
+    history = {
+        "pid": {
+            "outputs": {
+                "20": {"images": [{"filename": "final_transparent.png", "subfolder": "", "type": "output"}]},
+                "30": {"images": [{"filename": "preview_mask.png", "subfolder": "", "type": "output"}]},
+                "31": {"images": [{"filename": "preview_mask_scope.png", "subfolder": "", "type": "output"}]},
+            }
+        }
+    }
+
+    final_node_id = find_primary_save_image_node_id(workflow)
+    outputs = find_save_image_outputs(history, "pid", final_save_image_node_id=final_node_id)
+
+    assert final_node_id == "20"
+    assert [item["filename"] for item in outputs] == ["final_transparent.png"]
+
+
+def test_primary_save_image_node_prefers_cherry_color_restore_rgba_output() -> None:
+    workflow = {
+        "nodes": [
+            {"id": 228, "type": "VAEDecode", "outputs": [{"name": "IMAGE"}]},
+            {"id": 232, "type": "CherryItemColorRestore", "outputs": [{"name": "图像(RGBA)"}, {"name": "覆盖蒙版"}]},
+            {"id": 226, "type": "JoinImageWithAlpha", "outputs": [{"name": "IMAGE"}]},
+            {
+                "id": 234,
+                "type": "SaveImage",
+                "title": "",
+                "inputs": [{"name": "images", "link": 369}],
+                "widgets_values": ["ComfyUI"],
+            },
+            {
+                "id": 210,
+                "type": "SaveImage",
+                "title": "",
+                "inputs": [{"name": "images", "link": 399}],
+                "widgets_values": ["ComfyUI"],
+            },
+            {
+                "id": 235,
+                "type": "SaveImage",
+                "title": "抠完图-无校色",
+                "inputs": [{"name": "images", "link": 370}],
+                "widgets_values": ["ComfyUI"],
+            },
+            {
+                "id": 207,
+                "type": "SaveImage",
+                "title": "预览校色覆盖范围",
+                "inputs": [{"name": "images", "link": 381}],
+                "widgets_values": ["ComfyUI"],
+            },
+        ],
+        "links": [
+            [369, 228, 0, 234, 0, "IMAGE"],
+            [399, 232, 0, 210, 0, "图像(RGBA)"],
+            [370, 232, 0, 235, 0, "图像(RGBA)"],
+            [381, 226, 0, 207, 0, "IMAGE"],
+        ],
+    }
+
+    assert find_primary_save_image_node_id(workflow) == "210"
+
+
+def test_resolve_best_output_rejects_bad_primary_save_even_if_preview_mask_is_transparent(tmp_path) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    Image.new("RGB", (64, 64), (0, 0, 0)).save(output_root / "final_black.png")
+    Image.new("RGBA", (64, 64), (255, 0, 0, 0)).save(output_root / "preview_mask_transparent.png")
+    history = {
+        "pid": {
+            "outputs": {
+                "20": {"images": [{"filename": "final_black.png", "subfolder": "", "type": "output"}]},
+                "30": {"images": [{"filename": "preview_mask_transparent.png", "subfolder": "", "type": "output"}]},
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="没有找到合格的最终透明 PNG"):
+        resolve_best_output(
+            history,
+            "pid",
+            local_path_resolver=lambda filename, subfolder, output_type: output_root / filename,
+            final_save_image_node_id="20",
+        )
+
+
 def test_download_output_prefers_local_comfyui_file_and_preserves_alpha(monkeypatch) -> None:
     from assetclaw_matting.config import settings
 
@@ -154,6 +249,65 @@ def test_download_output_prefers_local_comfyui_file_and_preserves_alpha(monkeypa
     with Image.open(target) as image:
         assert image.mode == "RGBA"
         assert image.getchannel("A").getextrema() == (0, 0)
+
+
+def test_resolve_best_output_prefers_existing_transparent_png_without_resolution_lock(tmp_path) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    Image.new("RGB", (300, 400), (255, 255, 255)).save(output_root / "white_preview.png")
+    Image.new("RGBA", (900, 1200), (255, 0, 0, 127)).save(output_root / "transparent_intermediate.png")
+    Image.new("RGB", (300, 400), (0, 0, 0)).save(output_root / "black_preview.png")
+    final = Image.new("RGBA", (486, 608), (255, 0, 0, 0))
+    for x in range(120, 360):
+        for y in range(120, 500):
+            final.putpixel((x, y), (180, 40, 30, 255))
+    final.save(output_root / "final_transparent.png")
+    history = {
+        "pid": {
+            "outputs": {
+                "10": {"images": [{"filename": "white_preview.png", "subfolder": "", "type": "output"}]},
+                "11": {"images": [{"filename": "transparent_intermediate.png", "subfolder": "", "type": "output"}]},
+                "12": {"images": [{"filename": "black_preview.png", "subfolder": "", "type": "output"}]},
+                "13": {"images": [{"filename": "final_transparent.png", "subfolder": "", "type": "output"}]},
+            }
+        }
+    }
+
+    selected = resolve_best_output(
+        history,
+        "pid",
+        local_path_resolver=lambda filename, subfolder, output_type: output_root / filename,
+    )
+
+    assert selected["filename"] == "final_transparent.png"
+
+
+def test_resolve_best_output_rejects_black_preview_and_mask(tmp_path) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    Image.new("RGBA", (1080, 1440), (0, 0, 0, 255)).save(output_root / "black_preview.png")
+    Image.new("RGBA", (1080, 1440), (255, 255, 255, 0)).save(output_root / "white_mask.png")
+    mask = Image.new("RGBA", (1080, 1440), (0, 0, 0, 0))
+    for x in range(360, 720):
+        for y in range(360, 1080):
+            mask.putpixel((x, y), (255, 255, 255, 255))
+    mask.save(output_root / "mask_like.png")
+    history = {
+        "pid": {
+            "outputs": {
+                "10": {"images": [{"filename": "black_preview.png", "subfolder": "", "type": "output"}]},
+                "11": {"images": [{"filename": "white_mask.png", "subfolder": "", "type": "output"}]},
+                "12": {"images": [{"filename": "mask_like.png", "subfolder": "", "type": "output"}]},
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="没有找到合格的最终透明 PNG"):
+        resolve_best_output(
+            history,
+            "pid",
+            local_path_resolver=lambda filename, subfolder, output_type: output_root / filename,
+        )
 
 
 def test_workflows_list() -> None:

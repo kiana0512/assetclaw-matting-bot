@@ -7,8 +7,8 @@ from tools.p4_assistant.models import P4FileAction, P4FileChange, P4WorkspaceCon
 
 SENSITIVE_KEYS = ("password", "passwd", "ticket", "token", "cookie", "p4passwd", "p4ticket")
 RISKY_ROOT_PARTS = ("desktop", "downloads", "onedrive")
-ALLOWED_COMMANDS = {"info", "login", "client", "reconcile", "change", "opened", "describe", "shelve", "where", "changes", "streams", "sync", "reopen"}
-BLOCKED_COMMANDS = {"submit", "merge", "copy", "stream", "revert", "delete", "integrate"}
+ALLOWED_COMMANDS = {"info", "login", "client", "reconcile", "change", "opened", "describe", "shelve", "where", "changes", "streams", "sync", "reopen", "revert"}
+BLOCKED_COMMANDS = {"submit", "merge", "copy", "stream", "delete", "integrate"}
 UNITY_ASSET_EXTENSIONS = {".png", ".jpg", ".jpeg", ".anim", ".controller", ".prefab", ".mat", ".asset", ".json"}
 
 
@@ -39,13 +39,13 @@ def requires_confirmation(args: list[str]) -> bool:
     if not args:
         return True
     subcommand = args[0].lower()
-    if subcommand in {"change", "shelve", "reopen"}:
+    if subcommand in {"change", "shelve", "reopen", "revert"}:
         return True
     if subcommand == "reconcile" and "-n" not in args:
         return True
     if subcommand == "sync" and "-n" not in args:
         return True
-    if subcommand == "client" and "-s" in args:
+    if subcommand == "client" and ("-s" in args or "-i" in args):
         return True
     return False
 
@@ -60,6 +60,10 @@ def ensure_command_allowed(args: list[str], confirmation: bool = False) -> None:
         raise PermissionError(f"Shelve-only mode: p4 {subcommand} is disabled.")
     if subcommand not in ALLOWED_COMMANDS:
         raise PermissionError(f"p4 subcommand is not allowed in shelve-only mode: {subcommand}")
+    if subcommand == "revert" and "-c" not in args:
+        raise PermissionError("Shelve-only mode: p4 revert is only allowed for a specific changelist with -c.")
+    if subcommand == "change" and "-d" in args and not confirmation:
+        raise PermissionError("p4 change -d requires explicit confirmation in shelve-only mode.")
     if requires_confirmation(args) and not confirmation:
         raise PermissionError(f"p4 {' '.join(args)} requires explicit confirmation in shelve-only mode.")
 

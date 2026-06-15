@@ -58,6 +58,38 @@ class P4Operations:
             "commands": [info.as_dict(), login.as_dict(), client.as_dict(), opened.as_dict(), pending.as_dict(), shelved.as_dict()],
         })
 
+    def list_changelists(self, workflow: str | None = None, workspace: str | None = None) -> dict[str, Any]:
+        ws = self.registry.resolve(workflow, workspace)
+        runner = self.runner.for_workspace(ws)
+        pending = runner.pending_changelists()
+        shelved = runner.shelved_changelists()
+        pending_items = _parse_change_items(pending.stdout, "pending")
+        shelved_items = _parse_change_items(shelved.stdout, "shelved")
+        by_id: dict[str, dict[str, Any]] = {}
+        for item in pending_items + shelved_items:
+            entry = by_id.setdefault(
+                item["id"],
+                {
+                    "id": item["id"],
+                    "date": item.get("date") or "",
+                    "user_client": item.get("user_client") or "",
+                    "description": item.get("description") or "",
+                    "pending": False,
+                    "shelved": False,
+                },
+            )
+            entry[item["status"]] = True
+            if item.get("description") and not entry.get("description"):
+                entry["description"] = item["description"]
+        items = sorted(by_id.values(), key=lambda item: int(item["id"]), reverse=True)
+        return _payload(ws, "list-cls", True, {
+            "items": items,
+            "pending_count": len(pending_items),
+            "shelved_count": len(shelved_items),
+            "submit": "disabled",
+            "commands": [pending.as_dict(), shelved.as_dict()],
+        })
+
     def workspace_info(self, workflow: str | None = None, workspace: str | None = None) -> dict[str, Any]:
         ws = self.registry.resolve(workflow, workspace)
         runner = self.runner.for_workspace(ws)
@@ -186,6 +218,74 @@ class P4Operations:
             "stats": action_stats(shelved_files),
             "safety": _safety_dict(safety),
             "commands": [opened.as_dict(), shelve.as_dict(), describe.as_dict()],
+        })
+
+    def cleanup_changelist(
+        self,
+        workflow: str | None = None,
+        workspace: str | None = None,
+        cl: str | int = "",
+        allow_delete: bool = False,
+    ) -> dict[str, Any]:
+        if not cl:
+            return {"ok": False, "error": "cl is required"}
+        ws = self.registry.resolve(workflow, workspace)
+        ensure_shelve_only_mode(ws).require_ok()
+        runner = self.runner.for_workspace(ws)
+        opened = runner.opened(cl)
+        shelved = runner.describe(cl, shelved=True)
+        opened_files = parse_p4_file_changes(opened.stdout)
+        shelved_files = parse_p4_file_changes(shelved.stdout)
+        files_by_path = {item.path: item for item in [*opened_files, *shelved_files] if item.path}
+        files = list(files_by_path.values())
+        safety = validate_opened_files(files, ws, allow_delete=allow_delete)
+        if not safety.ok:
+            return _payload(ws, "cleanup-cl", False, {
+                "changelist_id": str(cl),
+                "files": [file_change_to_dict(item) for item in files],
+                "stats": action_stats(files),
+                "safety": _safety_dict(safety),
+                "commands": [opened.as_dict(), shelved.as_dict()],
+            })
+        commands = [opened.as_dict(), shelved.as_dict()]
+        deleted_shelf = False
+        reverted = False
+        if shelved_files:
+            delete_shelf = runner.delete_shelve(cl)
+            commands.append(delete_shelf.as_dict())
+            deleted_shelf = delete_shelf.ok
+            if not delete_shelf.ok:
+                return _payload(ws, "cleanup-cl", False, {
+                    "changelist_id": str(cl),
+                    "error": delete_shelf.safe_summary,
+                    "deleted_shelf": deleted_shelf,
+                    "commands": commands,
+                })
+        if opened_files:
+            revert = runner.revert_changelist(cl, list(ws.managed_paths))
+            commands.append(revert.as_dict())
+            reverted = revert.ok
+            if not revert.ok:
+                return _payload(ws, "cleanup-cl", False, {
+                    "changelist_id": str(cl),
+                    "error": revert.safe_summary,
+                    "deleted_shelf": deleted_shelf,
+                    "reverted": reverted,
+                    "commands": commands,
+                })
+        deleted_cl = runner.delete_changelist(cl)
+        commands.append(deleted_cl.as_dict())
+        return _payload(ws, "cleanup-cl", deleted_cl.ok, {
+            "changelist_id": str(cl),
+            "deleted_shelf": deleted_shelf,
+            "reverted": reverted,
+            "deleted_changelist": deleted_cl.ok,
+            "files": [file_change_to_dict(item) for item in files],
+            "stats": action_stats(files),
+            "safety": _safety_dict(safety),
+            "submit": "disabled",
+            "commands": commands,
+            "error": "" if deleted_cl.ok else deleted_cl.safe_summary,
         })
 
     def switch_stream(self, workflow: str | None = None, workspace: str | None = None, stream: str = "", preview: bool = True, yes: bool = False, allow_opened: bool = False) -> dict[str, Any]:
@@ -450,6 +550,26 @@ def _parse_change_ids(stdout: str) -> list[str]:
         if match:
             ids.append(match.group(1))
     return ids
+
+
+def _parse_change_items(stdout: str, status: str) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    pattern = re.compile(
+        r"^Change\s+(?P<id>\d+)\s+on\s+(?P<date>\S+)\s+by\s+(?P<user_client>\S+)\s+\*(?P<status>\w+)\*\s*(?P<description>.*)$",
+        re.IGNORECASE,
+    )
+    for line in stdout.splitlines():
+        match = pattern.search(line.strip())
+        if not match:
+            id_match = re.search(r"\bChange\s+(\d+)\b", line, re.IGNORECASE)
+            if id_match:
+                items.append({"id": id_match.group(1), "status": status, "date": "", "user_client": "", "description": line.strip()})
+            continue
+        item = match.groupdict()
+        item["status"] = status
+        item["description"] = item.get("description", "").strip().strip("'")
+        items.append(item)
+    return items
 
 
 def _parse_streams(stdout: str) -> list[str]:

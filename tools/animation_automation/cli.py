@@ -73,7 +73,7 @@ def main() -> int:
     unity.add_argument("--package", choices=("scene", "emoji", "both"), default="both")
     unity.set_defaults(func=cmd_import_unity_ready)
 
-    flow = sub.add_parser("flow-plan", help="Print the 7-stage animation -> Unity -> P4 shelve-only plan.")
+    flow = sub.add_parser("flow-plan", help="Print the 7-stage animation -> Cherry smooth -> Unity -> P4 shelve-only plan.")
     flow.add_argument("--date-root", required=True)
     flow.add_argument("--unity-project", default="")
     flow.add_argument("--workspace", default="spark_client")

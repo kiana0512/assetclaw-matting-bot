@@ -7,7 +7,6 @@
 - 从飞书表格下载动画视频。
 - 过滤 `进度 = 已完成 / 不处理` 的任务。
 - 按 `scene / emoji` 分流动画资产。
-- 按 `default / temporal_smooth` 分流处理选项。
 - 生成 Unity 插件可直接读取的 `unity_ready`。
 
 ## 安全边界
@@ -59,7 +58,7 @@ python -m tools.p4_assistant.cli report --cl 123456 --unity-ready-manifest "E:/a
 Date Root: E:/animation_automation/YYYY-MM-DD
 Source Manifest: E:/animation_automation/YYYY-MM-DD/source_manifest.json
 已跳过：N 条（进度 = 已完成 / 不处理）
-已分流：scene/default、scene/temporal_smooth、emoji/default、emoji/temporal_smooth
+已分流：scene、emoji
 ```
 
 Unity Ready 生成完成：
@@ -88,4 +87,3 @@ Emoji Frames: E:/animation_automation/YYYY-MM-DD/unity_ready/emoji/frames
 Warnings:
 - {角色-动画} 缺帧: 0032.png
 ```
-

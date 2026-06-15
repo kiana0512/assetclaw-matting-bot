@@ -23,6 +23,8 @@ P4 UI 表情资源助手现在是 Shelve-only 模式，只服务 Unity UI 表情
 - p4.create_cl：创建 pending changelist，描述自动补 [Shelve-only] 信息
 - p4.reconcile：只把白名单 UI 目录 reconcile 到指定 CL
 - p4.shelve：安全检查后 shelve 指定 CL，可用 force 覆盖已有 shelf
+- p4.list_cls：查看当前 workspace 的 pending / shelved CL
+- p4.cleanup_cl：删除指定 CL 的 shelf、revert 打开的文件，并删除 pending CL
 - p4.report：生成可以直接复制到飞书的 CL / shelf / 文件统计 / 安全检查报告
 - p4.shelve_ui_import：只输出 check / preview / 下一步计划，不批量执行写操作
 
@@ -37,12 +39,38 @@ P4 UI 表情资源助手现在是 Shelve-only 模式，只服务 Unity UI 表情
 - Assets/Art/UI/SpritesAnim/Emoji/...
 - Assets/Art/UI/SpritesAnim/CharacterAnim/...
 
-delete 文件默认阻断，需要明确 allow_delete。create_cl / reconcile / shelve 必须分步骤二次确认。未登录时请手动运行 p4 login。"""
+delete 文件默认阻断，需要明确 allow_delete。create_cl / reconcile / shelve / cleanup_cl 必须二次确认。未登录时请手动运行 p4 login。"""
     return {"ok": True, "text": text}
 
 
 def status(workflow: str | None = None, workspace: str | None = None, **_: Any) -> dict[str, Any]:
     return _ops().get_status(workflow=workflow, workspace=workspace)
+
+
+def list_cls(workflow: str | None = None, workspace: str | None = None, **_: Any) -> dict[str, Any]:
+    return _ops().list_changelists(workflow=workflow, workspace=workspace)
+
+
+def cleanup_cl(workflow: str | None = None, workspace: str | None = None, cl: str | int | None = None, changelist: str | int | None = None, allow_delete: bool = False, **_: Any) -> dict[str, Any]:
+    target_cl = cl or changelist
+    if not target_cl:
+        return {"ok": False, "error": "cl is required"}
+    return _ops().cleanup_changelist(workflow=workflow, workspace=workspace, cl=target_cl, allow_delete=allow_delete)
+
+
+def preview_cleanup_cl_confirmation(arguments: dict[str, Any], confirmation_id: str) -> str:
+    cl = arguments.get("cl") or arguments.get("changelist") or ""
+    workspace = arguments.get("workspace") or "默认 workspace"
+    return "\n".join(
+        [
+            "请确认是否清理 P4 changelist：",
+            f"CL：{cl}",
+            f"Workspace：{workspace}",
+            "动作：删除 shelf -> revert 该 CL 打开的文件 -> 删除 pending CL。",
+            "Submit：disabled，不会提交。",
+            f"回复：确认执行 {confirmation_id}",
+        ]
+    )
 
 
 def inspect(workflow: str | None = None, workspace: str | None = None, **kwargs: Any) -> dict[str, Any]:

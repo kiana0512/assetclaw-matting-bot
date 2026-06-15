@@ -31,6 +31,10 @@ class PreRouterProvider(Protocol):
 def handle_pre_llm_message(provider: PreRouterProvider, message: BrainMessage) -> BrainResponse | None:
     text = message.text.strip()
 
+    animation_flow = _plan_animation_flow(message)
+    if animation_flow:
+        return _planned_response(provider, message, animation_flow)
+
     voice_mode_response = handle_voice_reply_mode(provider, message)
     if voice_mode_response:
         return voice_mode_response
@@ -71,6 +75,17 @@ def handle_pre_llm_message(provider: PreRouterProvider, message: BrainMessage) -
     if planned:
         return _planned_response(provider, message, planned)
 
+    return None
+
+
+def _plan_animation_flow(message: BrainMessage) -> tuple[list[ToolCall], str] | None:
+    from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
+
+    calls = LocalCommandBrain()._infer_tool_calls(message.text)
+    if not calls:
+        return None
+    if any(str(call.skill).startswith("animation_flow.") for call in calls):
+        return calls, "deterministic animation_flow route before LLM"
     return None
 
 

@@ -134,15 +134,69 @@ class LocalCommandBrain(BrainProvider):
             return [ToolCall(skill="file.list_allowed", arguments={"path": settings.shared_matting_root})]
         if any(kw in lowered for kw in ("nvidia-smi", "gpu")) or any(kw in text for kw in ("显卡", "显存", "gpu", "GPU")):
             return [ToolCall(skill="system.gpu_status", arguments={})]
+        if (
+            "atlassizereport" in lowered
+            or "spriteatlas" in lowered
+            or "预打图集" in text
+            or ("图集" in text and any(kw in text for kw in ("大小", "统计", "报告", "检查", "生成", "资源大小")))
+        ):
+            args: dict = {}
+            paths = re.findall(r"([A-Za-z]:\\[^\s，。]*)", text)
+            if paths:
+                args["unity_project"] = paths[0]
+            if any(kw in text for kw in ("状态", "查看", "看看", "读", "显示")) and not any(kw in text for kw in ("生成", "跑", "执行", "检查", "统计")):
+                return [ToolCall(skill="unity_tools.atlas_status", arguments=args)]
+            return [ToolCall(skill="unity_tools.atlas_report", arguments=args)]
+        if (
+            "animtexturebatchrename" in lowered
+            or "动画贴图批量重命名" in text
+            or "贴图命名整理" in text
+            or ("重命名" in text and "动画贴图" in text)
+            or ("命名整理" in text and "贴图" in text)
+        ):
+            paths = _unity_tool_paths_from_text(text)
+            args: dict = {}
+            if len(paths) >= 1:
+                args["texture_folder"] = paths[0]
+            if len(paths) >= 2:
+                args["animation_folder"] = paths[1]
+            if any(kw in text for kw in ("预览", "看看", "检查", "扫描")):
+                return [ToolCall(skill="unity_tools.rename_preview", arguments=args)]
+            return [ToolCall(skill="unity_tools.rename_run", arguments=args)]
+        unity_import_single_step = (
+            ("unity" in lowered or "unity_ready" in lowered or "插件导入" in text or "进引擎" in text)
+            and any(kw in text for kw in ("导入", "迭代", "替换", "高清化", "进引擎", "状态", "预览", "检查"))
+            and not any(kw in text for kw in ("流程", "自动化", "6步", "六步", "7步", "七步"))
+        )
+        if unity_import_single_step:
+            paths = re.findall(r"([A-Za-z]:\\[^\s，。]*)", text)
+            args: dict = {}
+            if paths:
+                args["unity_ready"] = paths[0]
+            mode = _unity_import_mode_from_text(text)
+            if mode:
+                args["mode"] = mode
+            if any(kw in text for kw in ("状态", "进度")):
+                return [ToolCall(skill="unity_import.status", arguments=args)]
+            if any(kw in text for kw in ("预览", "看看", "检查")):
+                return [ToolCall(skill="unity_import.preview", arguments=args)]
+            return [ToolCall(skill="unity_import.run", arguments=args)]
         animation_flow_paths = re.findall(r"([A-Za-z]:\\[^\s，。]*)", text)
+        animation_flow_date_root = _animation_flow_date_root_from_text(text)
         is_full_animation_flow = (
             "动画自动化流程" in text
             or "动画流程自动机" in text
+            or "启动动画流程" in text
+            or "开始动画流程" in text
+            or "动画自动化" in text and _animation_flow_date_from_text(text)
             or "自动化流程" in text
             or "完整动画流程" in text
             or "完整动画自动化" in text
+            or "6步动画" in text
+            or "六步动画" in text
             or "7步动画" in text
             or "七步动画" in text
+            or re.search(r"AFLOW_[A-Fa-f0-9]{12}", text) is not None
             or "unity_ready" in lowered
             or ("unity" in lowered and "p4" in lowered)
         )
@@ -154,13 +208,44 @@ class LocalCommandBrain(BrainProvider):
         if is_full_animation_flow and any(kw in text for kw in ("进度", "状态", "哪里了", "跑到")):
             match = re.search(r"(AFLOW_[A-Fa-f0-9]{12})", text)
             return [ToolCall(skill="animation_flow.status", arguments={"run_id": match.group(1) if match else None})]
+        if is_full_animation_flow and any(kw in text for kw in ("继续", "恢复", "接着跑", "继续跑", "从p4继续", "从 P4 继续", "继续p4", "继续 P4")):
+            match = re.search(r"(AFLOW_[A-Fa-f0-9]{12})", text)
+            return [ToolCall(skill="animation_flow.resume", arguments={"run_id": match.group(1) if match else None})]
         if is_full_animation_flow and any(kw in text for kw in ("预览", "看看", "检查", "计划")):
             paths = animation_flow_paths
-            args = {"date_root": paths[0]} if paths else {}
+            args = {"date_root": paths[0] if paths else animation_flow_date_root} if paths or animation_flow_date_root else {}
+            mode = _unity_import_mode_from_text(text)
+            if mode:
+                args["unity_import_mode"] = mode
+            priority_characters = _priority_characters_from_text(text)
+            if priority_characters:
+                args["priority_characters"] = priority_characters
+            if _fake_matting_from_text(text):
+                args["fake_matting_from_frames"] = True
             return [ToolCall(skill="animation_flow.preview", arguments=args)]
         if is_full_animation_flow and any(kw in text for kw in ("启动", "开始", "执行", "跑")):
             paths = animation_flow_paths
-            args = {"date_root": paths[0]} if paths else {}
+            args = {"date_root": paths[0] if paths else animation_flow_date_root} if paths or animation_flow_date_root else {}
+            mode = _unity_import_mode_from_text(text)
+            if mode:
+                args["unity_import_mode"] = mode
+            priority_characters = _priority_characters_from_text(text)
+            if priority_characters:
+                args["priority_characters"] = priority_characters
+            if _fake_matting_from_text(text):
+                args["fake_matting_from_frames"] = True
+            return [ToolCall(skill="animation_flow.start", arguments=args)]
+        if is_full_animation_flow and (_unity_import_mode_from_text(text) or animation_flow_date_root):
+            paths = animation_flow_paths
+            args = {"date_root": paths[0] if paths else animation_flow_date_root} if paths or animation_flow_date_root else {}
+            mode = _unity_import_mode_from_text(text)
+            if mode:
+                args["unity_import_mode"] = mode
+            priority_characters = _priority_characters_from_text(text)
+            if priority_characters:
+                args["priority_characters"] = priority_characters
+            if _fake_matting_from_text(text):
+                args["fake_matting_from_frames"] = True
             return [ToolCall(skill="animation_flow.start", arguments=args)]
         animation_root = _animation_root_from_text(text)
         is_animation_ops = (
@@ -187,23 +272,6 @@ class LocalCommandBrain(BrainProvider):
                 args["input_dir"] = paths[0]
                 args["output_dir"] = str(paths[0].rstrip("\\")[:-5] + "smooth")
             return [ToolCall(skill="animation.manual_smooth_current", arguments=args)]
-        is_pipeline = "旧三步" in text or "三步流程" in text or "旧pipeline" in lowered or "legacy pipeline" in lowered
-        if is_pipeline and any(kw in text for kw in ("哪些任务", "任务列表", "当前任务", "有哪些任务")):
-            return [ToolCall(skill="pipeline.run_list", arguments={"include_finished": any(kw in text for kw in ("全部", "历史", "已结束"))})]
-        if is_pipeline and any(kw in text for kw in ("终止", "取消", "停止")):
-            match = re.search(r"(PIPE_[A-Fa-f0-9]{12})", text)
-            return [ToolCall(skill="pipeline.run_cancel", arguments={"run_id": match.group(1) if match else None})]
-        if is_pipeline and any(kw in text for kw in ("进度", "状态", "哪里了", "跑到")):
-            match = re.search(r"(PIPE_[A-Fa-f0-9]{12})", text)
-            return [ToolCall(skill="pipeline.run_status", arguments={"run_id": match.group(1) if match else None})]
-        if is_pipeline and any(kw in text for kw in ("预览", "看看", "检查")):
-            paths = re.findall(r"([A-Za-z]:\\[^\s，。]*)", text)
-            args = _pipeline_args_from_paths(paths)
-            return [ToolCall(skill="pipeline.run_preview", arguments=args)]
-        if is_pipeline and any(kw in text for kw in ("启动", "开始", "执行", "跑")):
-            paths = re.findall(r"([A-Za-z]:\\[^\s，。]*)", text)
-            args = _pipeline_args_from_paths(paths)
-            return [ToolCall(skill="pipeline.run_start", arguments=args)]
         is_frame = "抽帧" in text or "序列帧" in text or "飞书表格" in text and "视频" in text
         if is_frame and any(kw in text for kw in ("工具", "配置", "状态")) and not any(kw in text for kw in ("任务", "进度")):
             return [ToolCall(skill="frame.info", arguments={})]
@@ -264,7 +332,10 @@ class LocalCommandBrain(BrainProvider):
                             "recursive": True,
                             "skip_existing": skip_existing,
                             "notify_interval_seconds": 60,
-                            "use_smooth": not any(kw in text for kw in ("不做时序", "关闭时序", "不要时序", "不做这个时序", "不做平滑", "关闭平滑", "without temporal", "no temporal")),
+                            "use_smooth": (
+                                any(kw in text for kw in ("开启时序", "启用时序", "做时序", "时序平滑", "temporal smooth"))
+                                and not any(kw in text for kw in ("不做时序", "关闭时序", "不要时序", "不做这个时序", "without temporal", "no temporal"))
+                            ),
                         },
                     )
                 ]
@@ -570,6 +641,58 @@ def _pipeline_args_from_paths(paths: list[str]) -> dict:
     return args
 
 
+def _unity_tool_paths_from_text(text: str) -> list[str]:
+    paths = re.findall(r"([A-Za-z]:\\[^\s，。]*)", text)
+    asset_paths = re.findall(r"(Assets/[^\s，。]+)", text)
+    combined: list[str] = []
+    for path in paths + asset_paths:
+        clean = path.rstrip("，。,.；;")
+        if clean not in combined:
+            combined.append(clean)
+    return combined
+
+
+def _unity_import_mode_from_text(text: str) -> str | None:
+    lowered = text.lower()
+    if any(kw in text for kw in ("迭代", "资源迭代", "替换", "贴图迭代", "高清化", "直接替换")) or any(
+        kw in lowered for kw in ("iteration", "iterate", "replace", "update")
+    ):
+        return "iteration"
+    if any(kw in text for kw in ("新导入", "批量导入", "导入")) or any(kw in lowered for kw in ("import", "new")):
+        return "import"
+    return None
+
+
+def _fake_matting_from_text(text: str) -> bool:
+    lowered = text.lower()
+    return any(kw in lowered for kw in ("fake", "faker", "mock")) or any(
+        kw in text for kw in ("模拟抠图", "假抠图", "跳过抠图", "抽帧当抠图", "抽帧直接当抠图", "抽帧作为抠图")
+    )
+
+
+def _priority_characters_from_text(text: str) -> list[str]:
+    match = re.search(r"(?:优先|先跑|先扣|先抠|priority)\s*[:：]?\s*([A-Za-z0-9_\-\u4e00-\u9fff]+)", text, re.IGNORECASE)
+    if not match:
+        return []
+    raw = match.group(1).strip(" ，。；;,.")
+    if not raw:
+        return []
+    return [raw]
+
+
+def _animation_flow_date_from_text(text: str) -> str | None:
+    match = re.search(r"(?<!\d)(20\d{2})[-_/年.]?(\d{1,2})[-_/月.]?(\d{1,2})(?:日)?(?!\d)", text)
+    if not match:
+        return None
+    year, month, day = match.groups()
+    return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+
+
+def _animation_flow_date_root_from_text(text: str) -> str | None:
+    day = _animation_flow_date_from_text(text)
+    return f"E:\\animation_automation\\{day}" if day else None
+
+
 def _web_query_from_text(text: str) -> str | None:
     if re.search(r"https?://", text):
         return None
@@ -591,12 +714,19 @@ def _wants_web_research(text: str) -> bool:
 
 def _p4_tool_calls_from_text(text: str) -> list[ToolCall]:
     lowered = text.lower()
-    if not any(kw in lowered or kw in text for kw in ("p4", "perforce", "depot", "changelist", "reconcile", "workspace", "工作区", "服务器", "差异", "拉最新", "改了什么", "shelve", "搁置", "飞书报告")):
+    if not any(kw in lowered or kw in text for kw in ("p4", "perforce", "depot", "changelist", "cl", "reconcile", "workspace", "工作区", "服务器", "差异", "拉最新", "改了什么", "shelve", "搁置", "飞书报告", "变更")):
         return []
     if any(kw in lowered or kw in text for kw in ("submit", "提交", "merge", "合流", "copy up", "stream 创建", "创建 stream", "sync", "拉最新", "同步")):
         return [ToolCall(skill="p4.help", arguments={})]
     if (any(kw in text for kw in ("功能", "会做什么", "帮助", "怎么用")) or "help" in lowered) and ("p4" in lowered or "perforce" in lowered):
         return [ToolCall(skill="p4.help", arguments={})]
+    changelist = re.search(r"(?:changelist|cl|CL|变更)\s*#?\s*(\d+)|\b(\d{4,})\b", text, re.IGNORECASE)
+    if any(kw in lowered or kw in text for kw in ("删除", "清理", "取消", "删掉", "删了", "作废", "不要了", "delete", "cleanup", "remove")) and changelist:
+        return [ToolCall(skill="p4.cleanup_cl", arguments={"cl": changelist.group(1) or changelist.group(2)})]
+    if any(kw in lowered or kw in text for kw in ("哪些 cl", "哪些cl", "有哪些 cl", "有哪些cl", "cl 的id", "cl id", "cl 列表", "cl列表", "changelist 列表", "pending cl", "shelved cl", "当前 cl", "当前cl")) or (
+        "cl" in lowered and any(kw in text for kw in ("有哪些", "哪些", "列一下", "查看", "看看"))
+    ):
+        return [ToolCall(skill="p4.list_cls", arguments={})]
     if ("p4" in lowered or "perforce" in lowered) and any(kw in lowered or kw in text for kw in ("info", "connection", "verify", "status", "opened", "changes", "changed", "状态")):
         return [ToolCall(skill="p4.status", arguments={})]
     if any(kw in lowered or kw in text for kw in ("check", "检查", "安全检查")):
@@ -626,7 +756,6 @@ def _p4_tool_calls_from_text(text: str) -> list[ToolCall]:
     skill = mapping.get(intent.intent)
     if not skill:
         return []
-    changelist = re.search(r"(?:changelist|cl|变更)\s*(\d+)|\b(\d{4,})\b", text, re.IGNORECASE)
     if skill in {"p4.reconcile", "p4.shelve", "p4.report"} and changelist:
         args["cl"] = changelist.group(1) or changelist.group(2)
     return [ToolCall(skill=skill, arguments=args)]

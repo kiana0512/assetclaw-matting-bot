@@ -81,6 +81,33 @@ storage\feishu_inbox\日期\会话\
 - 路径不能包含：`.env`、`.ssh`、`AppData`、`Windows`、`Program Files`、`ProgramData`
 - 发送"查看权限说明"可在飞书内查看完整安全边界
 
+## Cherry 显示 RUNNING 但输出目录为空
+
+典型现象：
+
+- `cherry.run_status` 显示 `RUNNING`
+- `completed=0`、`failed=0`
+- 输出目录已经创建，但没有任何 PNG
+
+常见原因是用短生命周期命令启动了带后台 worker 的 skill，例如：
+
+```powershell
+python -c "from assetclaw_matting.skills.cherry_skills import run_start; run_start(...)"
+```
+
+这种命令会创建任务记录并启动当前进程内的后台线程，但 `python -c` 进程马上退出后，worker 也会随之消失。以后不要用这种方式验收 Cherry / pipeline / animation flow 的真实执行。
+
+正确处理：
+
+1. 优先通过常驻 Gateway/Agent 调用 `cherry.run_start`，让服务进程持有 worker。
+2. 如果是手动补跑已有 Cherry 任务，用前台 worker：
+
+```powershell
+C:\Users\lilithgames\miniconda3\envs\assetclaw\python.exe scripts\run_cherry_worker_once.py CHERRY_xxxxxxxxxxxx
+```
+
+3. 跑完必须确认 `status=DONE`、`completed=total`，再统计输出 PNG 数量和抽样尺寸。
+
 ## Gateway 启动失败 / 端口占用
 
 ```powershell

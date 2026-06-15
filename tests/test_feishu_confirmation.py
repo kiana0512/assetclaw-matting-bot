@@ -3,6 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 import uuid
 
+import pytest
+
+from assetclaw_matting.config import settings
 from assetclaw_matting.db.repos import create_pending_confirmation
 from assetclaw_matting.db.schema import create_tables
 from assetclaw_matting.db.sqlite import init_db
@@ -13,6 +16,11 @@ from assetclaw_matting.feishu.processor import process_feishu_message
 def setup_module() -> None:
     init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
     create_tables()
+
+
+@pytest.fixture(autouse=True)
+def _sync_feishu_processing(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "agent_queue_enabled", False)
 
 
 def _event(text: str, event_id: str) -> FeishuMessageEvent:
@@ -59,6 +67,45 @@ def test_multiple_confirmations_are_executed_once(monkeypatch) -> None:
     assert calls == [
         ("comfyui.run_cancel", {"run_id": "COMFY_111111111111"}),
         ("comfyui.run_cancel", {"run_id": "COMFY_222222222222"}),
+    ]
+    assert "需要确认" not in "\n".join(replies)
+
+
+def test_bare_confirmation_code_executes_animation_flow_with_normalized_args(monkeypatch) -> None:
+    replies: list[str] = []
+    calls: list[tuple[str, dict]] = []
+
+    monkeypatch.setattr("assetclaw_matting.feishu.processor._try_reply", lambda _mid, _cid, text: replies.append(text))
+    monkeypatch.setattr("assetclaw_matting.feishu.processor._try_send_chat", lambda _cid, text: replies.append(text))
+
+    def fake_call_skill(skill: str, arguments: dict, requested_by: str = "brain") -> dict:
+        calls.append((skill, arguments))
+        return {"ok": True, "skill": skill, "result": {"run_id": "AFLOW_TEST", "status": "RUNNING"}}
+
+    monkeypatch.setattr("assetclaw_matting.skills.registry.call_skill", fake_call_skill)
+    confirmation_id = create_pending_confirmation(
+        "feishu:chat_confirm:user_confirm",
+        "user_confirm",
+        "animation_flow.start",
+        {
+            "date_root": r"E:\animation_automation\2026-06-12",
+            "unity_import_mode": "替换",
+            "priority_characters": "casualheather",
+        },
+    )
+
+    result = process_feishu_message(_event(confirmation_id, f"evt_bare_confirm_{uuid.uuid4().hex}"))
+
+    assert result.ok is True
+    assert calls == [
+        (
+            "animation_flow.start",
+            {
+                "date_root": r"E:\animation_automation\2026-06-12",
+                "unity_import_mode": "iteration",
+                "priority_characters": ["casualheather"],
+            },
+        )
     ]
     assert "需要确认" not in "\n".join(replies)
 
