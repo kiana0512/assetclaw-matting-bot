@@ -5,7 +5,7 @@ import re
 
 
 SECRET_RE = re.compile(
-    r"((?:token|secret|api[_-]?key|authorization|bearer|password)\s*[:=]\s*)[^\s,;]+",
+    r"((?:token|secret|api[_-]?key|authorization|bearer|password)\s*[:=]\s*)[^\s,;]+|sk-[A-Za-z0-9_-]{8,}",
     re.IGNORECASE,
 )
 
@@ -56,7 +56,11 @@ def validate_path(path: str | Path, must_exist: bool = False) -> Path:
 
 
 def redact_secrets(text: object) -> str:
-    return SECRET_RE.sub(r"\1[REDACTED]", str(text))
+    def repl(match: re.Match[str]) -> str:
+        prefix = match.group(1)
+        return f"{prefix}[REDACTED]" if prefix else "[REDACTED]"
+
+    return SECRET_RE.sub(repl, str(text))
 
 
 sanitize_log_line = redact_secrets

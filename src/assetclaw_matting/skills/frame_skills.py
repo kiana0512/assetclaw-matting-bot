@@ -34,6 +34,8 @@ def default_automation_paths(day: str | None = None) -> dict[str, str]:
         "frame_dir": str(root / "frames"),
         "matte_dir": str(root / "matte"),
         "smooth_dir": str(root / "smooth"),
+        "source_manifest": str(root / "source_manifest.json"),
+        "unity_ready_dir": str(root / "unity_ready"),
     }
 
 
@@ -48,7 +50,7 @@ def info() -> dict[str, Any]:
         "exists": tool.exists(),
         "config_path": str(tool / "config.json"),
         "fps": int(cfg.get("framepacker", {}).get("fps", 24)),
-        "max_frames": int(cfg.get("framepacker", {}).get("max_frames", 24) or 0),
+        "max_frames": int(cfg.get("framepacker", {}).get("max_frames", 0) or 0),
         "diff_threshold": float(cfg.get("dedup", {}).get("diff_threshold", 0.2)),
         "workspace_root": defaults["workspace_root"],
         "download_dir": defaults["video_dir"],
@@ -63,18 +65,46 @@ def run_preview(
     fps: int | None = None,
     max_frames: int | None = None,
     diff_threshold: float | None = None,
+    dedup_enabled: bool | None = None,
+    dedup_renumber: bool | None = None,
+    root: str | None = None,
+    emotions: list[str] | None = None,
+    types: list[str] | None = None,
+    progress_include: list[str] | None = None,
+    progress_exclude: list[str] | None = None,
+    priority_characters: list[str] | None = None,
 ) -> dict[str, Any]:
     defaults = default_automation_paths()
-    cfg = _build_config(download_dir=download_dir, export_dir=export_dir, fps=fps, max_frames=max_frames, diff_threshold=diff_threshold)
+    cfg = _build_config(
+        download_dir=download_dir,
+        export_dir=export_dir,
+        fps=fps,
+        max_frames=max_frames,
+        diff_threshold=diff_threshold,
+        dedup_enabled=dedup_enabled,
+        dedup_renumber=dedup_renumber,
+        root=root,
+        emotions=emotions,
+        types=types,
+        progress_include=progress_include,
+        progress_exclude=progress_exclude,
+        priority_characters=priority_characters,
+    )
     return {
         "ok": True,
         "workspace_root": defaults["workspace_root"],
         "download_dir": cfg["paths"]["download_dir"],
         "export_dir": cfg["paths"]["export_dir"],
         "fps": cfg["framepacker"]["fps"],
-        "max_frames": cfg["framepacker"].get("max_frames", 24),
-        "dedup_enabled": cfg.get("dedup", {}).get("enabled", True),
+        "max_frames": cfg["framepacker"].get("max_frames", 0),
+        "dedup_enabled": cfg.get("dedup", {}).get("enabled", False),
         "diff_threshold": cfg.get("dedup", {}).get("diff_threshold", 0.2),
+        "selection_root": cfg.get("selection", {}).get("root", ""),
+        "selection_emotions": cfg.get("selection", {}).get("emotions", []),
+        "selection_types": cfg.get("selection", {}).get("types", []),
+        "progress_include": cfg.get("selection", {}).get("progress_include", []),
+        "progress_exclude": cfg.get("selection", {}).get("progress_exclude", []),
+        "priority_characters": cfg.get("selection", {}).get("priority_characters", []),
         "selection": "all_records_with_animation",
     }
 
@@ -85,13 +115,35 @@ def run_start(
     fps: int | None = None,
     max_frames: int | None = None,
     diff_threshold: float | None = None,
+    dedup_enabled: bool | None = None,
+    dedup_renumber: bool | None = None,
+    root: str | None = None,
+    emotions: list[str] | None = None,
+    types: list[str] | None = None,
+    progress_include: list[str] | None = None,
+    progress_exclude: list[str] | None = None,
+    priority_characters: list[str] | None = None,
     notify_interval_seconds: int = 60,
 ) -> dict[str, Any]:
     from assetclaw_matting.config import settings
     from assetclaw_matting.db.sqlite import get_connection
     from assetclaw_matting.runtime_context import get_runtime_context
 
-    cfg = _build_config(download_dir=download_dir, export_dir=export_dir, fps=fps, max_frames=max_frames, diff_threshold=diff_threshold)
+    cfg = _build_config(
+        download_dir=download_dir,
+        export_dir=export_dir,
+        fps=fps,
+        max_frames=max_frames,
+        diff_threshold=diff_threshold,
+        dedup_enabled=dedup_enabled,
+        dedup_renumber=dedup_renumber,
+        root=root,
+        emotions=emotions,
+        types=types,
+        progress_include=progress_include,
+        progress_exclude=progress_exclude,
+        priority_characters=priority_characters,
+    )
     run_id = _run_id()
     run_dir = Path(settings.storage_dir) / "frame_runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -132,7 +184,7 @@ def run_start(
         _notify(run_id, f"抽帧任务已启动\n下载：{cfg['paths']['download_dir']}\n导出：{cfg['paths']['export_dir']}")
         _start_progress_monitor(run_id)
     _start_worker(run_id)
-    return {"ok": True, "run_id": run_id, "status": "RUNNING", "download_dir": cfg["paths"]["download_dir"], "export_dir": cfg["paths"]["export_dir"], "fps": cfg["framepacker"]["fps"], "max_frames": cfg["framepacker"].get("max_frames", 24), "diff_threshold": cfg.get("dedup", {}).get("diff_threshold", 0.2)}
+    return {"ok": True, "run_id": run_id, "status": "RUNNING", "download_dir": cfg["paths"]["download_dir"], "export_dir": cfg["paths"]["export_dir"], "fps": cfg["framepacker"]["fps"], "max_frames": cfg["framepacker"].get("max_frames", 0), "diff_threshold": cfg.get("dedup", {}).get("diff_threshold", 0.2)}
 
 
 def run_status(run_id: str | None = None) -> dict[str, Any]:
@@ -380,7 +432,21 @@ def _format_status(status: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _build_config(download_dir: str | None, export_dir: str | None, fps: int | None, max_frames: int | None, diff_threshold: float | None) -> dict[str, Any]:
+def _build_config(
+    download_dir: str | None,
+    export_dir: str | None,
+    fps: int | None,
+    max_frames: int | None,
+    diff_threshold: float | None,
+    dedup_enabled: bool | None = None,
+    dedup_renumber: bool | None = None,
+    root: str | None = None,
+    emotions: list[str] | None = None,
+    types: list[str] | None = None,
+    progress_include: list[str] | None = None,
+    progress_exclude: list[str] | None = None,
+    priority_characters: list[str] | None = None,
+) -> dict[str, Any]:
     cfg = _load_base_config()
     defaults = default_automation_paths()
     if download_dir:
@@ -393,9 +459,25 @@ def _build_config(download_dir: str | None, export_dir: str | None, fps: int | N
         cfg.setdefault("paths", {})["export_dir"] = str(validate_path(defaults["frame_dir"], must_exist=False))
     if fps is not None:
         cfg.setdefault("framepacker", {})["fps"] = int(fps)
-    cfg.setdefault("framepacker", {})["max_frames"] = int(max_frames) if max_frames is not None else int(cfg.get("framepacker", {}).get("max_frames", 24) or 0)
+    cfg.setdefault("framepacker", {})["max_frames"] = int(max_frames) if max_frames is not None else int(cfg.get("framepacker", {}).get("max_frames", 0) or 0)
     if diff_threshold is not None:
         cfg.setdefault("dedup", {})["diff_threshold"] = float(diff_threshold)
+    if dedup_enabled is not None:
+        cfg.setdefault("dedup", {})["enabled"] = bool(dedup_enabled)
+    if dedup_renumber is not None:
+        cfg.setdefault("dedup", {})["renumber"] = bool(dedup_renumber)
+    if root is not None:
+        cfg.setdefault("selection", {})["root"] = str(root)
+    if emotions is not None:
+        cfg.setdefault("selection", {})["emotions"] = [str(item) for item in emotions]
+    if types is not None:
+        cfg.setdefault("selection", {})["types"] = [str(item) for item in types]
+    if progress_include is not None:
+        cfg.setdefault("selection", {})["progress_include"] = [str(item) for item in progress_include]
+    if progress_exclude is not None:
+        cfg.setdefault("selection", {})["progress_exclude"] = [str(item) for item in progress_exclude]
+    if priority_characters is not None:
+        cfg.setdefault("selection", {})["priority_characters"] = [str(item) for item in priority_characters]
     return cfg
 
 

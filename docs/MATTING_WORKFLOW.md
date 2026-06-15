@@ -11,6 +11,21 @@ Python：C:\Users\lilithgames\Downloads\ComfyUI-aki-v3\python
 后端：http://127.0.0.1:8188
 ```
 
+环境边界：
+
+- 启动 ComfyUI：只使用秋叶目录里的 `python\python.exe`。
+- Agent / Gateway / 飞书 / ASR / TTS / P4 / 文件技能：只使用 conda env `assetclaw`。
+- `comfyui.run_start` 运行在 Agent 里，但它只向 `COMFYUI_URL` 发 HTTP 请求，不直接导入或安装 ComfyUI 依赖。
+- `cherry.run_start` 的 worker 会调用秋叶 python，因为 Cherry 处理依赖秋叶环境中的图像/torch 依赖。
+
+启动 ComfyUI 后端：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\run_comfyui.ps1
+```
+
+这个脚本不会激活 `assetclaw`，也不会修改秋叶环境；它只进入秋叶 ComfyUI 目录并调用秋叶 python。
+
 ## 当前可用
 
 旧批次技能仍保留，用于轻量批次管理：

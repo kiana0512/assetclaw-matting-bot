@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import shutil
 import threading
 import time
@@ -10,8 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from assetclaw_matting.comfyui.output_resolver import resolve_first_output
-from assetclaw_matting.comfyui.workflow_patch import inspect_workflow, patch_load_image, patch_node_input, prepare_api_prompt_for_run
+from assetclaw_matting.comfyui.output_resolver import inspect_local_png, resolve_best_output
+from assetclaw_matting.comfyui.workflow_patch import find_primary_save_image_node_id, inspect_workflow, patch_load_image, patch_node_input, prepare_api_prompt_for_run
 from assetclaw_matting.skills.media_skills import IMAGE_EXTS
 from assetclaw_matting.skills.security import validate_path
 
@@ -96,6 +97,7 @@ def run_start(
     recursive: bool = True,
     preserve_structure: bool = True,
     skip_existing: bool = False,
+    priority_characters: list[str] | None = None,
     notify_interval_seconds: int = 300,
 ) -> dict[str, Any]:
     from assetclaw_matting.config import settings
@@ -114,7 +116,7 @@ def run_start(
         raise ValueError("workflow_path must be a json file")
     dst.mkdir(parents=True, exist_ok=True)
 
-    files = _collect_images(src, recursive=recursive, max_images=max_images)
+    files = _collect_images(src, recursive=recursive, max_images=max_images, priority_characters=priority_characters)
     if not files:
         raise ValueError("input_dir has no supported images")
     if skip_existing:
@@ -130,6 +132,7 @@ def run_start(
         "recursive": recursive,
         "preserve_structure": preserve_structure,
         "skip_existing": skip_existing,
+        "priority_characters": list(priority_characters or []),
         "notify_interval_seconds": max(60, min(notify_interval_seconds, 3600)),
         "prompt_map": prompt_map,
         "chat_id": (ctx.get("chat_id") or "") if ctx.get("channel") == "feishu" else "",
@@ -272,17 +275,25 @@ def run_sync_outputs(run_id: str, overwrite: bool = True) -> dict[str, Any]:
     options = json.loads(row["options_json"] or "{}")
     prompt_map = options.get("prompt_map") or []
     prompt_targets = {item.get("prompt_id"): item for item in prompt_map if item.get("prompt_id")}
+    workflow_file = Path(row["workflow_path"])
+    final_save_image_node_id = _final_save_image_node_id(json.loads(workflow_file.read_text(encoding="utf-8")))
     saved = []
     for prompt_id in prompt_ids:
         history = comfyui_client.get_history(prompt_id)
         if prompt_id not in history:
             continue
-        output = resolve_first_output(history, prompt_id)
+        output = resolve_best_output(
+            history,
+            prompt_id,
+            local_path_resolver=comfyui_client.resolve_local_output_path,
+            final_save_image_node_id=final_save_image_node_id,
+        )
         mapped = prompt_targets.get(prompt_id) or {}
         target = Path(mapped.get("dst_path") or (output_dir / output["filename"]))
         if target.exists() and not overwrite:
             continue
         comfyui_client.download_output(output["filename"], output.get("subfolder", ""), output.get("type", "output"), target)
+        _ensure_final_transparent_png(target)
         saved.append(str(target))
     return {"ok": True, "run_id": run_id, "output_dir": str(output_dir), "count": len(saved), "items": saved[:50]}
 
@@ -299,16 +310,29 @@ def run_pause(run_id: str | None = None) -> dict[str, Any]:
 
 
 def run_resume(run_id: str | None = None) -> dict[str, Any]:
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.comfyui.client import comfyui_client
+
     row = _get_run(run_id)
     if not row:
         return {"ok": False, "error": "comfyui run not found"}
-    if row["status"] != "PAUSED":
-        return {"ok": True, "run_id": row["id"], "status": row["status"], "message": "当前任务不在暂停状态。"}
+    if row["status"] in {"DONE", "DONE_WITH_ERRORS", "FAILED", "CANCELED"}:
+        return {"ok": True, "run_id": row["id"], "status": row["status"], "message": "任务已经结束，不能继续。"}
+    if row["status"] == "RUNNING" and not settings.comfyui_fake_mode:
+        try:
+            queue = comfyui_client.get_queue()
+            queue_count = len(queue.get("queue_running") or []) + len(queue.get("queue_pending") or [])
+        except Exception:
+            queue_count = 0
+        if queue_count:
+            return {"ok": True, "run_id": row["id"], "status": "RUNNING", "message": "任务已经在 ComfyUI 队列中运行。"}
+        if not _looks_stalled(row):
+            return {"ok": True, "run_id": row["id"], "status": "RUNNING", "message": "任务刚更新过，暂不重复拉起 worker。"}
     _set_run_status(row["id"], "RUNNING")
-    _notify(row["id"], f"ComfyUI 任务已继续：{row['id']}")
+    _notify(row["id"], f"ComfyUI 任务已继续/重新拉起：{row['id']}")
     _start_run_worker(row["id"])
     _start_progress_monitor(row["id"])
-    return {"ok": True, "run_id": row["id"], "status": "RUNNING"}
+    return {"ok": True, "run_id": row["id"], "status": "RUNNING", "message": "已拉起提交 worker。"}
 
 
 def run_cancel(run_id: str | None = None, interrupt_current: bool = True) -> dict[str, Any]:
@@ -536,6 +560,7 @@ def _run_worker(run_id: str) -> None:
         dst = Path(row["output_dir"])
         workflow_file = Path(row["workflow_path"])
         base_workflow = json.loads(workflow_file.read_text(encoding="utf-8"))
+        final_save_image_node_id = _final_save_image_node_id(base_workflow)
         done_sources = {item.get("src_path") for item in prompt_map}
 
         for image_path in files:
@@ -552,21 +577,51 @@ def _run_worker(run_id: str) -> None:
             target = _output_target(src, dst, image_path, bool(options.get("preserve_structure", True)))
             prompt_id = ""
             try:
-                if settings.comfyui_fake_mode:
-                    _fake_copy_image(image_path, target)
-                else:
-                    uploaded = comfyui_client.upload_image(image_path)
-                    workflow = copy.deepcopy(base_workflow)
-                    if options.get("input_node_id"):
-                        workflow = patch_node_input(workflow, str(options["input_node_id"]), str(options.get("input_name") or "image"), uploaded)
-                    else:
-                        workflow = patch_load_image(workflow, uploaded)
-                    prompt_id = comfyui_client.submit_prompt(prepare_api_prompt_for_run(workflow), client_id=run_id)
-                    prompt_ids.append(prompt_id)
-                    _save_run_progress(run_id, prompt_ids, options)
-                    history = comfyui_client.wait_for_completion(prompt_id)
-                    output = resolve_first_output(history, prompt_id)
-                    comfyui_client.download_output(output["filename"], output.get("subfolder", ""), output.get("type", "output"), target)
+                attempts = max(1, int(options.get("output_validation_retries", 3)))
+                retry_delay = max(5, int(options.get("output_validation_retry_delay_seconds", 20)))
+                last_error: Exception | None = None
+                for attempt in range(1, attempts + 1):
+                    try:
+                        if settings.comfyui_fake_mode:
+                            _fake_copy_image(image_path, target)
+                        else:
+                            uploaded = comfyui_client.upload_image(image_path)
+                            workflow = copy.deepcopy(base_workflow)
+                            if options.get("input_node_id"):
+                                workflow = patch_node_input(workflow, str(options["input_node_id"]), str(options.get("input_name") or "image"), uploaded)
+                            else:
+                                workflow = patch_load_image(workflow, uploaded)
+                            prompt_id = comfyui_client.submit_prompt(prepare_api_prompt_for_run(workflow), client_id=run_id)
+                            prompt_ids.append(prompt_id)
+                            _save_run_progress(run_id, prompt_ids, options)
+                            history = comfyui_client.wait_for_completion(prompt_id)
+                            output = resolve_best_output(
+                                history,
+                                prompt_id,
+                                local_path_resolver=comfyui_client.resolve_local_output_path,
+                                final_save_image_node_id=final_save_image_node_id,
+                            )
+                            comfyui_client.download_output(output["filename"], output.get("subfolder", ""), output.get("type", "output"), target)
+                        if not settings.comfyui_fake_mode:
+                            _ensure_final_transparent_png(target)
+                        last_error = None
+                        break
+                    except Exception as exc:
+                        last_error = exc
+                        if target.exists():
+                            target.unlink()
+                        if attempt < attempts:
+                            _notify(
+                                run_id,
+                                "ComfyUI 输出校验失败，已拒绝写入 matte；等待缓存稳定后重跑当前帧："
+                                f"\n帧：{image_path.name}"
+                                f"\n重试：{attempt + 1}/{attempts}"
+                                f"\n等待：{retry_delay}s"
+                                f"\n原因：{exc}",
+                            )
+                            time.sleep(retry_delay)
+                            continue
+                        raise RuntimeError(f"ComfyUI 输出校验失败，已重试 {attempts} 次，拒绝写入 matte：{image_path.name}\n{last_error}") from exc
                 prompt_map.append({
                     "prompt_id": prompt_id,
                     "src_path": str(image_path),
@@ -586,7 +641,13 @@ def _run_worker(run_id: str) -> None:
                 options["prompt_map"] = prompt_map
                 _save_run_progress(run_id, prompt_ids, options)
                 _set_run_status(run_id, "FAILED")
-                _notify(run_id, f"ComfyUI 抠图出错：{image_path.name}\n{exc}")
+                _notify(
+                    run_id,
+                    "ComfyUI 抠图出错，已停止，未写入中间图："
+                    f"\n问题图片：{image_path}"
+                    f"\n目标输出：{target}"
+                    f"\n原因：{exc}",
+                )
                 return
         final_status = "DONE_WITH_ERRORS" if any(item.get("error") for item in prompt_map) else "DONE"
         _set_run_status(run_id, final_status)
@@ -805,11 +866,30 @@ def _selected_workflow_path() -> str | None:
     return None
 
 
-def _collect_images(root: Path, recursive: bool, max_images: int) -> list[Path]:
+def _collect_images(root: Path, recursive: bool, max_images: int, priority_characters: list[str] | None = None) -> list[Path]:
     iterator = root.rglob("*") if recursive else root.iterdir()
     files = [p for p in iterator if p.is_file() and p.suffix.lower() in IMAGE_EXTS]
-    files = sorted(files, key=lambda p: str(p.relative_to(root)).lower())
+    priority = {_safe_task_name(item): index for index, item in enumerate(priority_characters or []) if str(item or "").strip()}
+
+    def sort_key(path: Path) -> tuple[int, str]:
+        rel = str(path.relative_to(root)).replace("\\", "/").lower()
+        first = rel.split("/", 1)[0]
+        character = first.split("-", 1)[0]
+        return priority.get(character, len(priority)), rel
+
+    files = sorted(files, key=sort_key)
     return files[: max(1, min(max_images, 10000))]
+
+
+def _final_save_image_node_id(workflow: dict[str, Any]) -> str:
+    node_id = find_primary_save_image_node_id(workflow)
+    if not node_id:
+        raise ValueError("当前 ComfyUI workflow 没有找到 SaveImage/保存图像 节点，拒绝运行。")
+    return node_id
+
+
+def _safe_task_name(value: str) -> str:
+    return re.sub(r"[^0-9a-zA-Z_\-\u4e00-\u9fff]+", "_", str(value).strip()).strip("_").lower()
 
 
 def _relative_output_key(input_root: Path, image_path: Path, preserve_structure: bool) -> str:
@@ -830,6 +910,24 @@ def _fake_copy_image(src: Path, dst: Path) -> None:
             image.convert("RGBA").save(dst, "PNG")
     except Exception:
         shutil.copy2(src, dst)
+
+
+def _ensure_final_transparent_png(path: Path) -> None:
+    quality = inspect_local_png(path)
+    if quality.get("valid"):
+        return
+    if path.exists():
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    size = f"{quality.get('width', 0)}x{quality.get('height', 0)}"
+    alpha = f"{quality.get('alpha_min')}..{quality.get('alpha_max')}" if quality.get("has_alpha") else "none"
+    raise ValueError(
+        "输出不是合格的最终透明 PNG，已删除并拒绝进入 matte："
+        f"{path}；size={size}；mode={quality.get('mode') or '?'}；"
+        f"alpha={alpha}；reason={quality.get('reason')}"
+    )
 
 
 def _last_completed_name(prompt_map: list[dict[str, str]]) -> str:
@@ -890,6 +988,14 @@ def _save_run_progress(run_id: str, prompt_ids: list[str], options: dict[str, An
             "UPDATE comfyui_runs SET prompt_ids_json = ?, options_json = ?, updated_at = ? WHERE id = ?",
             (json.dumps(prompt_ids, ensure_ascii=False), json.dumps(options, ensure_ascii=False), _now(), run_id),
         )
+
+
+def _looks_stalled(row: Any, stale_seconds: int = 60) -> bool:
+    try:
+        updated_at = datetime.fromisoformat(row["updated_at"])
+    except Exception:
+        return True
+    return time.time() - updated_at.timestamp() >= stale_seconds
 
 
 def _eta(elapsed: float, completed: int, total: int) -> int | None:

@@ -20,6 +20,14 @@ dependencies = [
     "lark-oapi>=1.3.0",
 ]
 
+[project.optional-dependencies]
+speech = [
+    "modelscope>=1.20.0",
+    "funasr>=1.2.0",
+    "faster-whisper>=1.1.0",
+    "openai-whisper>=20240930",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
@@ -27,4 +35,16 @@ where = ["src"]
 "" = "src"
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+norecursedirs = [
+    ".git",
+    ".pytest_cache",
+    "__pycache__",
+    "storage",
+    "logs",
+    "data",
+    "ComfyUI",
+    "models",
+    "checkpoints",
+]

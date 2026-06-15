@@ -11,14 +11,12 @@ import requests
 from requests import HTTPError
 
 from assetclaw_matting.brain.base import BrainProvider
-from assetclaw_matting.brain.conversation_recall import answer_recent_question
 from assetclaw_matting.brain.context_builder import build_memory_prompt, build_skill_manifest_prompt
-from assetclaw_matting.brain.file_task_planner import plan_file_task
-from assetclaw_matting.brain.multimodal_planner import answer_recent_image_question, plan_multimodal_task
+from assetclaw_matting.brain.emotion_planner import plan_emotional_reply
+from assetclaw_matting.brain.pre_llm_router import handle_pre_llm_message
 from assetclaw_matting.brain.prompts import SYSTEM_PROMPT
 from assetclaw_matting.brain.result_formatter import format_skill_results
 from assetclaw_matting.brain.schemas import BrainMessage, BrainResponse, ToolCall
-from assetclaw_matting.brain.translation_planner import plan_translation_task
 from assetclaw_matting.ops_trace import trace
 from assetclaw_matting.progress import notify_progress
 from assetclaw_matting.skills.security import redact_secrets
@@ -36,83 +34,12 @@ class LLMProxyBrain(BrainProvider):
         return bool(settings.llm_proxy_enabled and settings.llm_proxy_base_url and settings.llm_proxy_api_key)
 
     def handle_message(self, message: BrainMessage) -> BrainResponse:
-        image_answer = answer_recent_image_question(message)
-        if image_answer:
-            response = BrainResponse(text=image_answer, provider=self.name)
-            self.log_message(message, response)
-            return response
-
-        translated = plan_translation_task(message)
-        if translated:
-            tool_calls, text = translated
-            if not tool_calls:
-                response = BrainResponse(text=text, provider=self.name)
-                self.log_message(message, response)
-                return response
-            results = self.execute_tool_calls(
-                tool_calls,
-                conversation_id=message.conversation_id,
-                user_id=message.user_id,
-            )
-            response = BrainResponse(
-                text=format_skill_results(results),
-                tool_calls=tool_calls,
-                raw={"deterministic_plan": text, "skill_results": results},
-                provider=self.name,
-            )
-            self.log_message(message, response)
-            return response
-
-        multimodal = plan_multimodal_task(message)
-        if multimodal:
-            tool_calls, text = multimodal
-            if not tool_calls:
-                response = BrainResponse(text=text, provider=self.name)
-                self.log_message(message, response)
-                return response
-            results = self.execute_tool_calls(
-                tool_calls,
-                conversation_id=message.conversation_id,
-                user_id=message.user_id,
-            )
-            response = BrainResponse(
-                text=format_skill_results(results),
-                tool_calls=tool_calls,
-                raw={"deterministic_plan": text, "skill_results": results},
-                provider=self.name,
-            )
-            self.log_message(message, response)
-            return response
+        pre_llm_response = handle_pre_llm_message(self, message)
+        if pre_llm_response:
+            return pre_llm_response
 
         if message.attachments and _asks_for_visual_analysis(message.text):
             response = self._analyze_attachments(message)
-            self.log_message(message, response)
-            return response
-
-        recalled = answer_recent_question(message.text, message.conversation_id)
-        if recalled:
-            response = BrainResponse(text=recalled, provider=self.name)
-            self.log_message(message, response)
-            return response
-
-        planned = plan_file_task(message)
-        if planned:
-            tool_calls, text = planned
-            if not tool_calls:
-                response = BrainResponse(text=text, provider=self.name)
-                self.log_message(message, response)
-                return response
-            results = self.execute_tool_calls(
-                tool_calls,
-                conversation_id=message.conversation_id,
-                user_id=message.user_id,
-            )
-            response = BrainResponse(
-                text=format_skill_results(results),
-                tool_calls=tool_calls,
-                raw={"deterministic_plan": text, "skill_results": results},
-                provider=self.name,
-            )
             self.log_message(message, response)
             return response
 
@@ -121,6 +48,12 @@ class LLMProxyBrain(BrainProvider):
                 text="我收到了空消息。可以直接发文字指令，或发图片后说明要提取文字、翻译还是保存。",
                 provider=self.name,
             )
+            self.log_message(message, response)
+            return response
+
+        emotional_reply = plan_emotional_reply(message.text)
+        if emotional_reply:
+            response = BrainResponse(text=emotional_reply, provider=self.name)
             self.log_message(message, response)
             return response
 
@@ -193,7 +126,7 @@ class LLMProxyBrain(BrainProvider):
 
         tool_calls = [ToolCall(**item) for item in parsed.get("tool_calls", [])]
         if not tool_calls:
-            reply = parsed.get("text") or parsed.get("reply") or "我理解了。"
+            reply = parsed.get("text") or parsed.get("reply") or parsed.get("content") or "我理解了。"
             if _is_empty_understanding(reply):
                 reply = (
                     "我刚才没有执行任何操作。"
@@ -423,4 +356,4 @@ def _is_empty_understanding(text: str) -> bool:
 
 
 def _asks_for_visual_analysis(text: str) -> bool:
-    return any(kw in text for kw in ("分析", "理解", "识别", "看看图", "图里", "画面", "描述", "是什么"))
+    return any(kw in text for kw in ("分析", "理解", "识别", "看看图", "看图", "看一下", "看到", "图里", "画面", "描述", "是什么", "具体内容", "表情包", "附件内容"))

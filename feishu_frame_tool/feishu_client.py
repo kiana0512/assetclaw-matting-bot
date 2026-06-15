@@ -155,15 +155,31 @@ class FeishuClient:
         return client
 
     # ── 字段 ──────────────────────────────────────────────────────────────
-    def get_field_id(self, field_name: str) -> Optional[str]:
-        if not self._field_id_cache:
-            url = (f"{self.base}/open-apis/bitable/v1/apps/{self.app_token}"
-                   f"/tables/{self.table_id}/fields?page_size=200")
-            resp = self.session.get(url, headers=self._headers(), timeout=DEFAULT_TIMEOUT)
+    def list_fields(self) -> List[dict]:
+        """列出字段定义（自动翻页）。"""
+        fields: List[dict] = []
+        page_token = ""
+        url = (f"{self.base}/open-apis/bitable/v1/apps/{self.app_token}"
+               f"/tables/{self.table_id}/fields")
+        while True:
+            params = {"page_size": 200}
+            if page_token:
+                params["page_token"] = page_token
+            resp = self.session.get(url, headers=self._headers(), params=params,
+                                    timeout=DEFAULT_TIMEOUT)
             data = resp.json()
             if data.get("code") != 0:
                 raise FeishuError(f"获取字段列表失败: {data}")
-            for f in data["data"].get("items", []):
+            fields.extend(data["data"].get("items", []))
+            if data["data"].get("has_more"):
+                page_token = data["data"]["page_token"]
+            else:
+                break
+        return fields
+
+    def get_field_id(self, field_name: str) -> Optional[str]:
+        if not self._field_id_cache:
+            for f in self.list_fields():
                 self._field_id_cache[f["field_name"]] = f["field_id"]
         return self._field_id_cache.get(field_name)
 
@@ -193,10 +209,13 @@ class FeishuClient:
         return records
 
     def update_progress(self, record_id: str, progress_field: str, value: str) -> None:
+        self.update_record_fields(record_id, {progress_field: value})
+
+    def update_record_fields(self, record_id: str, fields: dict) -> None:
         url = (f"{self.base}/open-apis/bitable/v1/apps/{self.app_token}"
                f"/tables/{self.table_id}/records/{record_id}")
         resp = self.session.put(url, headers=self._headers(),
-                               json={"fields": {progress_field: value}},
+                               json={"fields": fields},
                                timeout=DEFAULT_TIMEOUT)
         data = resp.json()
         if data.get("code") != 0:

@@ -14,6 +14,10 @@ def _make_provider(name: str) -> BrainProvider | None:
         from assetclaw_matting.brain.llm_proxy_brain import LLMProxyBrain
 
         return LLMProxyBrain()
+    if normalized == "deepseek":
+        from assetclaw_matting.brain.deepseek_brain import DeepSeekBrain
+
+        return DeepSeekBrain()
     if normalized == "local_command":
         from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
 

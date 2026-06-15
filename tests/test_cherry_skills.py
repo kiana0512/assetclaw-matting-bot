@@ -25,7 +25,7 @@ def _make_frame(path: Path, alpha: int) -> None:
 
 def _wait_done(run_id: str) -> dict:
     status = {}
-    for _ in range(80):
+    for _ in range(300):
         status = run_status(run_id, include_gpu=False)
         if status.get("status") in {"DONE", "DONE_WITH_ERRORS", "FAILED", "CANCELED"}:
             return status
@@ -41,11 +41,21 @@ def test_cherry_info_preview_and_real_processing() -> None:
 
     available = info()
     assert available["exists"] is True
-    assert "Cherry_帧序列处理工具_1" in available["source_path"]
+    assert "Cherry_后处理网页_源码_20260615_0658" in available["source_path"]
+    assert "去除外部噪点" in available["steps"]
+    assert "透明图模糊白叠加" in available["steps"]
+    assert available["defaults"]["use_denoise"] is True
+    assert available["defaults"]["denoise_threshold"] == 0.06
+    assert available["defaults"]["use_smooth"] is False
+    assert available["defaults"]["resize1_width"] == 768
+    assert available["defaults"]["resize1_height"] == 1024
+    assert available["defaults"]["resize2_width"] == 384
+    assert available["defaults"]["resize2_height"] == 512
 
     preview = run_preview(str(src), str(dst), use_resize=False, use_sharpen=False)
     assert preview["total"] == 2
     assert preview["sequence_count"] == 1
+    assert preview["options"]["use_denoise"] is True
 
     started = run_start(str(src), str(dst), use_resize=False, use_sharpen=False, notify_interval_seconds=60)
     status = _wait_done(started["run_id"])
@@ -62,6 +72,19 @@ def test_cherry_info_preview_and_real_processing() -> None:
 def test_cherry_registry_and_router() -> None:
     assert get_skill_meta("cherry.run_start")["requires_confirmation"] is True
     assert LocalCommandBrain()._infer_tool_calls("对 E:\\output 做 Cherry 平滑处理 输出 E:\\smooth_output")[0].skill == "cherry.run_start"
+    call = LocalCommandBrain()._infer_tool_calls(
+        "补跑 Cherry 平滑处理 E:\\animation_automation\\2026-06-02\\matte E:\\animation_automation\\2026-06-02\\smooth 跳过已有"
+    )[0]
+    assert call.skill == "cherry.run_start"
+    assert call.arguments["skip_existing"] is True
+    no_temporal = LocalCommandBrain()._infer_tool_calls(
+        "Cherry 平滑处理 E:\\animation_automation\\2026-06-02\\matte E:\\animation_automation\\2026-06-02\\smooth 不做时序平滑"
+    )[0]
+    assert no_temporal.arguments["use_smooth"] is False
+    temporal = LocalCommandBrain()._infer_tool_calls(
+        "Cherry 平滑处理 E:\\animation_automation\\2026-06-02\\matte E:\\animation_automation\\2026-06-02\\smooth 开启时序平滑"
+    )[0]
+    assert temporal.arguments["use_smooth"] is True
     assert LocalCommandBrain()._infer_tool_calls("现在平滑任务到哪里了")[0].skill == "cherry.run_status"
 
     listed = run_list(include_finished=True)

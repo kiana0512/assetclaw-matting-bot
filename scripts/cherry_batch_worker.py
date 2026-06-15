@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import sys
 import types
@@ -23,43 +24,23 @@ def main() -> int:
     completed = 0
     failed = 0
     for group_files in groups:
-        try:
-            batch_np = [module.decode(path.read_bytes()) for path in group_files]
-            shapes = {arr.shape for arr in batch_np}
-            if len(shapes) != 1:
-                raise ValueError(f"同一序列内图片尺寸不一致：{group_files[0].parent}")
-            batch = torch.from_numpy(np.stack(batch_np)).float() / 255.0
-            if options.get("use_smooth"):
-                batch = module.temporal_smooth(
-                    batch,
-                    int(options.get("smooth_window", 5)),
-                    float(options.get("smooth_sigma", 1.0)),
-                    bool(options.get("sync_rgb", True)),
-                    float(options.get("min_alpha", 0.05)),
-                )
-            if options.get("use_resize"):
-                batch = module.ps_bicubic_sharper(batch, int(options.get("resize_width", 384)), int(options.get("resize_height", 512)))
-            if options.get("use_sharpen"):
-                batch = module.sharpen(
-                    batch,
-                    float(options.get("sharpen_amount", 2.0)),
-                    int(options.get("sharpen_radius", 2)),
-                    float(options.get("sharpen_threshold", 0.02)),
-                    int(options.get("sharpen_shrink", 4)),
-                    float(options.get("min_alpha", 0.05)),
-                )
-            out_np = (batch.detach().cpu().numpy().clip(0, 1) * 255).astype(np.uint8)
-            for index, image_path in enumerate(group_files):
-                target = dst / image_path.relative_to(src).with_suffix(".png")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(module.encode(out_np[index]))
-                completed += 1
-                _emit({"event": "done", "src_path": str(image_path), "dst_path": str(target), "rel_path": str(image_path.relative_to(src)), "completed": completed, "failed": failed})
-        except Exception as exc:
-            for image_path in group_files:
-                failed += 1
-                _emit({"event": "error", "src_path": str(image_path), "rel_path": str(image_path.relative_to(src)), "error": str(exc), "completed": completed, "failed": failed})
-            return 2
+        for process_files in _compatible_batches(module, group_files, bool(options.get("use_smooth"))):
+            try:
+                batch_np = [module.decode(path.read_bytes()) for path in process_files]
+                batch = torch.from_numpy(np.stack(batch_np)).float() / 255.0
+                batch = _apply_cherry_pipeline(module, batch, options)
+                out_np = (batch.detach().cpu().numpy().clip(0, 1) * 255).astype(np.uint8)
+                for index, image_path in enumerate(process_files):
+                    target = dst / image_path.relative_to(src).with_suffix(".png")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(module.encode(out_np[index]))
+                    completed += 1
+                    _emit({"event": "done", "src_path": str(image_path), "dst_path": str(target), "rel_path": str(image_path.relative_to(src)), "completed": completed, "failed": failed})
+            except Exception as exc:
+                for image_path in process_files:
+                    failed += 1
+                    _emit({"event": "error", "src_path": str(image_path), "rel_path": str(image_path.relative_to(src)), "error": str(exc), "completed": completed, "failed": failed})
+                return 2
     _emit({"event": "finished", "completed": completed, "failed": failed})
     return 0
 
@@ -105,6 +86,83 @@ def _group_sequences(root: Path, files: list[Path]) -> list[list[Path]]:
     for path in files:
         groups[path.parent.relative_to(root)].append(path)
     return [sorted(paths, key=lambda path: path.name.lower()) for _rel, paths in sorted(groups.items(), key=lambda item: str(item[0]).lower())]
+
+
+def _compatible_batches(module, files: list[Path], require_same_shape: bool) -> list[list[Path]]:
+    by_shape: dict[tuple[int, ...], list[Path]] = defaultdict(list)
+    for path in files:
+        shape = tuple(module.decode(path.read_bytes()).shape)
+        by_shape[shape].append(path)
+    if len(by_shape) <= 1:
+        return [files]
+    if require_same_shape:
+        raise ValueError(f"同一序列内图片尺寸不一致：{files[0].parent}")
+    return [paths for _shape, paths in sorted(by_shape.items(), key=lambda item: str(item[0]))]
+
+
+def _temporal_smooth(module, batch, options):
+    args = [
+        batch,
+        int(options.get("smooth_window", 5)),
+        float(options.get("smooth_sigma", 1.0)),
+        bool(options.get("sync_rgb", False)),
+        float(options.get("min_alpha", 0.05)),
+    ]
+    parameter_count = len(inspect.signature(module.temporal_smooth).parameters)
+    if parameter_count >= 6:
+        args.append(int(options.get("ring_width", 25)))
+    if parameter_count >= 7:
+        args.append(str(options.get("smooth_method", "中值+高斯")))
+    if parameter_count >= 8:
+        args.append(bool(options.get("fill_gap", True)))
+    if parameter_count >= 9:
+        args.append(float(options.get("bg_thresh", 0.02)))
+    return module.temporal_smooth(*args)
+
+
+def _apply_cherry_pipeline(module, batch, options):
+    if options.get("use_denoise"):
+        batch = module.alpha_denoise(
+            batch,
+            float(options.get("denoise_threshold", 0.06)),
+            int(options.get("denoise_radius", 0)),
+        )
+    if options.get("use_blur") and hasattr(module, "blur_under_composite"):
+        batch = module.blur_under_composite(batch, int(options.get("blur_radius", 1)), float(options.get("blur_sigma", 10.0)))
+    if options.get("use_resize1"):
+        batch = module.ps_bicubic_sharper(batch, int(options.get("resize1_width", 768)), int(options.get("resize1_height", 1024)))
+    if options.get("use_sharp1"):
+        batch = _sharpen(
+            module,
+            batch,
+            float(options.get("sharp1_amount", 1.0)),
+            int(options.get("sharp1_radius", 2)),
+            float(options.get("sharp1_threshold", 0.02)),
+            int(options.get("sharp1_shrink", 0)),
+            float(options.get("min_alpha", 0.05)),
+        )
+    if options.get("use_resize2"):
+        batch = module.ps_bicubic_sharper(batch, int(options.get("resize2_width", 384)), int(options.get("resize2_height", 512)))
+    if options.get("use_sharp2"):
+        batch = _sharpen(
+            module,
+            batch,
+            float(options.get("sharp2_amount", 1.0)),
+            int(options.get("sharp2_radius", 2)),
+            float(options.get("sharp2_threshold", 0.02)),
+            int(options.get("sharp2_shrink", 5)),
+            float(options.get("min_alpha", 0.05)),
+        )
+    if options.get("use_smooth"):
+        batch = _temporal_smooth(module, batch, options)
+    return batch
+
+
+def _sharpen(module, batch, amount, radius, threshold, shrink, min_alpha):
+    args = [batch, amount, radius, threshold, shrink]
+    if len(inspect.signature(module.sharpen).parameters) >= 6:
+        args.append(min_alpha)
+    return module.sharpen(*args)
 
 
 def _emit(payload: dict) -> None:

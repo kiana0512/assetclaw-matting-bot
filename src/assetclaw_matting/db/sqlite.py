@@ -14,6 +14,9 @@ def init_db(db_path: Path) -> None:
     global _db_path
     _db_path = db_path
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(str(db_path), timeout=30) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
 
 
 def _get_path() -> Path:
@@ -25,9 +28,9 @@ def _get_path() -> Path:
 @contextmanager
 def get_connection() -> Generator[sqlite3.Connection, None, None]:
     path = _get_path()
-    conn = sqlite3.connect(str(path), timeout=30, check_same_thread=False)
+    conn = sqlite3.connect(str(path), timeout=5, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
     try:
         yield conn

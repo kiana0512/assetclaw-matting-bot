@@ -25,10 +25,10 @@
   },
   "framepacker": {
     "fps": 24,
-    "max_frames": 24
+    "max_frames": 0
   },
   "dedup": {
-    "enabled": true,
+    "enabled": false,
     "diff_threshold": 2.5,
     "renumber": true
   }

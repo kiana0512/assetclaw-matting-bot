@@ -76,22 +76,75 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
     _remember_recent_attachments(conversation_id, event.attachments)
 
     if _is_simple_greeting(event.text):
-        text_out = "你好。"
+        text_out = "初音在。今天想让我陪你聊一会儿，还是一起把某个任务往前推一点？"
         _try_reply(event.message_id, event.chat_id, text_out)
+        _try_send_tts_reply(event.chat_id, conversation_id, event, text_out)
+        _try_send_emotional_sticker(event.chat_id, event.text, text_out)
         _log_direct_brain_message(conversation_id, event, text_out)
         update_event_dedup_status(dedup_key, "success")
         return FeishuProcessResult(ok=True, trace_id=trace_id, reply_text=text_out)
 
     # --- main processing chain -----------------------------------------------
     try:
-        from assetclaw_matting.brain import router as brain_router
         from assetclaw_matting.brain.schemas import BrainMessage
 
-        _try_reply(
-            event.message_id,
-            event.chat_id,
-            "收到，处理中。",
-        )
+        if _should_send_processing_ack(event):
+            _try_reply(
+                event.message_id,
+                event.chat_id,
+                _processing_ack_text(event),
+            )
+
+        if settings.agent_queue_enabled:
+            from assetclaw_matting.services.agent_job_queue import enqueue_brain_job
+
+            def _on_job_done(job: dict[str, object]) -> None:
+                if str(job.get("status") or "") == "DONE":
+                    response = job.get("response") if isinstance(job.get("response"), dict) else {}
+                    reply_text = str(response.get("text") or "完成。")
+                    _try_reply(event.message_id, event.chat_id, reply_text)
+                    _try_send_tts_reply(event.chat_id, conversation_id, event, reply_text)
+                    _try_send_emotional_sticker(event.chat_id, event.text, reply_text)
+                    trace(
+                        "feishu.reply",
+                        trace_id=trace_id,
+                        conversation_id=conversation_id,
+                        chat_id=event.chat_id,
+                        open_id=event.open_id,
+                        text=reply_text,
+                    )
+                    update_event_dedup_status(dedup_key, "success")
+                    log.info("process_message ASYNC SUCCESS trace_id=%s job_id=%s", trace_id, job.get("job_id"))
+                    return
+                update_event_dedup_status(dedup_key, "failed")
+                error_text = str(job.get("error") or "Agent 后台任务失败")
+                if settings.bot_error_push_enabled:
+                    _try_reply(event.message_id, event.chat_id, f"这条消息后台处理失败：{error_text}")
+                log.error("process_message ASYNC FAILED trace_id=%s job_id=%s error=%s", trace_id, job.get("job_id"), error_text)
+
+            job = enqueue_brain_job(
+                BrainMessage(
+                    channel="feishu",
+                    conversation_id=conversation_id,
+                    user_id=event.open_id or "",
+                    text=event.text,
+                    attachments=event.attachments,
+                ),
+                trace_id=trace_id,
+                context={
+                    "channel": "feishu",
+                    "chat_id": event.chat_id,
+                    "open_id": event.open_id,
+                    "user_id": event.user_id,
+                    "conversation_id": conversation_id,
+                    "trace_id": trace_id,
+                },
+                callback=_on_job_done,
+            )
+            log.info("process_message QUEUED trace_id=%s job_id=%s", trace_id, job.get("job_id"))
+            return FeishuProcessResult(ok=True, trace_id=trace_id, reply_text="已进入后台队列。")
+
+        from assetclaw_matting.brain import router as brain_router
 
         def _progress_sender(text: str) -> None:
             log.info("progress trace_id=%s text=%s", trace_id, redact_secrets(text))
@@ -120,6 +173,8 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
             reset_progress_sender(progress_token)
         reply_text = response.text or "完成。"
         _try_reply(event.message_id, event.chat_id, reply_text)
+        _try_send_tts_reply(event.chat_id, conversation_id, event, reply_text)
+        _try_send_emotional_sticker(event.chat_id, event.text, reply_text)
         trace(
             "feishu.reply",
             trace_id=trace_id,
@@ -153,8 +208,10 @@ def _try_handle_confirmation(
     dedup_key: str,
 ) -> FeishuProcessResult | None:
     text = event.text.strip()
-    confirm_like = re.search(r"\b(?:yes|y)\b|确认(?:执行)?", text, re.IGNORECASE)
-    cancel_like = re.search(r"\b(?:cancel|no|n)\b|取消(?:执行)?", text, re.IGNORECASE)
+    provided_ids = re.findall(r"\b[a-fA-F0-9]{6,}\b", text)
+    bare_confirmation_code = bool(re.fullmatch(r"\s*[a-fA-F0-9]{6,}\s*", text))
+    confirm_like = re.search(r"\b(?:yes|y)\b|确认(?:执行)?", text, re.IGNORECASE) or bare_confirmation_code
+    cancel_like = _is_confirmation_cancel(text)
     if not confirm_like and not cancel_like:
         return None
 
@@ -165,7 +222,6 @@ def _try_handle_confirmation(
         update_event_dedup_status,
     )
 
-    provided_ids = re.findall(r"\b[a-fA-F0-9]{6,}\b", text)
     if provided_ids:
         pending_items = []
         missing = []
@@ -237,7 +293,8 @@ def _try_handle_confirmation(
                 skill=pending["skill"],
                 arguments=pending["arguments"],
             )
-            result = call_skill(pending["skill"], pending["arguments"], requested_by="feishu_confirmed")
+            arguments = _normalize_confirmed_arguments(pending["skill"], dict(pending["arguments"] or {}))
+            result = call_skill(pending["skill"], arguments, requested_by="feishu_confirmed")
             mark_pending_confirmation(pending["id"], "executed" if result.get("ok") else "failed")
             results.append(result)
     finally:
@@ -247,6 +304,7 @@ def _try_handle_confirmation(
     if missing:
         text_out = text_out + "\n未找到：" + "、".join(missing)
     _try_send_chat(event.chat_id, text_out)
+    _try_send_emotional_sticker(event.chat_id, event.text, text_out)
     trace(
         "feishu.reply",
         trace_id=trace_id,
@@ -256,6 +314,34 @@ def _try_handle_confirmation(
         text=text_out,
     )
     return FeishuProcessResult(ok=all(bool(result.get("ok")) for result in results), trace_id=trace_id, reply_text=text_out)
+
+
+def _normalize_confirmed_arguments(skill: str, arguments: dict) -> dict:
+    if skill != "animation_flow.start":
+        return arguments
+    mode = arguments.get("unity_import_mode") or arguments.get("import_mode")
+    if mode is not None:
+        text = str(mode).strip().lower()
+        if text in {"迭代", "资源迭代", "替换", "贴图迭代", "高清化", "直接替换", "iteration", "iterate", "replace", "replacement", "update", "iter"}:
+            arguments["unity_import_mode"] = "iteration"
+            arguments.pop("import_mode", None)
+        elif text in {"导入", "新导入", "批量导入", "import", "new", "batch"}:
+            arguments["unity_import_mode"] = "import"
+            arguments.pop("import_mode", None)
+    priority = arguments.get("priority_characters")
+    if isinstance(priority, str):
+        values = [item.strip() for item in re.split(r"[,，、\s]+", priority) if item.strip()]
+        arguments["priority_characters"] = values
+    return arguments
+
+
+def _is_confirmation_cancel(text: str) -> bool:
+    stripped = text.strip()
+    if re.search(r"(COMFY|CHERRY|FRAME|PIPE|SMAT)_[A-Fa-f0-9]{12}", stripped):
+        return False
+    if re.fullmatch(r"(?:取消|取消执行|cancel|no|n)", stripped, re.IGNORECASE):
+        return True
+    return bool(re.fullmatch(r"(?:取消|取消执行)\s+[a-fA-F0-9]{6,}", stripped, re.IGNORECASE))
 
 
 def _try_reply(message_id: str, chat_id: str, text: str) -> None:
@@ -282,6 +368,71 @@ def _try_send_chat(chat_id: str, text: str) -> None:
         log.error("send to chat failed: %s", redact_secrets(str(exc)))
 
 
+def _try_send_emotional_sticker(chat_id: str, message_text: str, reply_text: str) -> None:
+    from assetclaw_matting.services.sticker_service import send_sticker_to_chat
+
+    if not chat_id:
+        return
+    try:
+        send_sticker_to_chat(chat_id, message_text=message_text, reply_text=reply_text)
+    except Exception as exc:
+        log.error("send emotional sticker failed: %s", redact_secrets(str(exc)))
+
+
+def _try_send_tts_reply(chat_id: str, conversation_id: str, event: FeishuMessageEvent, reply_text: str) -> None:
+    if not chat_id or not _should_send_voice_reply(event, conversation_id):
+        return
+    clean_text = (reply_text or "").strip()
+    if not clean_text:
+        return
+    try:
+        from assetclaw_matting.feishu.client import feishu_client
+        from assetclaw_matting.skills.speech_skills import synthesize
+
+        _try_send_tts_progress(chat_id)
+        payload = synthesize(clean_text)
+        if not payload.get("ok"):
+            log.error("tts synthesize failed: %s", redact_secrets(str(payload.get("error") or payload)))
+            return
+        target = Path(str(payload["output_path"]))
+        feishu_client.send_file_to_chat(chat_id, target, str(payload.get("file_name") or target.name))
+    except Exception as exc:
+        log.error("send tts reply failed: %s", redact_secrets(str(exc)))
+
+
+def _try_send_tts_progress(chat_id: str) -> None:
+    from assetclaw_matting.config import settings
+
+    if not bool(getattr(settings, "voice_reply_progress_enabled", True)):
+        return
+    _try_send_chat(chat_id, "文字先给你，语音正在合成。通常 8-20 秒，首次加载本地 TTS 模型可能更久。")
+
+
+def _should_send_voice_reply(event: FeishuMessageEvent, conversation_id: str) -> bool:
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.brain.speech_planner import voice_reply_enabled
+
+    if bool(getattr(settings, "voice_reply_on_audio", True)) and _has_audio_attachment(event):
+        return True
+    return voice_reply_enabled(conversation_id)
+
+
+def _has_audio_attachment(event: FeishuMessageEvent) -> bool:
+    if not event.attachments:
+        return False
+    from assetclaw_matting.skills.speech_skills import AUDIO_EXTS
+
+    for item in event.attachments:
+        raw_type = str(item.get("type") or "").lower()
+        path = str(item.get("local_path") or "")
+        name = str(item.get("file_name") or "")
+        if raw_type in {"audio", "voice"}:
+            return True
+        if Path(path or name).suffix.lower() in AUDIO_EXTS:
+            return True
+    return False
+
+
 def _prepare_attachments(event: FeishuMessageEvent, conversation_id: str) -> list[dict[str, object]]:
     if not event.attachments:
         return []
@@ -295,6 +446,8 @@ def _prepare_attachments(event: FeishuMessageEvent, conversation_id: str) -> lis
     for index, attachment in enumerate(event.attachments, start=1):
         item = dict(attachment)
         name = _safe_attachment_name(str(item.get("file_name") or f"attachment_{index}.bin"))
+        if str(item.get("type") or "").lower() in {"audio", "voice"} and Path(name).suffix.lower() not in _audio_suffixes():
+            name = f"{Path(name).stem or f'voice_{index}'}.mp3"
         target = _unique_path(inbox / name)
         resource_type = _download_resource_type(str(item.get("type") or "file"))
         try:
@@ -328,6 +481,12 @@ def _download_resource_type(raw_type: str) -> str:
     if raw_type in {"image", "file", "video", "audio", "media"}:
         return raw_type
     return "file"
+
+
+def _audio_suffixes() -> set[str]:
+    from assetclaw_matting.skills.speech_skills import AUDIO_EXTS
+
+    return AUDIO_EXTS
 
 
 def _is_stale_event(event: FeishuMessageEvent) -> bool:
@@ -374,6 +533,45 @@ def _unique_path(path: Path) -> Path:
 def _is_simple_greeting(text: str) -> bool:
     normalized = re.sub(r"[\s!！。,.，~～]+", "", text.strip().lower())
     return normalized in {"hi", "hello", "hey", "你好", "您好", "嗨", "哈喽"}
+
+
+def _should_send_processing_ack(event: FeishuMessageEvent) -> bool:
+    if event.attachments:
+        return True
+    text = (event.text or "").strip()
+    if not text:
+        return False
+    try:
+        from assetclaw_matting.brain.emotion_planner import plan_emotional_reply
+
+        if plan_emotional_reply(text):
+            return False
+    except Exception:
+        log.debug("failed to classify conversational message for ack", exc_info=True)
+    return True
+
+
+def _processing_ack_text(event: FeishuMessageEvent) -> str:
+    if _has_audio_attachment(event):
+        suffix = " 如果还要合成语音，我会先发文字结果，再补发语音。"
+        if _deepseek_thinking_enabled():
+            return "收到语音了。我会先用本地 ASR 转文字，再让大脑深度思考，通常需要 10-60 秒。" + suffix
+        return "收到语音了。我会先用本地 ASR 转文字，通常 2-8 秒，首次加载模型可能需要 20 秒以上。" + suffix
+    if event.attachments:
+        return "附件收到了，我正在下载并分析，通常需要 5-30 秒。"
+    if _deepseek_thinking_enabled():
+        return "我收到啦，正在调用 DeepSeek 深度思考，通常需要 10-60 秒。"
+    return "我收到啦，正在处理，通常几秒内回复。"
+
+
+def _deepseek_thinking_enabled() -> bool:
+    from assetclaw_matting.config import settings
+
+    if str(getattr(settings, "brain_provider", "")).lower() != "deepseek":
+        return False
+    thinking_type = str(getattr(settings, "deepseek_thinking_type", "") or "").strip().lower()
+    reasoning_effort = str(getattr(settings, "deepseek_reasoning_effort", "") or "").strip().lower()
+    return thinking_type not in {"", "disabled", "none", "off", "false"} or reasoning_effort in {"high", "maximum"}
 
 
 def _log_direct_brain_message(conversation_id: str, event: FeishuMessageEvent, response_text: str) -> None:

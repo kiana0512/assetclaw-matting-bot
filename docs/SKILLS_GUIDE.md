@@ -76,6 +76,9 @@ Z:\公共机共享\抠图 = \\audioshare.lilith.com\AIart\公共机共享\抠图
 | `feishu.zip_and_send` | 打包文件/目录后立刻发到当前飞书会话 | egress_caution |
 | `translate.text` | 翻译文本，输出自然语言译文 | readonly |
 | `translate.image_text` | 识别图片中文字并翻译 | readonly |
+| `speech.transcribe` | 把本地音频或飞书语音附件转文字，默认 FunASR/SenseVoiceSmall | readonly |
+| `speech.synthesize` | 把文字合成为本地语音文件，默认 IndexTTS2 | write_safe |
+| `speech.send_tts` | 合成语音并发送到当前飞书会话 | egress_caution |
 
 ## 多模态输入
 
@@ -95,6 +98,53 @@ storage\feishu_inbox\日期\会话\
 ```
 
 图片支持保存、复制、查尺寸、转格式、缩放、飞书图片形式发回。视频先支持保存、文件信息、复制、移动、发回。
+
+## 语音输入和语音回复
+
+飞书语音消息会被保存为音频附件，再由 `speech.transcribe` 转文字。识别出来的文字会重新进入 Agent 路由，所以语音可以触发多个工具调用，例如：
+
+```text
+查看 GPU 状态和当前任务
+开始飞书抽帧，下载到 E:\raw_videos，抽帧输出 E:\output_frames
+把刚刚那张图里的文字翻译成中文
+```
+
+语音回复由会话模式控制：
+
+```text
+开启语音回复
+关闭语音回复
+只发文字
+```
+
+开启后，机器人仍然先发文字结果，然后再用 TTS 合成语音并补发文件。ASR 默认走本地 FunASR / SenseVoiceSmall；TTS 默认走本地 IndexTTS2。如果本地模型首次加载，飞书会先提示预计等待时间。
+
+## 唱歌和接歌词
+
+唱歌模式、接歌词、续下一句功能已经关闭。飞书里说“进入唱歌模式”“陪我唱歌”“不要再接下一句了”时，机器人只会提示该功能已关闭，并继续按正常聊天或工具指令处理。
+
+当前保留的能力是：可以搜索公开网页、定位歌词来源、解释用户贴出的短句含义；不会进入唱歌模式，不会续写原歌下一句，也不会生成“原创下一句”。
+
+## 人工确认
+
+所有 destructive 或高风险操作会先进入 `pending_confirmation`，不会直接执行。常见包括：
+
+- 删除、清空目录、移动、批量重命名、解压覆盖
+- 启动 ComfyUI/Cherry/抽帧/完整 pipeline 等长任务
+- 动画流程重跑、归档旧目录、从视频重建帧
+- P4 submit/revert/sync 等会改变工作区或服务器状态的动作
+
+确认流程：
+
+```text
+用户：开始批量抠图 E:\input 到 E:\output
+机器人：需要确认：comfyui.run_start
+回复：确认执行 CONFIRM_xxxxx
+用户：确认执行 CONFIRM_xxxxx
+机器人：开始执行，并在飞书推送进度
+```
+
+未确认前只会保存待确认记录；确认码过期或参数不匹配时需要重新发起任务。
 | `memory.remember` | 保存本地记忆 | write_safe |
 | `memory.list` | 查看本地记忆 | readonly |
 | `matting.batch_create` | 创建抠图批次（fake mode） | write_safe |
@@ -132,16 +182,28 @@ storage\feishu_inbox\日期\会话\
 | `cherry.run_cancel` | 终止 Cherry 任务 | write_safe |
 | `cherry.run_delete` | 删除/归档已结束、失败、已取消的 Cherry 任务记录 | write_safe |
 | `frame.info` | 查看飞书抽帧工具配置、fps、输入输出目录 | readonly |
+| `feishu_table.export_json` | 将飞书多维表格导出为精简业务 JSON：角色、状态、类型、附件文件名、建议目录 | write_safe |
+| `feishu_table.restore_plan` | 基于 raw 调试导出生成写回飞书的 dry-run 计划，不直接写表 | readonly |
 | `frame.run_preview` | 预览飞书表格视频下载 + 抽帧任务 | readonly |
 | `frame.run_start` | 下载飞书表格视频附件并抽 PNG 序列帧，启动前需确认 | write_safe |
 | `frame.run_status` | 查看抽帧任务进度 | readonly |
 | `frame.run_list` | 查看抽帧任务列表 | readonly |
 | `frame.run_cancel` | 终止抽帧任务 | write_safe |
-| `pipeline.run_preview` | 预览完整动画自动化流程 | readonly |
-| `pipeline.run_start` | 固定顺序执行抽帧 -> ComfyUI 抠图 -> Cherry 平滑，启动前需确认 | write_safe |
-| `pipeline.run_status` | 查看完整流程和三个子任务进度 | readonly |
-| `pipeline.run_list` | 查看完整流程任务列表 | readonly |
-| `pipeline.run_cancel` | 终止完整流程及当前子任务 | write_safe |
+| `animation_flow.preview` | 预览完整 6 步动画自动化流程 | readonly |
+| `animation_flow.start` | 执行飞书下载 -> 抽帧 -> 抠图 -> unity_ready -> Unity 导入 -> P4 Shelve-only，启动前需确认 | write_safe |
+| `animation_flow.status` | 查看完整 6 步流程和子任务进度 | readonly |
+| `animation_flow.list` | 查看完整 6 步流程任务列表 | readonly |
+| `animation_flow.cancel` | 终止完整 6 步流程及当前子任务 | write_safe |
+| `unity_ready.preview` | 预览 unity_ready scene/emoji 输出结构 | readonly |
+| `unity_ready.build` | 单独生成 unity_ready，启动前需确认 | write_safe |
+| `unity_ready.status` | 查看 unity_ready JSON 和帧数量 | readonly |
+| `unity_import.preview` | 预览 Unity 插件导入路径 | readonly |
+| `unity_import.run` | 调用 Unity 插件 API 导入引擎，启动前需确认 | write_safe |
+| `unity_import.status` | 查看 Unity 导入准备状态 | readonly |
+| `unity_tools.atlas_status` | 查看 Unity 图集大小报告文件状态 | readonly |
+| `unity_tools.atlas_report` | 调用 Unity 图集统计工具生成报告，启动前需确认 | write_safe |
+| `unity_tools.rename_preview` | 预览动画贴图批量重命名流水线 | readonly |
+| `unity_tools.rename_run` | 执行动画贴图批量重命名流水线，启动前需确认 | write_safe |
 | `system.gpu_status` | 查询 nvidia-smi GPU 显存/利用率/温度/功耗 | readonly |
 | `system.process_status` | 查询匹配进程状态 | readonly |
 
@@ -200,8 +262,14 @@ storage\feishu_inbox\日期\会话\
 查看飞书抽帧工具状态
 开始飞书抽帧，下载到 E:\raw_videos，抽帧输出 E:\output_frames
 抽帧任务跑到哪里了
-执行动画自动化流程 E:\raw_videos E:\output_frames E:\output_matting E:\output_smooth
-自动化流程现在跑到哪里了
+开始动画自动化流程
+动画自动化20260610 迭代
+动画自动化 2026-06-10 导入
+完整动画流程现在跑到哪里了
+查看 Unity 图集大小报告
+生成 Unity 图集大小统计报告
+预览动画贴图批量重命名
+执行动画贴图重命名流水线
 共享盘抠图任务现在跑到哪里了
 查看当前系统状态
 现在显卡使用情况怎么样
@@ -212,7 +280,21 @@ ComfyUI 状态
 
 Cherry 帧序列处理工具位于 `E:\assetclaw-matting-bot\Cherry_帧序列处理工具`。Agent 调用时会递归读取输入目录图片，按父文件夹分组做时序 Alpha 平滑、缩放、锐化，输出到目标目录并保留相同相对结构。实际处理使用秋叶环境 `C:\Users\lilithgames\Downloads\ComfyUI-aki-v3\python\python.exe`，不要求 bot 的 conda 环境安装 torch。启动前会给图片数、序列数、参数摘要并要求确认。
 
-飞书抽帧工具位于 `E:\assetclaw-matting-bot\feishu_frame_tool`。完整动画自动化流程固定为三步：`frame.run_start` 抽帧输出到 `E:\output_frames`，再由 `comfyui.run_start` 抠图输出到 `E:\output_matting`，最后由 `cherry.run_start` 平滑输出到 `E:\output_smooth`。总流程会保存每个子任务 run_id，方便单独查错和返工。
+Cherry / animation flow 这类长任务不能用短生命周期的 `python -c "run_start(...)"` 当作真实执行方式。`run_start` 会在当前进程里启动后台 worker/thread；如果 `python -c` 进程立刻退出，数据库可能显示 `RUNNING`，但输出目录会保持空、进度停在 `0/total`。手动补跑或测试时必须使用常驻 Gateway/Agent，或使用前台 worker，例如：
+
+```powershell
+C:\Users\lilithgames\miniconda3\envs\assetclaw\python.exe scripts\run_cherry_worker_once.py CHERRY_xxxxxxxxxxxx
+```
+
+验收 Cherry 输出时必须检查 `cherry.run_status` 已到 `DONE`，并确认输出 PNG 数量和关键样本尺寸。
+
+飞书抽帧工具位于 `E:\assetclaw-matting-bot\feishu_frame_tool`。完整动画自动化流程现在固定为 6 步：飞书下载、抽帧、抠图、unity_ready、Unity 插件导入/迭代、P4 shelve-only。Cherry 仍可单独补跑，但不再属于主流程。飞书表格进度只跳过 `已完成` 和 `不处理`，其他状态都会重新下载并抽帧。总流程会保存每个子任务 run_id，方便单独查进度和返工。
+
+Unity 附加工具已独立 skills 化，但暂不并入 6 步主流程：
+
+- `unity_tools.atlas_status` / `unity_tools.atlas_report` 对应 `Assets/Modules/UepUtility/SpriteAtlasGen/Editor/SpriteAtlasGeneratorTool.cs`，用于生成和读取 `Assets/TATest/AtlasSizeReport.json` 图集体积统计。
+- `unity_tools.rename_preview` / `unity_tools.rename_run` 对应 `E:\assetclaw-matting-bot\anim-texture-rename-pipeline`，用于动画贴图重命名流程的预览和执行。
+- 写入类动作仍走二次确认；这些工具只作为单独能力调用，不影响动画自动化 6 步主线。
 
 ## 暂不实现
 

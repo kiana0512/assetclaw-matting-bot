@@ -29,10 +29,10 @@ def _make_test_image(path: Path) -> None:
 
 
 def test_image_list_and_info() -> None:
-    path = Path("E:/assetclaw-matting-bot/storage/debug/pytest_image.png")
+    path = Path("E:/assetclaw-matting-bot/storage/debug/media_list_case/pytest_image.png")
     _make_test_image(path)
 
-    listed = image_list("E:\\assetclaw-matting-bot\\storage\\debug", max_results=20)
+    listed = image_list("E:\\assetclaw-matting-bot\\storage\\debug\\media_list_case", max_results=20)
     assert listed["ok"] is True
     assert any(item["name"] == "pytest_image.png" for item in listed["items"])
 

@@ -1,3 +1,6 @@
+param(
+  [switch]$NoMonitor
+)
 $ErrorActionPreference = "Stop"
 chcp 65001 | Out-Null
 [Console]::InputEncoding = [System.Text.UTF8Encoding]::new()
@@ -13,6 +16,30 @@ function Get-CondaExe {
   $cmd = Get-Command conda -ErrorAction SilentlyContinue
   if ($cmd) { return $cmd.Source }
   throw "conda not found. Install Miniconda or add conda to PATH."
+}
+
+function Get-AssetPythonExe {
+  $candidates = @(
+    (Join-Path $env:USERPROFILE "miniconda3\envs\assetclaw\python.exe"),
+    (Join-Path $env:USERPROFILE "anaconda3\envs\assetclaw\python.exe"),
+    (Join-Path $env:USERPROFILE "mambaforge\envs\assetclaw\python.exe")
+  )
+  foreach ($candidate in $candidates) {
+    if (Test-Path $candidate) { return $candidate }
+  }
+
+  $json = & $script:CondaExe env list --json 2>$null
+  if ($LASTEXITCODE -eq 0 -and $json) {
+    $envs = ($json | ConvertFrom-Json).envs
+    foreach ($envPath in $envs) {
+      if ((Split-Path $envPath -Leaf) -eq "assetclaw") {
+        $pythonExe = Join-Path $envPath "python.exe"
+        if (Test-Path $pythonExe) { return $pythonExe }
+      }
+    }
+  }
+
+  throw "assetclaw python.exe not found. Please check conda env assetclaw."
 }
 
 function Invoke-AssetPython {
@@ -31,10 +58,20 @@ function Stop-OldProcesses {
     Write-Host "old Gateway on port 7865: stopped"
   }
 
+  $oldWebUi = Get-NetTCPConnection -LocalPort 5180 -ErrorAction SilentlyContinue
+  if ($oldWebUi) {
+    $oldWebUi | ForEach-Object {
+      Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "old WebUI on port 5180: stopped"
+  }
+
   Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -like "*assetclaw_matting.feishu.ws_receiver*" } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
   Write-Host "old Feishu WS receiver: stopped (if any)"
+
+  pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\stop_unity_mcp.ps1 2>&1 | Write-Host
 }
 
 function Wait-Gateway {
@@ -48,10 +85,37 @@ function Wait-Gateway {
   return $false
 }
 
+function Wait-WebUI {
+  for ($i = 0; $i -lt 30; $i++) {
+    Start-Sleep -Seconds 1
+    try {
+      Invoke-WebRequest "http://127.0.0.1:5180" -UseBasicParsing -TimeoutSec 2 | Out-Null
+      return $true
+    } catch {}
+  }
+  return $false
+}
+
+function Test-UnityMcp {
+  $endpoint = "http://127.0.0.1:8080/mcp"
+  try {
+    Invoke-WebRequest $endpoint -UseBasicParsing -TimeoutSec 3 | Out-Null
+    return $true
+  } catch {
+    $response = $_.Exception.Response
+    if ($response -and $response.StatusCode) {
+      $code = [int]$response.StatusCode
+      return ($code -in 200, 400, 405, 406)
+    }
+    return $false
+  }
+}
+
 function Show-Status {
   Write-Host ""
   Write-Host "================ AssetClaw Local Bot ================"
   Write-Host "Gateway:        http://127.0.0.1:7865"
+  Write-Host "WebUI:          http://127.0.0.1:5180"
   Write-Host "Feishu mode:    WebSocket long connection"
   Write-Host "Public expose:  none"
   Write-Host "Cloudflare:     disabled"
@@ -65,6 +129,15 @@ function Show-Status {
   } catch {
     Write-Host "Gateway health: FAILED"
   }
+
+  try {
+    Invoke-WebRequest "http://127.0.0.1:5180" -UseBasicParsing -TimeoutSec 3 | Out-Null
+    Write-Host "WebUI health:   OK"
+  } catch {
+    Write-Host "WebUI health:   FAILED"
+  }
+
+  Write-Host "Unity MCP:      $(if (Test-UnityMcp) { "OK http://127.0.0.1:8080/mcp" } else { "FAILED" })"
 
   try {
     $manifest = Invoke-RestMethod "http://127.0.0.1:7865/skills/v1/manifest" -TimeoutSec 3
@@ -82,20 +155,34 @@ function Show-Status {
   Write-Host "  conversation: logs\conversation.log"
   Write-Host "  gateway:      logs\gateway.log"
   Write-Host "  feishu ws:    logs\feishu_ws.log"
+  Write-Host "  webui:        logs\webui_console.out.log"
+  Write-Host "  unity mcp:    logs\unity_mcp.out.log / logs\unity_mcp.err.log"
   Write-Host "====================================================="
   Write-Host ""
-  Write-Host "Live conversation trace. Press Ctrl+C to close this log monitor."
+  if (-not $NoMonitor) {
+    Write-Host "Live conversation trace. Press q or Ctrl+C to close this log monitor."
+  }
   Write-Host "Services keep running in background. Stop with: pwsh -File scripts\stop_bot_local.ps1"
   Write-Host ""
 }
 
+function Watch-ConversationLog {
+  param([string]$Path)
+
+  if (-not (Test-Path $Path)) {
+    New-Item -ItemType File -Path $Path -Force | Out-Null
+  }
+  & $script:AssetPythonExe -u "scripts\watch_conversation_log.py" $Path --tail 80
+}
+
 Write-Host ""
 Write-Host "AssetClaw Bot - Local Safe Mode"
-Write-Host "Starting Gateway + Feishu WS in background..."
+Write-Host "Starting Gateway + Feishu WS + WebUI in background..."
 Write-Host ""
 
 $script:CondaExe = Get-CondaExe
-$env:PYTHONPATH = "E:\assetclaw-matting-bot\src"
+$script:AssetPythonExe = Get-AssetPythonExe
+$env:PYTHONPATH = "E:\assetclaw-matting-bot\src;E:\assetclaw-matting-bot"
 
 Stop-OldProcesses
 
@@ -125,6 +212,25 @@ if (-not (Wait-Gateway)) {
   exit 1
 }
 
+Write-Host "Starting Unity MCP server hidden..."
+Start-Process pwsh `
+  -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File scripts\start_unity_mcp.ps1" `
+  -RedirectStandardOutput "logs\unity_mcp_launcher.out.log" `
+  -RedirectStandardError "logs\unity_mcp_launcher.err.log" `
+  -WindowStyle Hidden
+
+$unityMcpReady = $false
+for ($i = 0; $i -lt 60; $i++) {
+  Start-Sleep -Seconds 1
+  if (Test-UnityMcp) {
+    $unityMcpReady = $true
+    break
+  }
+}
+if (-not $unityMcpReady) {
+  Write-Host "Unity MCP did not become ready. Unity import will be refused until http://127.0.0.1:8080/mcp is reachable."
+}
+
 Write-Host "Starting Feishu WS receiver hidden..."
 Start-Process pwsh `
   -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File scripts\start_feishu_ws.ps1" `
@@ -132,7 +238,20 @@ Start-Process pwsh `
   -RedirectStandardError "logs\feishu_ws_console.err.log" `
   -WindowStyle Hidden
 
+Write-Host "Starting WebUI hidden..."
+Start-Process pwsh `
+  -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File scripts\start_external_webui.ps1" `
+  -RedirectStandardOutput "logs\webui_console.out.log" `
+  -RedirectStandardError "logs\webui_console.err.log" `
+  -WindowStyle Hidden
+
+if (-not (Wait-WebUI)) {
+  Write-Host "WebUI did not become ready. Check logs\webui_console.err.log and logs\webui_console.out.log"
+}
+
 Start-Sleep -Seconds 5
 Show-Status
 
-Get-Content "logs\conversation.log" -Tail 80 -Wait
+if (-not $NoMonitor) {
+  Watch-ConversationLog "logs\conversation.log"
+}

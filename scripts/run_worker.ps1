@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Stop"
 Set-Location "E:\assetclaw-matting-bot"
 conda activate assetclaw
-$env:PYTHONPATH = "E:\assetclaw-matting-bot\src"
+$env:PYTHONPATH = "E:\assetclaw-matting-bot\src;E:\assetclaw-matting-bot"
 python -m assetclaw_matting.cli.main worker

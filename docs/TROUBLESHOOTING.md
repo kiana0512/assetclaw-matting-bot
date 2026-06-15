@@ -37,12 +37,16 @@ im:message
 storage\feishu_inbox\日期\会话\
 ```
 
-## LLM Proxy 401 / 403
+## DeepSeek API 401 / 402 / 404 / 429
 
-1. 检查 `.env` 中 `LLM_PROXY_API_KEY` 是否有效
-2. 确认 `LLM_PROXY_BASE_URL` 格式正确（是否需要 `/v1` 后缀）
-3. 检查 `LLM_PROXY_AUTH_HEADER` 是否与服务端要求一致（`authorization_bearer` 或 `x-api-key`）
-4. 运行 `pwsh scripts\test_llm_proxy.ps1` 直接测试 Proxy 连接
+1. 401：检查 `.env` 中 `DEEPSEEK_API_KEY` 是否有效。
+2. 402 / insufficient balance：检查 DeepSeek 平台充值、余额或计费状态。
+3. 404：检查 `DEEPSEEK_BASE_URL=https://api.deepseek.com`，不要重复拼 `/v1`；检查模型名是否为 `deepseek-v4-flash` / `deepseek-v4-pro`。
+4. 429 / rate limit：稍后重试，或增加重试/backoff。
+5. timeout：调大 `DEEPSEEK_TIMEOUT_SECONDS`，或保持 `DEEPSEEK_THINKING_TYPE=disabled`。
+6. 运行 `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_deepseek_api.ps1` 直接测试 DeepSeek 和 `/brain/test`。
+
+旧 `scripts\test_llm_proxy.ps1` 仅用于 LLM Proxy 兼容测试。
 
 ## Skill token invalid / 401
 
@@ -76,6 +80,33 @@ storage\feishu_inbox\日期\会话\
 - 路径必须在 `ALLOWED_ROOTS`（默认 `D:`、`E:`、`F:`、`Z:`、指定共享盘 UNC）下，`C:` 不开放
 - 路径不能包含：`.env`、`.ssh`、`AppData`、`Windows`、`Program Files`、`ProgramData`
 - 发送"查看权限说明"可在飞书内查看完整安全边界
+
+## Cherry 显示 RUNNING 但输出目录为空
+
+典型现象：
+
+- `cherry.run_status` 显示 `RUNNING`
+- `completed=0`、`failed=0`
+- 输出目录已经创建，但没有任何 PNG
+
+常见原因是用短生命周期命令启动了带后台 worker 的 skill，例如：
+
+```powershell
+python -c "from assetclaw_matting.skills.cherry_skills import run_start; run_start(...)"
+```
+
+这种命令会创建任务记录并启动当前进程内的后台线程，但 `python -c` 进程马上退出后，worker 也会随之消失。以后不要用这种方式验收 Cherry / pipeline / animation flow 的真实执行。
+
+正确处理：
+
+1. 优先通过常驻 Gateway/Agent 调用 `cherry.run_start`，让服务进程持有 worker。
+2. 如果是手动补跑已有 Cherry 任务，用前台 worker：
+
+```powershell
+C:\Users\lilithgames\miniconda3\envs\assetclaw\python.exe scripts\run_cherry_worker_once.py CHERRY_xxxxxxxxxxxx
+```
+
+3. 跑完必须确认 `status=DONE`、`completed=total`，再统计输出 PNG 数量和抽样尺寸。
 
 ## Gateway 启动失败 / 端口占用
 
@@ -111,6 +142,7 @@ Invoke-RestMethod http://127.0.0.1:7865/skills/v1/manifest -Headers $headers
 
 # 运行完整测试套件
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_llm_proxy.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_deepseek_api.ps1
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_feishu_ws_config.ps1
 conda run -n assetclaw python -m pytest
 ```
