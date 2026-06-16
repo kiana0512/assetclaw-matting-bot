@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -46,6 +47,68 @@ def preview(
         "can_import_now": bool(api.get("available")),
         "message": "Unity MCP is reachable." if api.get("available") else "Unity MCP is not reachable; no UI click fallback will be used.",
     }
+
+
+def _bring_unity_to_front(project_root: Path) -> dict[str, Any]:
+    project_text = str(project_root)
+    escaped_project = project_text.replace("'", "''")
+    script = rf"""
+$ErrorActionPreference = 'Stop'
+$project = '{escaped_project}'
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class CodexWin32 {{
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+}}
+"@
+$unity = Get-CimInstance Win32_Process -Filter "Name = 'Unity.exe'" |
+    Where-Object {{ $_.CommandLine -like "*$project*" }} |
+    Select-Object -First 1
+if (-not $unity) {{
+    $unity = Get-CimInstance Win32_Process -Filter "Name = 'Unity.exe'" | Select-Object -First 1
+}}
+if (-not $unity) {{
+    Write-Output (@{{ ok = $false; error = 'unity_process_not_found' }} | ConvertTo-Json -Compress)
+    exit 0
+}}
+$process = Get-Process -Id $unity.ProcessId -ErrorAction Stop
+$hwnd = $process.MainWindowHandle
+if ($hwnd -eq 0) {{
+    Write-Output (@{{ ok = $false; pid = $unity.ProcessId; error = 'unity_window_not_found' }} | ConvertTo-Json -Compress)
+    exit 0
+}}
+[CodexWin32]::ShowWindowAsync($hwnd, 9) | Out-Null
+Start-Sleep -Milliseconds 200
+$foreground = [CodexWin32]::SetForegroundWindow($hwnd)
+Start-Sleep -Milliseconds 300
+Write-Output (@{{ ok = [bool]$foreground; pid = $unity.ProcessId; hwnd = "$hwnd"; project = $project }} | ConvertTo-Json -Compress)
+"""
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": f"foreground_exception: {exc}"}
+    output = (proc.stdout or "").strip().splitlines()
+    if not output:
+        return {"ok": False, "error": (proc.stderr or "foreground_no_output").strip(), "returncode": proc.returncode}
+    try:
+        payload = json.loads(output[-1])
+    except json.JSONDecodeError:
+        return {"ok": False, "error": "foreground_bad_output", "stdout": proc.stdout[-500:], "stderr": proc.stderr[-500:], "returncode": proc.returncode}
+    if proc.returncode != 0 and payload.get("ok"):
+        payload["ok"] = False
+    if proc.stderr:
+        payload["stderr"] = proc.stderr[-500:]
+    payload["returncode"] = proc.returncode
+    return payload
 
 
 def run_import(
@@ -123,6 +186,7 @@ def run_import(
         legacy_request_path.write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")
         runner_path.parent.mkdir(parents=True, exist_ok=True)
         runner_path.write_text(_runner_source(request_path, result_path, status_path), encoding="utf-8")
+        foreground = _bring_unity_to_front(project_root)
 
         timeout = max(30, int(timeout_seconds))
         start_time = time.time()
@@ -148,6 +212,7 @@ def run_import(
                     "result_path": str(result_path),
                     "status_path": str(status_path),
                     "disk_progress": latest_disk_progress,
+                    "foreground": foreground,
                 }
             if status_path.is_file():
                 try:
@@ -180,6 +245,7 @@ def run_import(
                             "status_path": str(status_path),
                             "latest_status": latest_status,
                             "disk_progress": disk_progress,
+                            "foreground": foreground,
                             "message": "Unity result file was late/missing; disk polling confirmed the import outputs.",
                         }
                 else:
@@ -198,6 +264,7 @@ def run_import(
             "status_path": str(status_path),
             "latest_status": latest_status,
             "disk_progress": latest_disk_progress,
+            "foreground": foreground,
             "message": (
                 f"Unity did not produce {result_path} within {timeout_seconds}s. "
                 "Runner/request files were kept in place so Unity can still finish and write the result."

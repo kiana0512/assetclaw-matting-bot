@@ -32,7 +32,7 @@ def _unity_ready_fixture() -> Path:
 
 def test_animation_flow_registry_and_router() -> None:
     assert get_skill_meta("animation_flow.start")["requires_confirmation"] is True
-    assert get_skill_meta("animation_flow.resume")["requires_confirmation"] is True
+    assert get_skill_meta("animation_flow.resume")["requires_confirmation"] is False
     assert get_skill_meta("unity_import.run")["requires_confirmation"] is True
 
     call = LocalCommandBrain()._infer_tool_calls("开始这个动画自动化流程")

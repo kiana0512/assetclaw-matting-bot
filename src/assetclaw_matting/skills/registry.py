@@ -1917,7 +1917,7 @@ SKILLS: list[dict[str, Any]] = [
         {"run_id": "string optional"},
         domain="animation_flow",
         risk_level="write_safe",
-        requires_confirmation=True,
+        requires_confirmation=False,
         natural_language_examples=["继续动画自动化 AFLOW_xxx", "恢复完整动画流程", "从 P4 继续这个动画自动化任务"],
     ),
     _skill(

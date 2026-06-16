@@ -1,8 +1,15 @@
 .env
+cookie.txt
 tools/p4_assistant/workspaces.local.yaml
 *.db
 *.sqlite
 *.sqlite3
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
 logs/*
 !logs/.gitkeep
 data/*.db
@@ -71,3 +78,5 @@ models/
 *.log
 public_url.txt
 logs/public_url.txt
+external_webui/node_modules/
+external_webui/dist/
