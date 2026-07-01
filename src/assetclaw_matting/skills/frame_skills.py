@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from assetclaw_matting.skills.security import validate_path
+from tools.animation_automation.core import FRAME_TARGET_PROGRESS
 
 
 _WORKER_RUNS: set[str] = set()
@@ -474,6 +475,10 @@ def _build_config(
         cfg.setdefault("selection", {})["types"] = [str(item) for item in types]
     if progress_include is not None:
         cfg.setdefault("selection", {})["progress_include"] = [str(item) for item in progress_include]
+    else:
+        status_config = cfg.get("status", {})
+        target_progress = str(status_config.get("to_extract") or next(iter(FRAME_TARGET_PROGRESS))).strip()
+        cfg.setdefault("selection", {})["progress_include"] = [target_progress]
     if progress_exclude is not None:
         cfg.setdefault("selection", {})["progress_exclude"] = [str(item) for item in progress_exclude]
     if priority_characters is not None:

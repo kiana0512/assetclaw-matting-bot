@@ -319,21 +319,17 @@ def _frame_options(
 
 
 def _cherry_options(use_smooth: bool, resize_width: int, resize_height: int) -> dict[str, Any]:
-    return {
-        "use_denoise": True,
-        "use_blur": True,
-        "use_resize1": True,
-        "resize1_width": max(int(resize_width) * 2, int(resize_width)),
-        "resize1_height": max(int(resize_height) * 2, int(resize_height)),
-        "use_sharp1": True,
-        "use_resize2": True,
-        "resize2_width": int(resize_width),
-        "resize2_height": int(resize_height),
-        "use_sharp2": True,
-        "use_smooth": bool(use_smooth),
-        "resize_width": int(resize_width),
-        "resize_height": int(resize_height),
-    }
+    from assetclaw_matting.skills.cherry_skills import preset_options
+
+    profile = "half" if (int(resize_width), int(resize_height)) == (256, 256) else "full"
+    options = preset_options(profile, use_smooth=bool(use_smooth))
+    options["resize_width"] = int(resize_width)
+    options["resize_height"] = int(resize_height)
+    options["resize1_width"] = int(resize_width)
+    options["resize1_height"] = int(resize_height)
+    options["resize2_width"] = int(resize_width)
+    options["resize2_height"] = int(resize_height)
+    return options
 
 
 def _resource_json_options(
@@ -361,7 +357,7 @@ def _split_route_roots(workspace_root: str) -> list[Path]:
         return []
     root = Path(workspace_root)
     routes = []
-    for asset_kind in ("scene", "emoji"):
+    for asset_kind in ("scene", "emoji", "story"):
         route = root / asset_kind
         if route.exists():
             routes.append(route)
@@ -374,7 +370,7 @@ def _split_route_roots(workspace_root: str) -> list[Path]:
 
 def _route_cherry_options(route: Path) -> dict[str, Any] | None:
     parts = [part.lower() for part in route.parts]
-    asset_kind = "scene" if "scene" in parts else ("emoji" if "emoji" in parts else "")
+    asset_kind = "scene" if "scene" in parts else ("story" if "story" in parts else ("emoji" if "emoji" in parts else ""))
     variant = "temporal_smooth" if "temporal_smooth" in parts else "default"
     if not asset_kind:
         return None
@@ -621,7 +617,7 @@ def _format_frame_stage_summary(row: Any, status: dict[str, Any]) -> str:
     if summary["skip_reasons"]:
         reasons = "；".join(f"{reason} x{count}" for reason, count in summary["skip_reasons"].items())
         lines.append(f"跳过原因：{reasons}")
-    lines.append("状态策略：只跳过 已完成 / 不处理；其他状态均重新下载并抽帧")
+    lines.append("状态策略：只处理 待抽帧；其他状态全部跳过")
     return "\n".join(lines)
 
 

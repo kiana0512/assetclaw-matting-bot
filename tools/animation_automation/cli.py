@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from tools.animation_automation.core import build_unity_ready, format_unity_ready_summary
+from tools.animation_automation.core import ASSET_KINDS, build_unity_ready, format_unity_ready_summary
 from tools.animation_automation.flow import build_flow_plan, dumps_flow_plan, format_flow_plan
 
 
@@ -23,7 +23,7 @@ def cmd_build_unity_ready(args: argparse.Namespace) -> int:
 
 def cmd_import_unity_ready(args: argparse.Namespace) -> int:
     ready_root = Path(args.unity_ready).resolve()
-    packages = ["scene", "emoji"] if args.package == "both" else [args.package]
+    packages = list(ASSET_KINDS) if args.package == "both" else [args.package]
     print("Unity 插件导入路径：")
     for package in packages:
         json_path = ready_root / package / "animation_resource_manifest.json"
@@ -58,7 +58,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Animation automation utilities.")
     sub = parser.add_subparsers(dest="command")
 
-    ready = sub.add_parser("build-unity-ready", help="Build Unity plugin readable scene/emoji packages.")
+    ready = sub.add_parser("build-unity-ready", help="Build Unity plugin readable scene/emoji/story packages.")
     ready.add_argument("--date-root", required=True, help="Date root, e.g. E:/animation_automation/2026-06-09")
     ready.add_argument("--overwrite", action="store_true", help="Remove existing unity_ready and rebuild.")
     ready.add_argument("--copy-mode", choices=("copy", "hardlink"), default="copy")
@@ -70,7 +70,7 @@ def main() -> int:
     unity = sub.add_parser("import-unity-ready", help="Print Unity plugin import arguments for a unity_ready package.")
     unity.add_argument("--unity-project", default="")
     unity.add_argument("--unity-ready", required=True)
-    unity.add_argument("--package", choices=("scene", "emoji", "both"), default="both")
+    unity.add_argument("--package", choices=(*ASSET_KINDS, "both"), default="both")
     unity.set_defaults(func=cmd_import_unity_ready)
 
     flow = sub.add_parser("flow-plan", help="Print the 7-stage animation -> Cherry smooth -> Unity -> P4 shelve-only plan.")

@@ -5,6 +5,7 @@ from typing import Any
 
 from assetclaw_matting.skills.frame_skills import default_automation_paths
 from assetclaw_matting.skills.security import validate_path
+from tools.animation_automation.core import ASSET_KINDS
 from tools.animation_automation.core import build_unity_ready
 
 
@@ -23,10 +24,7 @@ def preview(date_root: str | None = None, copy_mode: str = "copy", **_: Any) -> 
         "unity_ready": str(unity_ready),
         "copy_mode": copy_mode,
         "exists": unity_ready.exists(),
-        "packages": {
-            "scene": _package_paths(unity_ready / "scene"),
-            "emoji": _package_paths(unity_ready / "emoji"),
-        },
+        "packages": {kind: _package_paths(unity_ready / kind) for kind in ASSET_KINDS},
     }
 
 
@@ -44,10 +42,7 @@ def build(
 def status(date_root: str | None = None, **_: Any) -> dict[str, Any]:
     root = _date_root(date_root)
     unity_ready = root / "unity_ready"
-    packages = {
-        "scene": _package_paths(unity_ready / "scene"),
-        "emoji": _package_paths(unity_ready / "emoji"),
-    }
+    packages = {kind: _package_paths(unity_ready / kind) for kind in ASSET_KINDS}
     return {
         "ok": True,
         "date_root": str(root),

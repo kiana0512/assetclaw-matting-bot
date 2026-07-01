@@ -12,6 +12,7 @@ from feishu_client import FeishuClient
 from extractor import LocalFrameExtractor
 from dedup import dedup_folder
 from tools.animation_automation.core import (
+    FRAME_TARGET_PROGRESS,
     SKIP_PROGRESS,
     classify_asset_kind,
     classify_process_variant,
@@ -127,7 +128,18 @@ class Workflow:
             if str(item or "").strip()
         }
         self.selection_types = {str(item).strip() for item in selection.get("types", []) if str(item or "").strip()}
-        self.progress_include = {str(item).strip() for item in selection.get("progress_include", []) if str(item or "").strip()}
+        configured_progress_include = {
+            str(item).strip()
+            for item in selection.get("progress_include", [])
+            if str(item or "").strip()
+        }
+        status_config = config.get("status", {})
+        target_progress = {
+            str(status_config.get("to_extract") or item).strip()
+            for item in FRAME_TARGET_PROGRESS
+            if str(status_config.get("to_extract") or item).strip()
+        }
+        self.progress_include = configured_progress_include or target_progress
         self.progress_exclude = {str(item).strip() for item in selection.get("progress_exclude", []) if str(item or "").strip()}
         self.priority_characters = [
             _safe_name(item)
@@ -218,7 +230,12 @@ class Workflow:
                 break
             rid = rec.get("record_id", "")
             fields = rec.get("fields", {})
+            progress_values = set(_field_texts(fields.get(self.f_progress)))
             progress = first_text(fields.get(self.f_progress))
+            if self.progress_include and not (progress_values & self.progress_include):
+                required = " / ".join(sorted(self.progress_include))
+                self._append_skipped(rid, fields, f"progress is {progress or '空'}; required {required}")
+                continue
             if progress in SKIP_PROGRESS:
                 self._append_skipped(rid, fields, f"progress is {progress}")
                 continue
@@ -278,8 +295,8 @@ class Workflow:
 
         def key(record: dict) -> tuple[int, int]:
             parts = self._hierarchy_parts(record.get("record_id", ""))
-            root = _safe_name(parts[0]) if parts else ""
-            rank = priority.get(root, len(priority))
+            character = _safe_name(parts[-2]) if len(parts) >= 2 else ""
+            rank = priority.get(character, len(priority))
             return rank, 0
 
         return sorted(records, key=key)

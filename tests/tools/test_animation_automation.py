@@ -44,6 +44,7 @@ def test_routing_classifies_asset_kind_and_process_variant() -> None:
     assert classify_asset_kind({"类型": "场景动画"}) == "scene"
     assert classify_asset_kind({"分类": ["表情动画"]}) == "emoji"
     assert classify_asset_kind({"category": "订单 剧情"}) == "emoji"
+    assert classify_asset_kind({}, fallback_texts=["剧情动画", "danny", "idle"]) == "story"
     assert classify_process_variant({"处理选项": "时序平滑"}) == "default"
     assert classify_process_variant({"处理选项": "temporal smooth"}) == "default"
     assert classify_process_variant({}) == "default"
@@ -54,6 +55,7 @@ def test_unity_types_default_scene_and_empty_emoji() -> None:
     assert unity_types({"类型": "角色动画"}, "scene") == ["角色动画"]
     assert unity_types({}, "scene") == ["角色动画"]
     assert unity_types({}, "emoji") == []
+    assert unity_types({}, "story") == ["剧情"]
 
 
 def test_build_unity_ready_merges_scene_and_emoji_packages(tmp_path: Path) -> None:
@@ -62,6 +64,7 @@ def test_build_unity_ready_merges_scene_and_emoji_packages(tmp_path: Path) -> No
         _record("heather", "idle", "scene", "temporal_smooth", ["角色动画"]),
         _record("Jessica", "idle", "emoji", "default", ["剧情"]),
         _record("creamy", "happy", "emoji", "temporal_smooth", ["订单", "剧情"]),
+        _record("danny", "idle", "story", "default", ["剧情"]),
     ]
     for record in records:
         root = routed_stage_dir(date_root, record["assetKind"], record["processVariant"], "smooth", record["taskKey"])
@@ -73,14 +76,18 @@ def test_build_unity_ready_merges_scene_and_emoji_packages(tmp_path: Path) -> No
 
     scene_json = json.loads((date_root / "unity_ready/scene/animation_resource_manifest.json").read_text(encoding="utf-8"))
     emoji_json = json.loads((date_root / "unity_ready/emoji/animation_resource_manifest.json").read_text(encoding="utf-8"))
+    story_json = json.loads((date_root / "unity_ready/story/animation_resource_manifest.json").read_text(encoding="utf-8"))
     assert scene_json["items"]["heather"]["idle"]["types"] == ["角色动画"]
     assert emoji_json["items"]["Jessica"]["idle"]["types"] == ["剧情"]
     assert emoji_json["items"]["creamy"]["happy"]["types"] == ["订单", "剧情"]
+    assert story_json["items"]["danny"]["idle"]["types"] == ["剧情"]
     assert (date_root / "unity_ready/scene/frames/heather-idle/0000.png").exists()
     assert (date_root / "unity_ready/emoji/frames/Jessica-idle/0000.png").exists()
+    assert (date_root / "unity_ready/story/frames/danny-idle/0000.png").exists()
     assert not (date_root / "unity_ready/scene/default").exists()
     assert len(report["packages"]["scene"]["tasks"]) == 1
     assert len(report["packages"]["emoji"]["tasks"]) == 2
+    assert len(report["packages"]["story"]["tasks"]) == 1
     assert report["packages"]["emoji"]["tasks"][0]["frameCount"] == 2
 
 

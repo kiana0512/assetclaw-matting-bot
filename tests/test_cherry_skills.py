@@ -9,7 +9,7 @@ from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
 from assetclaw_matting.brain.result_formatter import format_skill_results
 from assetclaw_matting.db.schema import create_tables
 from assetclaw_matting.db.sqlite import init_db
-from assetclaw_matting.skills.cherry_skills import info, run_list, run_preview, run_start, run_status
+from assetclaw_matting.skills.cherry_skills import info, preset_options, run_list, run_preview, run_start, run_status
 from assetclaw_matting.skills.registry import get_skill_meta
 
 
@@ -43,14 +43,31 @@ def test_cherry_info_preview_and_real_processing() -> None:
     assert available["exists"] is True
     assert "Cherry_后处理网页_源码_20260615_0658" in available["source_path"]
     assert "去除外部噪点" in available["steps"]
-    assert "透明图模糊白叠加" in available["steps"]
+    assert "阴影分离" in available["steps"]
+    assert "透明图模糊自叠加" in available["steps"]
     assert available["defaults"]["use_denoise"] is True
-    assert available["defaults"]["denoise_threshold"] == 0.06
+    assert available["defaults"]["denoise_threshold"] == 0.85
+    assert available["defaults"]["use_shadow"] is True
     assert available["defaults"]["use_smooth"] is False
-    assert available["defaults"]["resize1_width"] == 768
-    assert available["defaults"]["resize1_height"] == 1024
+    assert available["defaults"]["profile"] == "auto"
+    assert available["defaults"]["auto_profile_by_size"] is True
+    assert available["defaults"]["resize1_width"] == 384
+    assert available["defaults"]["resize1_height"] == 512
     assert available["defaults"]["resize2_width"] == 384
     assert available["defaults"]["resize2_height"] == 512
+
+    half = preset_options("half")
+    assert half["denoise_threshold"] == 0.10
+    assert half["use_shadow"] is False
+    assert half["use_resize2"] is False
+    assert half["use_sharp2"] is False
+    assert half["resize_width"] == 256
+    assert half["resize_height"] == 256
+    assert half["use_smooth"] is False
+
+    auto = preset_options("auto")
+    assert auto["profile"] == "auto"
+    assert auto["auto_profile_by_size"] is True
 
     preview = run_preview(str(src), str(dst), use_resize=False, use_sharpen=False)
     assert preview["total"] == 2

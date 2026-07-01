@@ -91,7 +91,7 @@ def test_frame_workflow_builds_role_emotion_identity() -> None:
     assert identity["rel_dir"] == "gary\\idle"
 
 
-def test_frame_workflow_processes_video_records_without_progress_filter(tmp_path) -> None:
+def test_frame_workflow_processes_only_to_extract_records(tmp_path) -> None:
     tool_dir = Path("E:/assetclaw-matting-bot/feishu_frame_tool")
     if str(tool_dir) not in sys.path:
         sys.path.insert(0, str(tool_dir))
@@ -115,8 +115,17 @@ def test_frame_workflow_processes_video_records_without_progress_filter(tmp_path
                     "fields": {
                         "角色": "idle",
                         "父記錄": [{"record_ids": ["rec_role"], "text": "gary"}],
-                        "进度": "整理中",
+                        "进度": "待抽帧",
                         "动画": [{"name": "source.mp4", "type": "video/mp4"}],
+                    },
+                },
+                {
+                    "record_id": "rec_sorting",
+                    "fields": {
+                        "角色": "sorting",
+                        "父記錄": [{"record_ids": ["rec_role"], "text": "gary"}],
+                        "进度": "整理中",
+                        "动画": [{"name": "sorting.mp4", "type": "video/mp4"}],
                     },
                 },
                 {
@@ -179,12 +188,17 @@ def test_frame_workflow_processes_video_records_without_progress_filter(tmp_path
 
     assert (tmp_path / "emoji" / "videos" / "gary-idle" / "source.mp4").exists()
     assert (tmp_path / "emoji" / "frames" / "gary-idle" / "0000.png").exists()
+    assert not (tmp_path / "emoji" / "frames" / "gary-sorting").exists()
     assert not (tmp_path / "emoji" / "frames" / "gary-done").exists()
     assert not (tmp_path / "emoji" / "frames" / "gary-ignore").exists()
     assert (tmp_path / "emoji" / "frames" / "_pipeline_manifest.json").exists()
     source_manifest = json.loads((tmp_path / "source_manifest.json").read_text(encoding="utf-8"))
     skipped = {item["animation"]: item["reason"] for item in source_manifest["skipped"]}
-    assert skipped == {"done": "progress is 已完成", "ignore": "progress is 不处理"}
+    assert skipped == {
+        "sorting": "progress is 整理中; required 待抽帧",
+        "done": "progress is 已完成; required 待抽帧",
+        "ignore": "progress is 不处理; required 待抽帧",
+    }
 
 
 def test_frame_workflow_can_filter_scene_idle_records(tmp_path) -> None:
@@ -216,6 +230,7 @@ def test_frame_workflow_can_filter_scene_idle_records(tmp_path) -> None:
                     "fields": {
                         "角色": "idle",
                         "父記錄": [{"record_ids": ["rec_scene_role"]}],
+                        "进度": "待抽帧",
                         "动画": [{"name": "scene.mp4", "type": "video/mp4"}],
                     },
                 },
@@ -276,6 +291,83 @@ def test_frame_workflow_can_filter_scene_idle_records(tmp_path) -> None:
     manifest = (tmp_path / "scene" / "frames" / "_pipeline_manifest.json").read_text(encoding="utf-8")
     assert "rec_scene_idle" in manifest
     assert "rec_expr_idle" not in manifest
+
+
+def test_frame_workflow_routes_story_root_to_story_package(tmp_path) -> None:
+    tool_dir = Path("E:/assetclaw-matting-bot/feishu_frame_tool")
+    if str(tool_dir) not in sys.path:
+        sys.path.insert(0, str(tool_dir))
+
+    class FakeExtractor:
+        def __init__(self, export_dir: str, fps: int, max_frames: int, logger):
+            self.export_dir = Path(export_dir)
+
+        def process_video(self, video_path: str, out_subdir: str) -> str:
+            dst = self.export_dir / out_subdir
+            dst.mkdir(parents=True, exist_ok=True)
+            (dst / "0000.png").write_bytes(b"png")
+            return str(dst)
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.records = [
+                {"record_id": "rec_story", "fields": {"角色": "剧情动画"}},
+                {"record_id": "rec_story_role", "fields": {"角色": "gary", "父記錄": [{"record_ids": ["rec_story"]}]}},
+                {
+                    "record_id": "rec_story_idle",
+                    "fields": {
+                        "角色": "idle",
+                        "父記錄": [{"record_ids": ["rec_story_role"]}],
+                        "进度": "待抽帧",
+                        "动画": [{"name": "story.mp4", "type": "video/mp4"}],
+                    },
+                },
+            ]
+
+        def list_records(self):
+            return self.records
+
+        def download_attachment(self, attachment, dest_dir, field_name="", record_id="", save_name=""):
+            dst = Path(dest_dir) / save_name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(record_id.encode("utf-8"))
+            return str(dst)
+
+    fake_client = FakeClient()
+    fake_feishu = types.SimpleNamespace(FeishuClient=types.SimpleNamespace(from_feishu_config=lambda *args, **kwargs: fake_client))
+    fake_extractor = types.SimpleNamespace(LocalFrameExtractor=FakeExtractor)
+    fake_dedup = types.SimpleNamespace(dedup_folder=lambda *args, **kwargs: None)
+    old_modules = {name: sys.modules.get(name) for name in ("feishu_client", "extractor", "dedup", "workflow")}
+    sys.modules["feishu_client"] = fake_feishu
+    sys.modules["extractor"] = fake_extractor
+    sys.modules["dedup"] = fake_dedup
+    sys.modules.pop("workflow", None)
+    try:
+        from workflow import Workflow
+
+        workflow = Workflow(
+            {
+                "feishu": {},
+                "fields": {"animation": "动画", "role": "角色", "parent": "父記錄"},
+                "paths": {"download_dir": str(tmp_path / "videos"), "export_dir": str(tmp_path / "frames")},
+                "selection": {"root": "剧情动画"},
+                "dedup": {"enabled": False},
+                "framepacker": {"fps": 24, "max_frames": 24},
+            }
+        )
+        workflow.run()
+    finally:
+        for name, module in old_modules.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+    assert (tmp_path / "story" / "videos" / "gary-idle" / "source.mp4").read_bytes() == b"rec_story_idle"
+    assert (tmp_path / "story" / "frames" / "gary-idle" / "0000.png").exists()
+    source_manifest = json.loads((tmp_path / "source_manifest.json").read_text(encoding="utf-8"))
+    assert source_manifest["records"][0]["assetKind"] == "story"
+    assert source_manifest["records"][0]["types"] == ["剧情"]
 
 
 def test_frame_workflow_refuses_video_record_without_character_emotion() -> None:

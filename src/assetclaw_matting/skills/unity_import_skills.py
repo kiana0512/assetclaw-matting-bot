@@ -11,6 +11,7 @@ from typing import Any
 
 from assetclaw_matting.skills.frame_skills import default_automation_paths
 from assetclaw_matting.skills.security import validate_path
+from tools.animation_automation.core import ASSET_KINDS
 
 
 DEFAULT_UNITY_PROJECT = "D:/Spark/Client"
@@ -317,9 +318,9 @@ def _normalize_mode(value: str | None) -> str:
 def _selected_packages(package: str) -> list[str]:
     normalized = (package or "both").lower()
     if normalized == "both":
-        return ["scene", "emoji"]
-    if normalized not in {"scene", "emoji"}:
-        raise ValueError("package must be scene, emoji, or both")
+        return list(ASSET_KINDS)
+    if normalized not in ASSET_KINDS:
+        raise ValueError("package must be scene, emoji, story, or both")
     return [normalized]
 
 
@@ -327,7 +328,17 @@ def _package_summary(ready_root: Path, package: str) -> dict[str, Any]:
     json_path = ready_root / package / "animation_resource_manifest.json"
     frames_root = ready_root / package / "frames"
     if not json_path.is_file():
-        raise FileNotFoundError(str(json_path))
+        return {
+            "package": package,
+            "json": str(json_path),
+            "frames_root": str(frames_root),
+            "frames_root_exists": frames_root.is_dir(),
+            "task_count": 0,
+            "frame_count": 0,
+            "skipped": True,
+            "skip_reason": "missing manifest",
+            "tasks": [],
+        }
     data = json.loads(json_path.read_text(encoding="utf-8"))
     items = data.get("items") or {}
     if not frames_root.is_dir() and items:

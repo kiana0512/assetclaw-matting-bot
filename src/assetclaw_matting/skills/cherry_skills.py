@@ -19,6 +19,40 @@ from assetclaw_matting.skills.security import validate_path
 
 _MODULE: ModuleType | None = None
 _WORKER_RUNS: set[str] = set()
+_AUTO_PROFILE_TOLERANCE = 0.01
+_PROFILE_OVERRIDE_KEYS = {
+    "use_denoise",
+    "denoise_threshold",
+    "denoise_radius",
+    "use_shadow",
+    "use_blur",
+    "blur_radius",
+    "blur_sigma",
+    "use_resize1",
+    "resize1_width",
+    "resize1_height",
+    "use_sharp1",
+    "sharp1_amount",
+    "sharp1_radius",
+    "sharp1_threshold",
+    "sharp1_shrink",
+    "use_resize2",
+    "resize2_width",
+    "resize2_height",
+    "use_sharp2",
+    "sharp2_amount",
+    "sharp2_radius",
+    "sharp2_threshold",
+    "sharp2_shrink",
+    "use_resize",
+    "resize_width",
+    "resize_height",
+    "use_sharpen",
+    "sharpen_amount",
+    "sharpen_radius",
+    "sharpen_threshold",
+    "sharpen_shrink",
+}
 _MONITORING_RUNS: set[str] = set()
 
 
@@ -37,8 +71,10 @@ def info() -> dict[str, Any]:
         "name": "Cherry_帧序列处理工具",
         "source_path": str(source),
         "exists": source.exists(),
-        "steps": ["去除外部噪点", "透明图模糊白叠加", "缩小①", "锐化①", "缩小②", "锐化②", "时序 Alpha 平滑"],
+        "steps": ["去除外部噪点", "阴影分离", "透明图模糊自叠加", "缩小①", "锐化①", "缩小②", "锐化②"],
+        "temporal_smooth": "optional_off_by_default",
         "defaults": _default_options(),
+        "presets": {"auto": preset_options("auto"), "full": preset_options("full"), "half": preset_options("half")},
     }
 
 
@@ -306,7 +342,8 @@ def _run_worker(run_id: str) -> None:
                     batch_np = [module.decode(path.read_bytes()) for path in process_files]
                     np, torch = _processing_deps()
                     batch = torch.from_numpy(np.stack(batch_np)).float() / 255.0
-                    batch = _apply_cherry_pipeline(module, batch, options)
+                    batch_options = _options_for_batch_shape(options, int(batch.shape[1]), int(batch.shape[2]))
+                    batch = _apply_cherry_pipeline(module, batch, batch_options)
                     out_np = (batch.detach().cpu().numpy().clip(0, 1) * 255).astype(np.uint8)
                     for index, image_path in enumerate(process_files):
                         target = _output_target(src, dst, image_path)
@@ -625,30 +662,46 @@ def _output_target(src: Path, dst: Path, image_path: Path) -> Path:
 
 
 def _default_options() -> dict[str, Any]:
+    return preset_options("auto")
+
+
+def preset_options(profile: str = "full", use_smooth: bool = False) -> dict[str, Any]:
+    normalized = str(profile or "full").lower()
+    auto_profile = normalized in {"auto", "adaptive", "size"}
+    is_half = normalized in {"half", "emoji", "portrait", "bust", "story"}
+    width, height = (256, 256) if is_half else (384, 512)
     return {
+        "profile": "auto" if auto_profile else ("half" if is_half else "full"),
+        "auto_profile_by_size": auto_profile,
         "use_denoise": True,
-        "denoise_threshold": 0.06,
+        "denoise_threshold": 0.10 if is_half else 0.85,
         "denoise_radius": 0,
+        "use_shadow": not is_half,
+        "shadow_gray_limit": 0.35,
+        "shadow_protect_radius": -70,
+        "shadow_alpha_boost": 1.0,
+        "shadow_blur_radius": 2,
+        "shadow_blur_sigma": 2.4,
         "use_blur": True,
         "blur_radius": 1,
         "blur_sigma": 10.0,
         "use_resize1": True,
-        "resize1_width": 768,
-        "resize1_height": 1024,
+        "resize1_width": width,
+        "resize1_height": height,
         "use_sharp1": True,
         "sharp1_amount": 1.0,
         "sharp1_radius": 2,
         "sharp1_threshold": 0.02,
         "sharp1_shrink": 0,
-        "use_resize2": True,
-        "resize2_width": 384,
-        "resize2_height": 512,
-        "use_sharp2": True,
+        "use_resize2": not is_half,
+        "resize2_width": width,
+        "resize2_height": height,
+        "use_sharp2": not is_half,
         "sharp2_amount": 1.0,
         "sharp2_radius": 2,
         "sharp2_threshold": 0.02,
         "sharp2_shrink": 5,
-        "use_smooth": False,
+        "use_smooth": bool(use_smooth),
         "smooth_window": 5,
         "smooth_sigma": 1.0,
         "min_alpha": 0.05,
@@ -658,8 +711,8 @@ def _default_options() -> dict[str, Any]:
         "fill_gap": True,
         "bg_thresh": 0.02,
         "use_resize": True,
-        "resize_width": 384,
-        "resize_height": 512,
+        "resize_width": width,
+        "resize_height": height,
         "use_sharpen": True,
         "sharpen_amount": 1.0,
         "sharpen_radius": 2,
@@ -669,16 +722,30 @@ def _default_options() -> dict[str, Any]:
 
 
 def _merge_options(options: dict[str, Any]) -> dict[str, Any]:
-    merged = _default_options()
+    profile = options.get("profile") or options.get("preset")
+    if profile is not None:
+        merged = preset_options(str(profile), use_smooth=bool(options.get("use_smooth", False)))
+    else:
+        merged = _default_options()
     aliases = {
+        "preset": "profile",
+        "auto_size_profile": "auto_profile_by_size",
         "window_size": "smooth_window",
         "sigma": "smooth_sigma",
         "use_clean": "use_denoise",
         "use_denoise_alpha": "use_denoise",
+        "use_shadowsep": "use_shadow",
         "denoise_thresh": "denoise_threshold",
         "dn_thresh": "denoise_threshold",
         "denoise_smooth_radius": "denoise_radius",
         "dn_radius": "denoise_radius",
+        "use_item_shadow": "use_shadow",
+        "sep_gray": "shadow_gray_limit",
+        "sep_protect": "shadow_protect_radius",
+        "sep_boost": "shadow_alpha_boost",
+        "shadow_gray_upper": "shadow_gray_limit",
+        "shadow_protect": "shadow_protect_radius",
+        "shadow_boost": "shadow_alpha_boost",
         "resize_w": "resize_width",
         "resize_h": "resize_height",
         "use_resize_1": "use_resize1",
@@ -723,6 +790,7 @@ def _merge_options(options: dict[str, Any]) -> dict[str, Any]:
         "use_blur",
         "use_resize1",
         "use_sharp1",
+        "use_shadow",
         "use_resize2",
         "use_sharp2",
         "use_smooth",
@@ -730,6 +798,7 @@ def _merge_options(options: dict[str, Any]) -> dict[str, Any]:
         "fill_gap",
         "use_resize",
         "use_sharpen",
+        "auto_profile_by_size",
     ):
         merged[key] = bool(merged[key])
     for key in (
@@ -739,6 +808,8 @@ def _merge_options(options: dict[str, Any]) -> dict[str, Any]:
         "resize1_height",
         "sharp1_radius",
         "sharp1_shrink",
+        "shadow_protect_radius",
+        "shadow_blur_radius",
         "resize2_width",
         "resize2_height",
         "sharp2_radius",
@@ -756,6 +827,9 @@ def _merge_options(options: dict[str, Any]) -> dict[str, Any]:
         "blur_sigma",
         "sharp1_amount",
         "sharp1_threshold",
+        "shadow_gray_limit",
+        "shadow_alpha_boost",
+        "shadow_blur_sigma",
         "sharp2_amount",
         "sharp2_threshold",
         "smooth_sigma",
@@ -768,13 +842,37 @@ def _merge_options(options: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _infer_profile_from_shape(height: int, width: int) -> str:
+    if height <= 0 or width <= 0:
+        return "full"
+    ratio = float(width) / float(height)
+    return "half" if abs(ratio - 1.0) <= _AUTO_PROFILE_TOLERANCE else "full"
+
+
+def _options_for_batch_shape(options: dict[str, Any], height: int, width: int) -> dict[str, Any]:
+    if not options.get("auto_profile_by_size"):
+        return options
+    inferred = _infer_profile_from_shape(height, width)
+    preset = preset_options(inferred, use_smooth=bool(options.get("use_smooth", False)))
+    adjusted = dict(options)
+    for key in _PROFILE_OVERRIDE_KEYS:
+        adjusted[key] = preset[key]
+    adjusted["profile"] = "auto"
+    adjusted["inferred_profile"] = inferred
+    adjusted["auto_profile_by_size"] = True
+    return adjusted
+
+
 def _apply_cherry_pipeline(module: ModuleType, batch: Any, options: dict[str, Any]) -> Any:
+    shadow_source = batch
     if options.get("use_denoise"):
         batch = module.alpha_denoise(
             batch,
             float(options.get("denoise_threshold", 0.06)),
             int(options.get("denoise_radius", 0)),
         )
+    if options.get("use_shadow"):
+        batch = _shadow_separate_char(module, batch, shadow_source, options)
     if options.get("use_blur") and hasattr(module, "blur_under_composite"):
         batch = module.blur_under_composite(batch, int(options.get("blur_radius", 1)), float(options.get("blur_sigma", 10.0)))
     if options.get("use_resize1"):
@@ -806,11 +904,106 @@ def _apply_cherry_pipeline(module: ModuleType, batch: Any, options: dict[str, An
     return batch
 
 
+def _shadow_separate_char(module: ModuleType, batch: Any, shadow_source: Any, options: dict[str, Any]) -> Any:
+    separator = getattr(module, "shadow_separate_v5", None) or getattr(module, "shadow_separate", None)
+    if separator is None:
+        shadow_clean = module.alpha_denoise(shadow_source, 0.01, 0)
+        return _merge_item_shadow(batch, shadow_clean, options)
+
+    np, torch = _processing_deps()
+    branch = module.alpha_denoise(shadow_source.clone(), 0.01, 0)
+    item_branch = module.alpha_denoise(
+        shadow_source.clone(),
+        float(options.get("denoise_threshold", 0.06)),
+        int(options.get("denoise_radius", 0)),
+    )
+    if item_branch.shape[1:3] != branch.shape[1:3]:
+        item_branch = module.ps_bicubic_sharper(item_branch, branch.shape[2], branch.shape[1])
+    item_a = item_branch[..., 3:4].clamp(0.0, 1.0)
+    item_rgb_ref = (item_branch[..., :3] * item_a + (1.0 - item_a)).clamp(0.0, 1.0)
+    char_branch, shadow_batch = separator(
+        branch,
+        float(options.get("shadow_gray_limit", 0.35)),
+        int(options.get("shadow_protect_radius", -70)),
+        0.1,
+        float(options.get("shadow_alpha_boost", 1.0)),
+        int(options.get("shadow_blur_radius", 2)),
+        float(options.get("shadow_blur_sigma", 2.4)),
+        item_alpha=item_branch[..., 3],
+        item_rgb=item_rgb_ref,
+    )
+    if char_branch.shape[1:3] != batch.shape[1:3]:
+        char_branch = module.ps_bicubic_sharper(char_branch, batch.shape[2], batch.shape[1])
+    if shadow_batch.shape[1:3] != batch.shape[1:3]:
+        shadow_batch = module.ps_bicubic_sharper(shadow_batch, batch.shape[2], batch.shape[1])
+    if item_branch.shape[1:3] != shadow_batch.shape[1:3]:
+        item_branch = module.ps_bicubic_sharper(item_branch, shadow_batch.shape[2], shadow_batch.shape[1])
+
+    cv2 = getattr(module, "cv2", None)
+    if cv2 is None:
+        return char_branch
+    solid_now = (item_branch[..., 3] > 0.01).cpu().numpy().astype(np.uint8)
+    kernel = np.ones((3, 3), np.uint8)
+    solid_now = np.stack([cv2.dilate(solid_now[i], kernel) for i in range(solid_now.shape[0])], axis=0)
+    protect = torch.from_numpy(solid_now.astype(np.float32)).to(batch.device).unsqueeze(-1)
+    new_a = torch.where(
+        protect > 0.5,
+        batch[..., 3:4],
+        torch.minimum(
+            torch.clamp(batch[..., 3:4] - shadow_batch[..., 3:4], 0.0, 1.0),
+            char_branch[..., 3:4].clamp(0.0, 1.0),
+        ),
+    )
+    return torch.cat([batch[..., :3], new_a], dim=-1)
+
+
 def _sharpen(module: ModuleType, batch: Any, amount: float, radius: int, threshold: float, shrink: int, min_alpha: float) -> Any:
     args = [batch, amount, radius, threshold, shrink]
     if len(inspect.signature(module.sharpen).parameters) >= 6:
         args.append(min_alpha)
     return module.sharpen(*args)
+
+
+def _merge_item_shadow(batch: Any, shadow_source: Any, options: dict[str, Any]) -> Any:
+    if getattr(batch, "shape", None) is None or batch.shape[-1] < 4:
+        return batch
+    torch = __import__("torch")
+    gray_limit = float(options.get("shadow_gray_limit", 0.35))
+    protect_radius = int(options.get("shadow_protect_radius", -70))
+    boost = float(options.get("shadow_alpha_boost", 1.0))
+
+    src_rgb = shadow_source[..., :3].clamp(0.0, 1.0)
+    src_a = shadow_source[..., 3:4].clamp(0.0, 1.0)
+    gray = src_rgb.mean(dim=-1, keepdim=True)
+    chroma = src_rgb.max(dim=-1, keepdim=True).values - src_rgb.min(dim=-1, keepdim=True).values
+
+    _, h, w, _ = batch.shape
+    yy = torch.linspace(0.0, 1.0, h, device=batch.device, dtype=batch.dtype).view(1, h, 1, 1)
+    xx = torch.linspace(0.0, 1.0, w, device=batch.device, dtype=batch.dtype).view(1, 1, w, 1)
+    foot_ellipse = (((xx - 0.5) / 0.46) ** 2 + ((yy - 0.82) / 0.24) ** 2) <= 1.0
+    shadow_mask = (src_a > 0.01) & (gray <= gray_limit) & (chroma <= 0.12) & foot_ellipse
+
+    if protect_radius:
+        person = (src_a > float(options.get("min_alpha", 0.05))).permute(0, 3, 1, 2).float()
+        radius = min(abs(protect_radius), max(1, min(h, w) // 3))
+        kernel = radius * 2 + 1
+        if protect_radius < 0:
+            protected = -torch.nn.functional.max_pool2d(-person, kernel, stride=1, padding=radius)
+        else:
+            protected = torch.nn.functional.max_pool2d(person, kernel, stride=1, padding=radius)
+        shadow_mask = shadow_mask & ~(protected.permute(0, 2, 3, 1) > 0.5)
+
+    base_rgb = batch[..., :3].clamp(0.0, 1.0)
+    base_a = batch[..., 3:4].clamp(0.0, 1.0)
+    shadow_a = torch.where(shadow_mask, (src_a * boost).clamp(0.0, 1.0), torch.zeros_like(src_a))
+    shadow_rgb = src_rgb * 0.75
+    out_a = torch.maximum(base_a, shadow_a)
+    out_rgb = torch.where(
+        out_a > 1e-6,
+        (base_rgb * base_a + shadow_rgb * shadow_a * (1.0 - base_a)).clamp(0.0, 1.0) / out_a.clamp(min=1e-6),
+        base_rgb,
+    )
+    return torch.cat([out_rgb, out_a], dim=-1)
 
 
 def _temporal_smooth(module: ModuleType, batch: Any, options: dict[str, Any]) -> Any:
@@ -837,8 +1030,12 @@ def _steps_text(options: dict[str, Any]) -> str:
     steps = []
     if options.get("use_denoise"):
         steps.append(f"去噪 阈值{options.get('denoise_threshold')} 半径{options.get('denoise_radius')}")
+    if options.get("use_shadow"):
+        steps.append(
+            f"阴影分离 灰度{options.get('shadow_gray_limit')} 保护{options.get('shadow_protect_radius')} 增强{options.get('shadow_alpha_boost')}"
+        )
     if options.get("use_blur"):
-        steps.append(f"模糊白叠加 半径{options.get('blur_radius')} 强度{options.get('blur_sigma')}")
+        steps.append(f"模糊自叠加 半径{options.get('blur_radius')} 强度{options.get('blur_sigma')}")
     if options.get("use_resize1"):
         steps.append(f"缩小① {options.get('resize1_width')}x{options.get('resize1_height')}")
     if options.get("use_sharp1"):

@@ -31,6 +31,7 @@ class FlowPlan:
                         str(self.date_root / "source_manifest.json"),
                         str(self.date_root / "scene/videos"),
                         str(self.date_root / "emoji/videos"),
+                        str(self.date_root / "story/videos"),
                     ],
                 },
                 {
@@ -40,6 +41,7 @@ class FlowPlan:
                     "outputs": [
                         str(self.date_root / "scene/frames"),
                         str(self.date_root / "emoji/frames"),
+                        str(self.date_root / "story/frames"),
                     ],
                 },
                 {
@@ -49,12 +51,23 @@ class FlowPlan:
                     "outputs": [
                         str(self.date_root / "scene/matte"),
                         str(self.date_root / "emoji/matte"),
+                        str(self.date_root / "story/matte"),
                     ],
                 },
                 {
                     "id": 4,
+                    "name": "cherry_smooth",
+                    "description": "Cherry 后处理，scene 走全身参数，emoji/story 走半身参数，默认不启用时序平滑。",
+                    "outputs": [
+                        str(self.date_root / "scene/smooth"),
+                        str(self.date_root / "emoji/smooth"),
+                        str(self.date_root / "story/smooth"),
+                    ],
+                },
+                {
+                    "id": 5,
                     "name": "unity_ready",
-                    "description": "把抠图结果汇总为 Unity 插件可读的 scene / emoji 两包。",
+                    "description": "把后处理结果汇总为 Unity 插件可读的 scene / emoji / story 三包。",
                     "command": f'python -m tools.animation_automation.cli build-unity-ready --date-root "{self.date_root}"',
                     "outputs": [
                         str(ready / "manifest.json"),
@@ -62,22 +75,26 @@ class FlowPlan:
                         str(ready / "scene/frames"),
                         str(ready / "emoji/animation_resource_manifest.json"),
                         str(ready / "emoji/frames"),
+                        str(ready / "story/animation_resource_manifest.json"),
+                        str(ready / "story/frames"),
                     ],
                 },
                 {
-                    "id": 5,
+                    "id": 6,
                     "name": "unity_import",
-                    "description": "调用 Unity 插件导入 scene / emoji 包。当前项目不修改插件源码；如无 batchmode 入口则只生成导入参数。",
+                    "description": "调用 Unity 插件导入 scene / emoji / story 包。当前项目不修改插件源码；如无 batchmode 入口则只生成导入参数。",
                     "command": f'python -m tools.animation_automation.cli import-unity-ready --unity-ready "{ready}" --package both',
                     "inputs": [
                         str(ready / "scene/animation_resource_manifest.json"),
                         str(ready / "scene/frames"),
                         str(ready / "emoji/animation_resource_manifest.json"),
                         str(ready / "emoji/frames"),
+                        str(ready / "story/animation_resource_manifest.json"),
+                        str(ready / "story/frames"),
                     ],
                 },
                 {
-                    "id": 6,
+                    "id": 7,
                     "name": "p4_shelve",
                     "description": "P4 同步、预览、单步确认 create-cl/reconcile/shelve，最后生成 Feishu 可读报告。submit 永远禁用。",
                     "safe_commands": [

@@ -1572,6 +1572,10 @@ SKILLS: list[dict[str, Any]] = [
             "use_denoise": "boolean optional",
             "denoise_threshold": "number optional",
             "denoise_radius": "integer optional",
+            "use_shadow": "boolean optional",
+            "shadow_gray_limit": "number optional",
+            "shadow_protect_radius": "integer optional",
+            "shadow_alpha_boost": "number optional",
             "use_blur": "boolean optional",
             "blur_radius": "integer optional",
             "blur_sigma": "number optional",
@@ -1710,7 +1714,7 @@ SKILLS: list[dict[str, Any]] = [
     ),
     _skill(
         "unity_ready.preview",
-        "Preview unity_ready output paths and package readiness for scene/emoji without writing files.",
+        "Preview unity_ready output paths and package readiness for scene/emoji/story without writing files.",
         True,
         unity_ready_skills.preview,
         {
@@ -1723,7 +1727,7 @@ SKILLS: list[dict[str, Any]] = [
     ),
     _skill(
         "unity_ready.build",
-        "Build unity_ready/scene and unity_ready/emoji manifests and frames from the current animation workspace.",
+        "Build unity_ready/scene, unity_ready/emoji, and unity_ready/story manifests and frames from the current animation workspace.",
         True,
         unity_ready_skills.build,
         {
@@ -1738,7 +1742,7 @@ SKILLS: list[dict[str, Any]] = [
     ),
     _skill(
         "unity_ready.status",
-        "Show unity_ready scene/emoji package paths, JSON existence and frame counts.",
+        "Show unity_ready scene/emoji/story package paths, JSON existence and frame counts.",
         True,
         unity_ready_skills.status,
         {"date_root": "string optional"},

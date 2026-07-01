@@ -790,8 +790,12 @@ def _format_animation_flow(payload: dict[str, Any], preview: bool = False) -> li
     lines.append(f"unity_ready：{payload.get('unity_ready')}")
     policy = payload.get("feishu_progress_policy") or {}
     if policy:
-        skipped = "、".join(policy.get("skip") or [])
-        lines.append(f"飞书状态：跳过 {skipped or '无'}；其他状态重新下载并抽帧")
+        included = "、".join(policy.get("include") or [])
+        if included:
+            lines.append(f"飞书状态：仅处理 {included}；其他状态跳过")
+        else:
+            skipped = "、".join(policy.get("skip") or [])
+            lines.append(f"飞书状态：跳过 {skipped or '无'}；其他状态重新下载并抽帧")
     lines.append("步骤：")
     for stage in payload.get("stages") or []:
         lines.append(f"- {stage.get('status')} {stage.get('label')}")
