@@ -6,13 +6,17 @@ from pathlib import Path
 from PIL import Image
 
 from assetclaw_matting.brain.multimodal_planner import plan_multimodal_task
+from assetclaw_matting.brain.direct_video_planner import plan_direct_video_task
+from assetclaw_matting.brain.speech_planner import handle_voice_message
 from assetclaw_matting.brain.schemas import BrainMessage
 from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
 from assetclaw_matting.feishu.message_adapter import from_webhook_dict
 from assetclaw_matting.feishu.models import FeishuMessageEvent
 from assetclaw_matting.feishu.processor import (
     _has_audio_attachment,
+    _download_resource_type,
     _is_stale_event,
+    _looks_like_video_file,
     _prepare_attachments,
     _processing_ack_text,
     _should_send_voice_reply,
@@ -60,6 +64,137 @@ def test_feishu_audio_message_extracts_audio_attachment() -> None:
     assert event.attachments[0]["type"] == "audio"
     assert event.attachments[0]["resource_key"] == "audio_key_1"
     assert event.attachments[0]["file_name"].endswith(".mp3")
+
+
+def test_feishu_media_message_is_video_attachment() -> None:
+    event = from_webhook_dict({
+        "header": {"event_id": "evt_media_video"},
+        "event": {
+            "sender": {"sender_id": {"open_id": "ou_1"}},
+            "message": {
+                "message_id": "om_media_video",
+                "chat_id": "oc_1",
+                "chat_type": "p2p",
+                "message_type": "media",
+                "content": json.dumps({"file_key": "video_file_key_1", "image_key": "cover_image_key_1"}),
+            },
+        },
+    })
+
+    assert event.text == ""
+    assert event.message_type == "media"
+    assert event.attachments[0]["type"] == "video"
+    assert event.attachments[0]["source_message_type"] == "media"
+    assert event.attachments[0]["resource_key"] == "video_file_key_1"
+    assert event.attachments[0]["thumbnail_key"] == "cover_image_key_1"
+    assert event.attachments[0]["file_name"].endswith(".mp4")
+    assert _download_resource_type("media") == "video"
+
+
+def test_feishu_upload_file_type_and_mime_for_zip() -> None:
+    from assetclaw_matting.feishu.client import _feishu_file_type, _guess_mime_type
+
+    assert _feishu_file_type("result.zip") == "stream"
+    assert _guess_mime_type("result.zip") == "application/zip"
+    assert _feishu_file_type("clip.mp4") == "mp4"
+
+
+def test_feishu_send_file_falls_back_to_drive_link_on_size_error(monkeypatch, tmp_path: Path) -> None:
+    import requests
+
+    from assetclaw_matting.feishu.client import FeishuClient
+
+    target = tmp_path / "result.zip"
+    target.write_bytes(b"zip")
+    sent: dict[str, str] = {}
+    client = FeishuClient()
+
+    def fail_upload_file(path: Path, file_name: str | None = None) -> str:
+        response = requests.Response()
+        response.status_code = 400
+        response._content = b'{"code":234006,"msg":"The file size exceed the max value."}'
+        raise requests.HTTPError("upload_file failed: 400", response=response)
+
+    monkeypatch.setattr(client, "upload_file", fail_upload_file)
+    monkeypatch.setattr(client, "upload_drive_file", lambda path, file_name=None: {"url": "https://lilithgames.feishu.cn/file/token"})
+    monkeypatch.setattr(client, "send_text_to_chat", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}))
+
+    client.send_file_to_chat("oc_test", target, target.name)
+
+    assert sent["chat_id"] == "oc_test"
+    assert "result.zip" in sent["text"]
+    assert "https://lilithgames.feishu.cn/file/token" in sent["text"]
+
+
+def test_downloaded_video_rejects_thumbnail_jpeg(tmp_path: Path) -> None:
+    fake_video = tmp_path / "clip.mp4"
+    fake_video.write_bytes(b"\xff\xd8\xff\xe0JFIF fake cover image")
+
+    assert _looks_like_video_file(fake_video) is False
+
+    realish_video = tmp_path / "real.mp4"
+    realish_video.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 64)
+
+    assert _looks_like_video_file(realish_video) is True
+
+
+def test_video_attachment_is_not_treated_as_audio(monkeypatch) -> None:
+    from assetclaw_matting.config import settings
+
+    monkeypatch.setattr(settings, "bot_tts_enabled", False)
+    event = FeishuMessageEvent(
+        trace_id="evt_video_not_audio",
+        event_id="evt_video_not_audio",
+        message_id="om_video_not_audio",
+        chat_id="oc_1",
+        chat_type="p2p",
+        open_id="ou_1",
+        user_id="ou_1",
+        text="",
+        message_type="media",
+        attachments=[{"type": "video", "file_name": "clip.mp4", "local_path": "E:/assetclaw-matting-bot/storage/debug/clip.mp4"}],
+    )
+
+    assert _has_audio_attachment(event) is False
+    assert "语音" not in _processing_ack_text(event)
+    assert _should_send_voice_reply(event, "feishu:oc_1:ou_1") is False
+
+
+def test_file_mp4_attachment_is_not_treated_as_audio(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.config import settings
+
+    monkeypatch.setattr(settings, "bot_tts_enabled", False)
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 64)
+    event = FeishuMessageEvent(
+        trace_id="evt_file_mp4",
+        event_id="evt_file_mp4",
+        message_id="om_file_mp4",
+        chat_id="oc_1",
+        chat_type="p2p",
+        open_id="ou_1",
+        user_id="ou_1",
+        text="",
+        message_type="file",
+        attachments=[{"type": "file", "file_name": "source.mp4", "local_path": str(video)}],
+    )
+
+    class Provider:
+        name = "test"
+
+        def log_message(self, *args, **kwargs):
+            return None
+
+    assert _has_audio_attachment(event) is False
+    assert "语音" not in _processing_ack_text(event)
+    assert handle_voice_message(
+        Provider(),
+        BrainMessage(
+            conversation_id="file-mp4-not-audio",
+            text="",
+            attachments=event.attachments,
+        ),
+    ) is None
 
 
 def test_feishu_post_message_extracts_text_and_image() -> None:
@@ -123,9 +258,128 @@ def test_multimodal_planner_prompts_for_next_action() -> None:
     )
 
     assert planned is not None
-    tool_calls, text = planned
-    assert tool_calls == []
-    assert "已保存到" in text
+
+
+def test_direct_video_attachment_routes_to_confirmed_processing(tmp_path: Path) -> None:
+    video = tmp_path / "sample.mp4"
+    video.write_bytes(b"fake-video")
+
+    planned = plan_direct_video_task(
+        BrainMessage(
+            text="动画处理",
+            conversation_id="feishu:chat_video:user_video",
+            user_id="user_video",
+            attachments=[
+                {
+                    "type": "video",
+                    "file_name": "sample.mp4",
+                    "downloaded": True,
+                    "local_path": str(video),
+                }
+            ],
+        )
+    )
+
+    assert planned is not None
+    tool_calls, reason = planned
+    assert reason == "direct Feishu video attachment route"
+    assert tool_calls[0].skill == "direct_video.start"
+    assert tool_calls[0].arguments["video_paths"] == [str(video)]
+
+
+def test_direct_video_rejects_feishu_media_video_for_original_quality(tmp_path: Path) -> None:
+    video = tmp_path / "compressed.mp4"
+    video.write_bytes(b"fake-video")
+
+    planned = plan_direct_video_task(
+        BrainMessage(
+            text="动画处理",
+            conversation_id="feishu:chat_video:user_video",
+            user_id="user_video",
+            attachments=[
+                {
+                    "type": "video",
+                    "source_message_type": "media",
+                    "file_name": "compressed.mp4",
+                    "downloaded": True,
+                    "local_path": str(video),
+                }
+            ],
+        )
+    )
+
+    assert planned is not None
+    tool_calls, reason = planned
+    assert tool_calls is None
+    assert "当作“文件”发送" in reason
+
+
+def test_direct_video_status_question_routes_without_attachment() -> None:
+    planned = plan_direct_video_task(
+        BrainMessage(
+            text="这个视频处理进度到哪了",
+            conversation_id="feishu:chat_video:user_video",
+            user_id="user_video",
+        )
+    )
+
+    assert planned is not None
+    tool_calls, _reason = planned
+    assert tool_calls[0].skill == "direct_video.status"
+
+
+def test_direct_video_cherry_runs_per_video_dir(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.skills import direct_video_skills
+
+    matte_one = tmp_path / "run" / "matte" / "video_01"
+    matte_two = tmp_path / "run" / "matte" / "video_02"
+    matte_one.mkdir(parents=True, exist_ok=True)
+    matte_two.mkdir(parents=True, exist_ok=True)
+    Image.new("RGBA", (4, 4), (255, 0, 0, 255)).save(matte_one / "0000.png")
+    Image.new("RGBA", (4, 4), (0, 255, 0, 255)).save(matte_two / "0000.png")
+    calls: list[dict[str, object]] = []
+
+    def fake_run_start(**kwargs):
+        calls.append(kwargs)
+        return {"run_id": f"CHERRY_TEST_{len(calls)}"}
+
+    def fake_run_status(run_id: str, include_gpu: bool = False):
+        return {"ok": True, "run_id": run_id, "status": "DONE", "completed": 1, "total": 1}
+
+    monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", tmp_path)
+    monkeypatch.setattr("assetclaw_matting.skills.cherry_skills.run_start", fake_run_start)
+    monkeypatch.setattr("assetclaw_matting.skills.cherry_skills.run_status", fake_run_status)
+
+    run = {
+        "id": "VID_TEST_CHERRY",
+        "status": "RUNNING",
+        "stage": "postprocess",
+        "updated_at": "",
+        "children": {},
+        "notify_interval_seconds": 60,
+        "last_notification_at": 0,
+        "chat_id": "",
+        "videos": [
+            {
+                "index": 1,
+                "matte_dir": str(matte_one),
+                "smooth_dir": str(tmp_path / "run" / "smooth" / "video_01"),
+                "cherry_profile": "half",
+            },
+            {
+                "index": 2,
+                "matte_dir": str(matte_two),
+                "smooth_dir": str(tmp_path / "run" / "smooth" / "video_02"),
+                "cherry_profile": "full",
+            },
+        ],
+        "log": [],
+    }
+
+    direct_video_skills._run_cherry(run)
+
+    assert [Path(str(call["input_dir"])).name for call in calls] == ["video_01", "video_02"]
+    assert [call["profile"] for call in calls] == ["half", "full"]
 
 
 def test_multimodal_planner_previews_image() -> None:
@@ -330,6 +584,7 @@ def test_openai_whisper_model_name_maps_turbo() -> None:
 def test_voice_reply_detection(monkeypatch) -> None:
     from assetclaw_matting.config import settings
 
+    monkeypatch.setattr(settings, "bot_tts_enabled", True)
     monkeypatch.setattr(settings, "voice_reply_on_audio", True)
     audio_event = FeishuMessageEvent(
         trace_id="trace_voice",

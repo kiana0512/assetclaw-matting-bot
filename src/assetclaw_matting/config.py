@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     bot_sticker_dir: Path = Path("E:/assetclaw-matting-bot/miratsu_stickers")
     bot_sticker_probability: float = 1.0
     bot_sticker_max_bytes: int = 8_000_000
+    bot_sticker_send_max_px: int = 240
     bot_sticker_extensions: str = ".png;.gif"
     user_default_location: str = "上海"
     user_food_preferences: str = ""
@@ -145,6 +146,7 @@ class Settings(BaseSettings):
     tts_voice: str = "zh-CN-XiaoxiaoNeural"
     tts_rate: str = "+0%"
     tts_max_chars: int = 800
+    bot_tts_enabled: bool = False
     voice_reply_on_audio: bool = True
     voice_reply_progress_enabled: bool = True
     indextts_repo_dir: Path = Path("E:/assetclaw-matting-bot/storage/models/index-tts/repo")

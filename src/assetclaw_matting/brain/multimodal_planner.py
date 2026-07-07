@@ -68,9 +68,14 @@ def plan_multimodal_task(message: BrainMessage) -> tuple[list[ToolCall], str] | 
 
 def _is_audio_attachment(item: dict) -> bool:
     raw_type = str(item.get("type") or "").lower()
+    if raw_type in {"video", "media"}:
+        return False
     path = str(item.get("local_path") or "")
     name = str(item.get("file_name") or "")
-    return raw_type in {"audio", "voice"} or Path(path or name).suffix.lower() in AUDIO_EXTS
+    suffix = Path(path or name).suffix.lower()
+    if suffix in VIDEO_EXTS:
+        return False
+    return raw_type in {"audio", "voice"} or suffix in AUDIO_EXTS
 
 
 def _recent_image_path(conversation_id: str) -> str | None:

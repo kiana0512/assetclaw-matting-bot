@@ -90,6 +90,13 @@ class BrainProvider(ABC):
                         message = preview_run_start_confirmation(args, confirmation_id)
                     except Exception:
                         pass
+                elif tool_call.skill == "direct_video.start":
+                    try:
+                        from assetclaw_matting.skills.direct_video_skills import preview_start_confirmation
+
+                        message = preview_start_confirmation(args, confirmation_id)
+                    except Exception:
+                        pass
                 elif tool_call.skill == "animation_flow.resume":
                     try:
                         from assetclaw_matting.skills.animation_flow_skills import preview_run_resume_confirmation

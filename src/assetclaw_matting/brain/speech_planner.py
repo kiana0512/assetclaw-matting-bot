@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 
 from assetclaw_matting.brain.schemas import BrainMessage, BrainResponse
+from assetclaw_matting.skills.media_skills import VIDEO_EXTS
 from assetclaw_matting.skills.speech_skills import AUDIO_EXTS, transcribe
 
 
@@ -98,9 +99,13 @@ def handle_voice_message(provider, message: BrainMessage) -> BrainResponse | Non
 def _first_audio_item(message: BrainMessage) -> dict | None:
     for item in message.attachments:
         raw_type = str(item.get("type") or "").lower()
+        if raw_type in {"video", "media"}:
+            continue
         path = str(item.get("local_path") or "")
         name = str(item.get("file_name") or "")
         suffix = Path(path or name).suffix.lower()
+        if suffix in VIDEO_EXTS:
+            continue
         if raw_type in {"audio", "voice"} or suffix in AUDIO_EXTS:
             return item
     return None

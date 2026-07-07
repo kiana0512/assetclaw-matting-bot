@@ -206,6 +206,7 @@ def run_status(run_id: str | None = None, include_gpu: bool = True) -> dict[str,
     prompt_map = options.get("prompt_map") or []
     completed = sum(1 for item in prompt_map if not item.get("error") and Path(str(item.get("dst_path") or "")).exists())
     failed = sum(1 for item in prompt_map if item.get("error"))
+    error_items = [item for item in prompt_map if item.get("error")]
     if not settings.comfyui_fake_mode and not completed + failed:
         for prompt_id in prompt_ids:
             try:
@@ -257,6 +258,8 @@ def run_status(run_id: str | None = None, include_gpu: bool = True) -> dict[str,
         "prompt_ids": prompt_ids[:20],
         "last_completed": _last_completed_name(prompt_map),
         "last_completed_detail": _path_detail(_last_completed_rel_path(prompt_map)),
+        "last_error": _last_error_summary(error_items),
+        "error_items": _error_item_summaries(error_items[:5]),
     }
     if include_gpu:
         result["gpu"] = gpu_status()
@@ -938,6 +941,30 @@ def _last_completed_name(prompt_map: list[dict[str, str]]) -> str:
 def _last_completed_rel_path(prompt_map: list[dict[str, str]]) -> str:
     completed = [str(item.get("rel_path") or "") for item in prompt_map if Path(str(item.get("dst_path") or "")).exists()]
     return completed[-1] if completed else ""
+
+
+def _last_error_summary(error_items: list[dict[str, Any]]) -> str:
+    if not error_items:
+        return ""
+    item = error_items[-1]
+    frame = Path(str(item.get("src_path") or item.get("rel_path") or "")).name
+    error = _compact_error(str(item.get("error") or ""))
+    return f"{frame}: {error}" if frame else error
+
+
+def _error_item_summaries(error_items: list[dict[str, Any]]) -> list[dict[str, str]]:
+    return [
+        {
+            "frame": Path(str(item.get("src_path") or item.get("rel_path") or "")).name,
+            "error": _compact_error(str(item.get("error") or "")),
+        }
+        for item in error_items
+    ]
+
+
+def _compact_error(text: str, limit: int = 400) -> str:
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    return cleaned[:limit] + ("..." if len(cleaned) > limit else "")
 
 
 def _path_detail(rel_path: str) -> dict[str, str]:

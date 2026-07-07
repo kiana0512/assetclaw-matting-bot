@@ -307,6 +307,8 @@ def format_skill_results(results: list[dict[str, Any]], max_items: int = 8) -> s
                 lines.append(f"- {entry.get('run_id')}：{entry.get('status')} / {entry.get('current_stage')}")
         elif skill == "animation_flow.cancel":
             lines.append(f"{payload.get('run_id')}：{payload.get('status')}")
+        elif skill.startswith("direct_video."):
+            lines.extend(_format_direct_video(skill, payload, max_items))
         elif skill == "animation.status":
             lines.extend(_format_animation_status(payload))
         elif skill == "animation.manual_smooth_current":
@@ -1221,6 +1223,56 @@ def _format_life_food(payload: dict[str, Any]) -> list[str]:
         lines.append(f"- {item.get('name')}：{item.get('reason')}")
     if payload.get("location"):
         lines.append(f"位置我先按 {payload.get('location')} 来理解。")
+    return lines
+
+
+def _format_direct_video(skill: str, payload: dict[str, Any], max_items: int) -> list[str]:
+    if payload.get("error"):
+        return [f"{skill} 失败：{payload.get('error')}"]
+    run_id = payload.get("run_id") or payload.get("id") or ""
+    status = payload.get("status") or ""
+    stage = payload.get("stage") or ""
+    videos = payload.get("videos") or []
+    children = payload.get("children") if isinstance(payload.get("children"), dict) else {}
+    lines: list[str] = []
+    if skill == "direct_video.start":
+        lines.append(f"动画处理任务已启动：{run_id}")
+        lines.append(f"视频：{len(videos)} 个")
+        lines.append("步骤：原视频 -> 抽帧 -> ComfyUI 抠图 -> Cherry 后处理 -> zip 回传")
+        return lines
+    if skill == "direct_video.list":
+        items = payload.get("items") or []
+        lines.append(f"直传视频处理任务：{payload.get('count', len(items))} 个")
+        for item in items[:max_items]:
+            lines.append(f"- {item.get('run_id')}：{item.get('status')} / {item.get('stage')} / {len(item.get('videos') or [])} 个视频")
+        return lines
+    if skill == "direct_video.cancel":
+        return [f"{run_id}：{status}"]
+
+    lines.append(f"动画处理进度：{run_id}")
+    lines.append(f"状态：{status} / {stage}")
+    if videos:
+        lines.append(f"视频：{len(videos)} 个")
+        for item in videos[:max_items]:
+            detail = []
+            if item.get("frame_count"):
+                detail.append(f"{item.get('frame_count')} 帧")
+            if item.get("aspect"):
+                detail.append(str(item.get("aspect")))
+            if item.get("cherry_profile"):
+                detail.append(f"后处理 {item.get('cherry_profile')}")
+            suffix = "，" + "，".join(detail) if detail else ""
+            lines.append(f"- {item.get('name')}{suffix}")
+    comfy = children.get("comfyui") if isinstance(children.get("comfyui"), dict) else {}
+    if comfy:
+        lines.append(f"抠图：{comfy.get('completed', 0)}/{comfy.get('total', 0)}，{comfy.get('status')}")
+    cherry = children.get("cherry") if isinstance(children.get("cherry"), dict) else {}
+    if cherry:
+        lines.append(f"后处理：{cherry.get('completed', 0)}/{cherry.get('total', 0)}，{cherry.get('status')}")
+    if payload.get("zip_path"):
+        lines.append(f"zip：{payload.get('zip_path')}")
+    if payload.get("last_log"):
+        lines.append(f"最近：{payload.get('last_log')}")
     return lines
 
 

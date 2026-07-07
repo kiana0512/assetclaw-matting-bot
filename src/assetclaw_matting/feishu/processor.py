@@ -380,6 +380,10 @@ def _try_send_emotional_sticker(chat_id: str, message_text: str, reply_text: str
 
 
 def _try_send_tts_reply(chat_id: str, conversation_id: str, event: FeishuMessageEvent, reply_text: str) -> None:
+    from assetclaw_matting.config import settings
+
+    if not bool(getattr(settings, "bot_tts_enabled", False)):
+        return
     if not chat_id or not _should_send_voice_reply(event, conversation_id):
         return
     clean_text = (reply_text or "").strip()
@@ -412,6 +416,8 @@ def _should_send_voice_reply(event: FeishuMessageEvent, conversation_id: str) ->
     from assetclaw_matting.config import settings
     from assetclaw_matting.brain.speech_planner import voice_reply_enabled
 
+    if not bool(getattr(settings, "bot_tts_enabled", False)):
+        return False
     if bool(getattr(settings, "voice_reply_on_audio", True)) and _has_audio_attachment(event):
         return True
     return voice_reply_enabled(conversation_id)
@@ -421,11 +427,16 @@ def _has_audio_attachment(event: FeishuMessageEvent) -> bool:
     if not event.attachments:
         return False
     from assetclaw_matting.skills.speech_skills import AUDIO_EXTS
+    from assetclaw_matting.skills.media_skills import VIDEO_EXTS
 
     for item in event.attachments:
         raw_type = str(item.get("type") or "").lower()
+        if raw_type in {"video", "media"}:
+            continue
         path = str(item.get("local_path") or "")
         name = str(item.get("file_name") or "")
+        if Path(path or name).suffix.lower() in VIDEO_EXTS:
+            continue
         if raw_type in {"audio", "voice"}:
             return True
         if Path(path or name).suffix.lower() in AUDIO_EXTS:
@@ -445,22 +456,36 @@ def _prepare_attachments(event: FeishuMessageEvent, conversation_id: str) -> lis
     prepared: list[dict[str, object]] = []
     for index, attachment in enumerate(event.attachments, start=1):
         item = dict(attachment)
+        if _should_skip_compressed_feishu_video_download(item):
+            item["downloaded"] = False
+            item["download_skipped"] = True
+            item["error"] = "feishu media/video messages may be transcoded; send as file for original quality"
+            prepared.append(item)
+            continue
         name = _safe_attachment_name(str(item.get("file_name") or f"attachment_{index}.bin"))
         if str(item.get("type") or "").lower() in {"audio", "voice"} and Path(name).suffix.lower() not in _audio_suffixes():
             name = f"{Path(name).stem or f'voice_{index}'}.mp3"
         target = _unique_path(inbox / name)
         resource_type = _download_resource_type(str(item.get("type") or "file"))
         try:
-            feishu_client.download_message_resource(
+            used_resource_type = _download_message_resource(
+                feishu_client,
                 event.message_id,
                 str(item.get("resource_key") or ""),
                 target,
-                resource_type=resource_type,  # type: ignore[arg-type]
+                resource_type,
             )
             item["local_path"] = str(target)
             item["file_name"] = target.name
             item["size"] = target.stat().st_size
+            if str(item.get("type") or "").lower() == "video" and not _looks_like_video_file(target):
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
+                raise RuntimeError(f"downloaded video resource is not a playable video file: {target.name}")
             item["downloaded"] = True
+            item["download_resource_type"] = used_resource_type
         except Exception as exc:
             log.error("download feishu attachment failed: %s", redact_secrets(str(exc)))
             item["downloaded"] = False
@@ -477,8 +502,52 @@ def _prepare_attachments(event: FeishuMessageEvent, conversation_id: str) -> lis
     return prepared
 
 
+def _should_skip_compressed_feishu_video_download(item: dict[str, object]) -> bool:
+    source_type = str(item.get("source_message_type") or "").lower()
+    raw_type = str(item.get("type") or "").lower()
+    return source_type in {"media", "video"} and raw_type in {"video", "media"}
+
+
+def _download_message_resource(
+    feishu_client: object,
+    message_id: str,
+    resource_key: str,
+    target: Path,
+    resource_type: str,
+) -> str:
+    normalized = _download_resource_type(resource_type)
+    getattr(feishu_client, "download_message_resource")(
+        message_id,
+        resource_key,
+        target,
+        resource_type=normalized,
+    )
+    return normalized
+
+
+def _looks_like_video_file(path: Path) -> bool:
+    try:
+        header = path.read_bytes()[:512]
+    except OSError:
+        return False
+    if not header:
+        return False
+    if header.startswith(b"\xff\xd8\xff") or header.startswith(b"\x89PNG\r\n\x1a\n") or header.startswith(b"GIF8"):
+        return False
+    suffix = path.suffix.lower()
+    if suffix in {".mp4", ".mov", ".m4v"}:
+        return b"ftyp" in header[:32] or b"moov" in header[:256] or b"mdat" in header[:256]
+    if suffix == ".avi":
+        return header.startswith(b"RIFF") and b"AVI" in header[:32]
+    if suffix in {".mkv", ".webm"}:
+        return header.startswith(b"\x1a\x45\xdf\xa3")
+    return True
+
+
 def _download_resource_type(raw_type: str) -> str:
-    if raw_type in {"image", "file", "video", "audio", "media"}:
+    if raw_type == "media":
+        return "video"
+    if raw_type in {"image", "file", "video", "audio"}:
         return raw_type
     return "file"
 

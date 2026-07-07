@@ -161,7 +161,7 @@ def _extract_attachments(message_type: str, content: dict[str, Any]) -> list[dic
         return _extract_post_attachments(content)
     if message_type not in {"image", "file", "media", "video", "audio"}:
         return []
-    key = content.get("image_key") or content.get("file_key") or content.get("media_key") or content.get("audio_key")
+    key = _attachment_resource_key(message_type, content)
     if not key:
         return []
     file_name = (
@@ -170,13 +170,30 @@ def _extract_attachments(message_type: str, content: dict[str, Any]) -> list[dic
         or content.get("title")
         or _default_attachment_name(message_type)
     )
-    return [{
-        "type": message_type,
+    attachment_type = "video" if message_type == "media" else message_type
+    item = {
+        "type": attachment_type,
+        "source_message_type": message_type,
         "resource_key": key,
         "file_name": PathishName.clean(str(file_name)),
         "size": content.get("size"),
         "mime": content.get("mime"),
-    }]
+    }
+    if attachment_type == "video" and content.get("image_key"):
+        item["thumbnail_key"] = content.get("image_key")
+    return [item]
+
+
+def _attachment_resource_key(message_type: str, content: dict[str, Any]) -> Any:
+    if message_type == "image":
+        return content.get("image_key")
+    if message_type == "audio":
+        return content.get("audio_key") or content.get("file_key")
+    if message_type in {"media", "video"}:
+        return content.get("file_key") or content.get("media_key")
+    if message_type == "file":
+        return content.get("file_key")
+    return content.get("file_key") or content.get("media_key") or content.get("image_key") or content.get("audio_key")
 
 
 def _extract_post_attachments(content: dict[str, Any]) -> list[dict[str, Any]]:
@@ -227,7 +244,7 @@ def _default_attachment_name(message_type: str) -> str:
     defaults = {
         "image": "feishu_image.png",
         "video": "feishu_video.mp4",
-        "media": "feishu_media.bin",
+        "media": "feishu_video.mp4",
         "audio": "feishu_audio.mp3",
         "file": "feishu_file.bin",
     }

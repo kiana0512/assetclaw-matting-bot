@@ -109,6 +109,14 @@ class LocalCommandBrain(BrainProvider):
             return [ToolCall(skill="system.gpu_status", arguments={}), ToolCall(skill="agent.current_work", arguments={"include_gpu": False})]
         if any(kw in text for kw in ("现在机器在跑什么", "当前所有任务", "当前执行现场", "现在有哪些活", "现在在跑什么")):
             return [ToolCall(skill="agent.current_work", arguments={})]
+        if any(kw in text for kw in ("动画处理进度", "视频处理进度", "直传视频进度", "这个视频处理到哪", "这个动画处理到哪")):
+            match = re.search(r"(VID_[A-Fa-f0-9]{12})", text)
+            return [ToolCall(skill="direct_video.status", arguments={"run_id": match.group(1) if match else None})]
+        if any(kw in text for kw in ("视频处理任务", "直传视频任务")) and any(kw in text for kw in ("有哪些", "列表", "列出", "当前任务")):
+            return [ToolCall(skill="direct_video.list", arguments={"include_finished": any(kw in text for kw in ("全部", "历史", "已结束"))})]
+        if any(kw in text for kw in ("取消视频处理", "停止视频处理", "取消直传视频", "停止直传视频")):
+            match = re.search(r"(VID_[A-Fa-f0-9]{12})", text)
+            return [ToolCall(skill="direct_video.cancel", arguments={"run_id": match.group(1) if match else None})]
         if any(kw in text for kw in ("表情包状态", "情绪回复配置", "表情包池", "sticker status")):
             return [ToolCall(skill="sticker.info", arguments={})]
         if any(kw in text for kw in ("随机发个表情包", "发个表情包", "来个表情包", "发个 sticker", "发个sticker")):
