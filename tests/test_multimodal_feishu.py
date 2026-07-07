@@ -6,6 +6,7 @@ from pathlib import Path
 from PIL import Image
 
 from assetclaw_matting.brain.multimodal_planner import plan_multimodal_task
+from assetclaw_matting.brain.direct_image_planner import plan_direct_image_task
 from assetclaw_matting.brain.direct_video_planner import plan_direct_video_task
 from assetclaw_matting.brain.speech_planner import handle_voice_message
 from assetclaw_matting.brain.schemas import BrainMessage
@@ -107,6 +108,7 @@ def test_feishu_send_file_falls_back_to_drive_link_on_size_error(monkeypatch, tm
     target = tmp_path / "result.zip"
     target.write_bytes(b"zip")
     sent: dict[str, str] = {}
+    grants: dict[str, str] = {}
     client = FeishuClient()
 
     def fail_upload_file(path: Path, file_name: str | None = None) -> str:
@@ -116,7 +118,16 @@ def test_feishu_send_file_falls_back_to_drive_link_on_size_error(monkeypatch, tm
         raise requests.HTTPError("upload_file failed: 400", response=response)
 
     monkeypatch.setattr(client, "upload_file", fail_upload_file)
-    monkeypatch.setattr(client, "upload_drive_file", lambda path, file_name=None: {"url": "https://lilithgames.feishu.cn/file/token"})
+    monkeypatch.setattr(
+        client,
+        "upload_drive_file",
+        lambda path, file_name=None: {"file_token": "drive_token", "url": "https://lilithgames.feishu.cn/file/token"},
+    )
+    monkeypatch.setattr(
+        client,
+        "grant_drive_file_to_chat",
+        lambda file_token, chat_id, perm="full_access": grants.update({"file_token": file_token, "chat_id": chat_id, "perm": perm}),
+    )
     monkeypatch.setattr(client, "send_text_to_chat", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}))
 
     client.send_file_to_chat("oc_test", target, target.name)
@@ -124,6 +135,7 @@ def test_feishu_send_file_falls_back_to_drive_link_on_size_error(monkeypatch, tm
     assert sent["chat_id"] == "oc_test"
     assert "result.zip" in sent["text"]
     assert "https://lilithgames.feishu.cn/file/token" in sent["text"]
+    assert grants == {"file_token": "drive_token", "chat_id": "oc_test", "perm": "full_access"}
 
 
 def test_downloaded_video_rejects_thumbnail_jpeg(tmp_path: Path) -> None:
@@ -326,6 +338,47 @@ def test_direct_video_status_question_routes_without_attachment() -> None:
     assert planned is not None
     tool_calls, _reason = planned
     assert tool_calls[0].skill == "direct_video.status"
+
+
+def test_direct_image_attachment_routes_without_confirmation(tmp_path: Path) -> None:
+    image = tmp_path / "source.png"
+    Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(image)
+
+    planned = plan_direct_image_task(
+        BrainMessage(
+            text="",
+            conversation_id="feishu:chat_image:user_image",
+            user_id="user_image",
+            attachments=[
+                {
+                    "type": "image",
+                    "file_name": "source.png",
+                    "downloaded": True,
+                    "local_path": str(image),
+                }
+            ],
+        )
+    )
+
+    assert planned is not None
+    tool_calls, reason = planned
+    assert reason == "direct Feishu image attachment route"
+    assert tool_calls[0].skill == "direct_image.start"
+    assert tool_calls[0].arguments["image_paths"] == [str(image)]
+
+
+def test_direct_image_status_question_routes_without_attachment() -> None:
+    planned = plan_direct_image_task(
+        BrainMessage(
+            text="这张图处理进度到哪了",
+            conversation_id="feishu:chat_image:user_image",
+            user_id="user_image",
+        )
+    )
+
+    assert planned is not None
+    tool_calls, _reason = planned
+    assert tool_calls[0].skill == "direct_image.status"
 
 
 def test_direct_video_cherry_runs_per_video_dir(monkeypatch, tmp_path: Path) -> None:

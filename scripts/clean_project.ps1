@@ -44,6 +44,7 @@ $runtimeDirs = @(
   "storage\animation_flow_runner",
   "storage\animation_flow_runs",
   "storage\custom_pipeline_runs",
+  "storage\direct_image_runs",
   "storage\direct_video_runs",
   "storage\sticker_cache",
   "storage\webui_uploads"

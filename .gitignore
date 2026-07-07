@@ -30,6 +30,7 @@ storage/cherry_runs/*
 storage/comfyui_manual_workers/*
 storage/custom_pipeline_runs/*
 storage/direct_video_runs/*
+storage/direct_image_runs/*
 storage/feishu_inbox/*
 storage/feishu_table_exports/*
 storage/idle_replacements/*

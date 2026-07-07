@@ -309,6 +309,8 @@ def format_skill_results(results: list[dict[str, Any]], max_items: int = 8) -> s
             lines.append(f"{payload.get('run_id')}：{payload.get('status')}")
         elif skill.startswith("direct_video."):
             lines.extend(_format_direct_video(skill, payload, max_items))
+        elif skill.startswith("direct_image."):
+            lines.extend(_format_direct_image(skill, payload, max_items))
         elif skill == "animation.status":
             lines.extend(_format_animation_status(payload))
         elif skill == "animation.manual_smooth_current":
@@ -1273,6 +1275,47 @@ def _format_direct_video(skill: str, payload: dict[str, Any], max_items: int) ->
         lines.append(f"zip：{payload.get('zip_path')}")
     if payload.get("last_log"):
         lines.append(f"最近：{payload.get('last_log')}")
+    return lines
+
+
+def _format_direct_image(skill: str, payload: dict[str, Any], max_items: int) -> list[str]:
+    if payload.get("error") and not payload.get("run_id"):
+        return [str(payload.get("error"))]
+    run_id = payload.get("run_id") or payload.get("id") or ""
+    status = payload.get("status") or ""
+    stage = payload.get("stage") or ""
+    images = payload.get("images") or []
+    children = payload.get("children") or {}
+    comfy = children.get("comfyui") if isinstance(children.get("comfyui"), dict) else {}
+    cherry = children.get("cherry") if isinstance(children.get("cherry"), dict) else {}
+    if skill == "direct_image.start":
+        return [
+            f"图片处理任务已启动：{run_id}",
+            f"图片：{len(images)} 张",
+            "步骤：ComfyUI 抠图 -> Cherry 后处理 -> 文件附件回传",
+        ]
+    if skill == "direct_image.list":
+        items = payload.get("items") or []
+        lines = [f"图片处理任务：{payload.get('count', len(items))} 个"]
+        for item in items[:max_items]:
+            lines.append(f"- {item.get('run_id')}：{item.get('status')} / {item.get('stage')} / {len(item.get('images') or [])} 张图片")
+        return lines
+    if skill == "direct_image.cancel":
+        return [f"{run_id}：{status}"]
+    lines = [
+        f"图片处理进度：{run_id}",
+        f"状态：{status} / {stage}",
+        f"图片：{len(images)} 张",
+    ]
+    if comfy:
+        lines.append(f"抠图：{comfy.get('completed', 0)}/{comfy.get('total', 0)}，{comfy.get('status')}")
+    if cherry:
+        lines.append(f"后处理：{cherry.get('completed', 0)}/{cherry.get('total', 0)}，{cherry.get('status')}")
+    sent = payload.get("sent_files") or []
+    if sent:
+        lines.append(f"已发回附件：{len(sent)} 个")
+    if payload.get("error"):
+        lines.append(f"错误：{payload.get('error')}")
     return lines
 
 

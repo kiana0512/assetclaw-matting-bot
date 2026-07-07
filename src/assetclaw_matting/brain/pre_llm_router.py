@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from assetclaw_matting.brain.conversation_recall import answer_recent_question
+from assetclaw_matting.brain.direct_image_planner import plan_direct_image_task
 from assetclaw_matting.brain.direct_video_planner import plan_direct_video_task
 from assetclaw_matting.brain.file_task_planner import plan_file_task
 from assetclaw_matting.brain.life_planner import plan_life_task
@@ -35,6 +36,10 @@ def handle_pre_llm_message(provider: PreRouterProvider, message: BrainMessage) -
     direct_video = plan_direct_video_task(message)
     if direct_video:
         return _planned_response(provider, message, direct_video)
+
+    direct_image = plan_direct_image_task(message)
+    if direct_image:
+        return _planned_response(provider, message, direct_image)
 
     animation_flow = _plan_animation_flow(message)
     if animation_flow:

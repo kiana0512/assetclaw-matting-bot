@@ -42,3 +42,12 @@ def test_direct_video_skills_registered_with_confirmation() -> None:
     assert get_skill_meta("direct_video.status")["requires_confirmation"] is False
     assert get_skill_meta("direct_video.resend_zip")["requires_confirmation"] is False
     assert get_skill_meta("direct_video.start")["domain"] == "direct_video"
+
+
+def test_direct_image_skills_registered_without_confirmation() -> None:
+    from assetclaw_matting.skills.registry import get_skill_meta
+
+    assert get_skill_meta("direct_image.start")["requires_confirmation"] is False
+    assert get_skill_meta("direct_image.status")["requires_confirmation"] is False
+    assert get_skill_meta("direct_image.resume_postprocess")["requires_confirmation"] is False
+    assert get_skill_meta("direct_image.start")["domain"] == "direct_image"

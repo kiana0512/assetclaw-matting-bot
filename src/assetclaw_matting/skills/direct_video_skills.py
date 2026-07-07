@@ -350,7 +350,11 @@ def _send_zip(run: dict[str, Any], zip_path: Path) -> None:
 
     _append_log(run, f"开始发送 zip：{zip_path.name}，{zip_path.stat().st_size} bytes")
     _save(run)
-    feishu_client.send_file_to_chat(chat_id, zip_path, zip_path.name)
+    sent = feishu_client.send_file_to_chat(chat_id, zip_path, zip_path.name) or {}
+    if sent:
+        run["drive_file"] = sent
+        _append_log(run, f"Drive 文件已授权并发送：{sent.get('url') or sent.get('file_token')}")
+        _save(run)
 
 
 def _handle_extract_log(run: dict[str, Any], raw: str) -> None:

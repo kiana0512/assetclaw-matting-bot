@@ -89,18 +89,21 @@ class FeishuClient:
             raise RuntimeError(f"upload_file failed: code={data.get('code')} msg={data.get('msg')} error={data.get('error')}")
         return data["data"]["file_key"]
 
-    def send_file_to_chat(self, chat_id: str, path: Path, file_name: str | None = None) -> None:
+    def send_file_to_chat(self, chat_id: str, path: Path, file_name: str | None = None) -> dict[str, str] | None:
         try:
             file_key = self.upload_file(path, file_name)
         except requests.HTTPError as exc:
             if not _is_message_file_size_error(exc):
                 raise
             drive_file = self.upload_drive_file(path, file_name)
+            file_token = str(drive_file.get("file_token") or "")
+            if file_token:
+                self.grant_drive_file_to_chat(file_token, chat_id, perm="full_access")
             url = str(drive_file.get("url") or "")
             if not url:
                 raise RuntimeError(f"drive upload succeeded but url is empty: {drive_file}") from exc
             self.send_text_to_chat(chat_id, f"文件已生成：{file_name or path.name}\n{url}")
-            return
+            return drive_file
         payload = {
             "receive_id": chat_id,
             "msg_type": "file",
@@ -116,6 +119,7 @@ class FeishuClient:
         data = response.json()
         if data.get("code") != 0:
             raise RuntimeError(f"send_file_to_chat failed: code={data.get('code')} msg={data.get('msg')} error={data.get('error')}")
+        return None
 
     def upload_drive_file(self, path: Path, file_name: str | None = None) -> dict[str, str]:
         sent_name = file_name or path.name
@@ -213,6 +217,24 @@ class FeishuClient:
             "url": str(result.get("url") or ""),
             "version": str(result.get("version") or ""),
         }
+
+    def grant_drive_file_to_chat(self, file_token: str, chat_id: str, perm: str = "full_access") -> None:
+        if not file_token or not chat_id:
+            return
+        response = requests.post(
+            f"{FEISHU_BASE}/drive/v1/permissions/{file_token}/members",
+            headers={**self._headers(), "Content-Type": "application/json"},
+            params={"type": "file"},
+            json={"member_type": "openchat", "member_id": chat_id, "perm": perm},
+            timeout=60,
+        )
+        self._raise_for_api_error(response, "grant_drive_file_to_chat")
+        data = response.json()
+        if data.get("code") != 0:
+            raise RuntimeError(
+                f"grant_drive_file_to_chat failed: code={data.get('code')} "
+                f"msg={data.get('msg')} error={data.get('error')}"
+            )
 
     def download_message_resource(
         self,
