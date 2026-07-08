@@ -184,6 +184,8 @@ def format_skill_results(results: list[dict[str, Any]], max_items: int = 8) -> s
                     lines.append(f"已创建批次：{batch_id}")
                 else:
                     lines.append(f"{skill} 完成。")
+        elif skill.startswith("matting_pipeline."):
+            lines.extend(_format_matting_pipeline(skill, payload, max_items))
         elif skill == "comfyui.status":
             lines.extend(_format_comfyui_status(payload))
         elif skill == "comfyui.workflows":
@@ -203,6 +205,8 @@ def format_skill_results(results: list[dict[str, Any]], max_items: int = 8) -> s
             lines.append(f"ComfyUI 队列：运行 {len(payload.get('running') or [])}，等待 {len(payload.get('pending') or [])}")
         elif skill == "comfyui.run_start":
             lines.append(f"ComfyUI 批量任务已启动：{payload.get('run_id')}")
+            if payload.get("pipeline_notice"):
+                lines.append(str(payload.get("pipeline_notice")))
             lines.append(f"输入：{payload.get('input_dir')}")
             lines.append(f"输出：{payload.get('output_dir')}")
             lines.append(f"总数：{payload.get('total')} 张，同结构输出：{'是' if payload.get('preserve_structure') else '否'}")
@@ -790,6 +794,8 @@ def _format_animation_flow(payload: dict[str, Any], preview: bool = False) -> li
     lines = [title]
     if payload.get("status"):
         lines.append(f"状态：{payload.get('status')}，当前：{payload.get('current_stage')}")
+    if payload.get("pipeline_notice"):
+        lines.append(str(payload.get("pipeline_notice")))
     lines.append(f"工作区：{payload.get('date_root')}")
     lines.append(f"unity_ready：{payload.get('unity_ready')}")
     policy = payload.get("feishu_progress_policy") or {}
@@ -1240,6 +1246,8 @@ def _format_direct_video(skill: str, payload: dict[str, Any], max_items: int) ->
     if skill == "direct_video.start":
         lines.append(f"动画处理任务已启动：{run_id}")
         lines.append(f"视频：{len(videos)} 个")
+        if payload.get("pipeline_notice"):
+            lines.append(str(payload.get("pipeline_notice")))
         lines.append("步骤：原视频 -> 抽帧 -> ComfyUI 抠图 -> Cherry 后处理 -> zip 回传")
         return lines
     if skill == "direct_video.list":
@@ -1289,11 +1297,14 @@ def _format_direct_image(skill: str, payload: dict[str, Any], max_items: int) ->
     comfy = children.get("comfyui") if isinstance(children.get("comfyui"), dict) else {}
     cherry = children.get("cherry") if isinstance(children.get("cherry"), dict) else {}
     if skill == "direct_image.start":
-        return [
+        lines = [
             f"图片处理任务已启动：{run_id}",
             f"图片：{len(images)} 张",
-            "步骤：ComfyUI 抠图 -> Cherry 后处理 -> 文件附件回传",
         ]
+        if payload.get("pipeline_notice"):
+            lines.append(str(payload.get("pipeline_notice")))
+        lines.append("步骤：ComfyUI 抠图 -> Cherry 后处理 -> 文件附件回传")
+        return lines
     if skill == "direct_image.list":
         items = payload.get("items") or []
         lines = [f"图片处理任务：{payload.get('count', len(items))} 个"]
@@ -1366,4 +1377,62 @@ def _format_gpu_status(payload: dict[str, Any]) -> list[str]:
             f"GPU {gpu.get('index')} {gpu.get('name')}：显存 {used}/{total} MB，"
             f"利用率 {util}%，温度 {temp}°C，功耗 {power} W"
         )
+    return lines
+
+
+def _format_matting_pipeline(skill: str, payload: dict[str, Any], max_items: int) -> list[str]:
+    lines = ["抠图管线：ImageClip"]
+    repo_dir = payload.get("repo_dir")
+    if repo_dir:
+        lines.append(f"本地仓库：{repo_dir}")
+    if payload.get("repo_url"):
+        lines.append(f"远程：{payload.get('repo_url')}")
+    if payload.get("branch") or payload.get("commit"):
+        branch = payload.get("branch") or "-"
+        commit = payload.get("commit") or "-"
+        lines.append(f"版本：{branch} / {commit}")
+    if payload.get("commit_time"):
+        lines.append(f"Git 更新时间：{payload.get('commit_time')}")
+    if payload.get("commit_subject"):
+        lines.append(f"提交说明：{payload.get('commit_subject')}")
+    if payload.get("dirty"):
+        lines.append("状态：本地仓库有未提交改动")
+    if payload.get("workflow_path"):
+        workflow_state = "存在" if payload.get("workflow_exists") else "缺失"
+        lines.append(f"默认工作流：{payload.get('workflow_path')}（{workflow_state}）")
+    if payload.get("workflow_nodes") is not None:
+        lines.append(f"工作流节点：{payload.get('workflow_nodes')}")
+
+    assets = payload.get("synced") or payload.get("assets") or []
+    if assets:
+        lines.append("资源同步：")
+    for item in assets[:max_items]:
+        name = item.get("name")
+        kind = item.get("kind")
+        source = item.get("source")
+        target = item.get("target")
+        mode = item.get("mode") or item.get("target_mode") or "-"
+        if "source_exists" in item or "target_exists" in item:
+            source_state = "源OK" if item.get("source_exists") else "源缺失"
+            target_state = "目标OK" if item.get("target_exists") else "目标缺失"
+            link_state = "已链接" if item.get("linked_to_source") else mode
+            lines.append(f"- {kind} {name}：{source_state} / {target_state} / {link_state}")
+        else:
+            lines.append(f"- {kind} {name}：{mode}")
+        if source and target:
+            lines.append(f"  {source} -> {target}")
+
+    errors = payload.get("errors") or payload.get("verify_errors") or []
+    for error in errors[:max_items]:
+        lines.append(f"问题：{error}")
+    if skill == "matting_pipeline.update":
+        if payload.get("git_output"):
+            last_line = str(payload.get("git_output")).strip().splitlines()[-1:]
+            if last_line:
+                lines.append(f"Git：{last_line[0]}")
+        lines.append("同步完成后请重启 ComfyUI 或用秋叶重载，让 custom node / workflow / lora 全部生效。")
+    elif payload.get("all_ready") is True:
+        lines.append("结论：当前管线资源齐全，可以使用。")
+    elif payload.get("all_ready") is False:
+        lines.append("结论：当前管线还没完全就绪。")
     return lines

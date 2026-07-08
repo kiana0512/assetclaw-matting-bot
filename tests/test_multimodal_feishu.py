@@ -8,6 +8,7 @@ from PIL import Image
 from assetclaw_matting.brain.multimodal_planner import plan_multimodal_task
 from assetclaw_matting.brain.direct_image_planner import plan_direct_image_task
 from assetclaw_matting.brain.direct_video_planner import plan_direct_video_task
+from assetclaw_matting.brain.matting_pipeline_planner import plan_matting_pipeline_task
 from assetclaw_matting.brain.speech_planner import handle_voice_message
 from assetclaw_matting.brain.schemas import BrainMessage
 from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
@@ -379,6 +380,19 @@ def test_direct_image_status_question_routes_without_attachment() -> None:
     assert planned is not None
     tool_calls, _reason = planned
     assert tool_calls[0].skill == "direct_image.status"
+
+
+def test_matting_pipeline_questions_route_to_pipeline_skills() -> None:
+    status = plan_matting_pipeline_task(BrainMessage(conversation_id="conv-pipeline", text="现在用的抠图管线是什么"))
+    verify = plan_matting_pipeline_task(BrainMessage(conversation_id="conv-pipeline", text="验证抠图管线有没有问题"))
+    update = plan_matting_pipeline_task(BrainMessage(conversation_id="conv-pipeline", text="更新抠图管线"))
+
+    assert status is not None
+    assert verify is not None
+    assert update is not None
+    assert status[0][0].skill == "matting_pipeline.status"
+    assert verify[0][0].skill == "matting_pipeline.verify"
+    assert update[0][0].skill == "matting_pipeline.update"
 
 
 def test_direct_video_cherry_runs_per_video_dir(monkeypatch, tmp_path: Path) -> None:

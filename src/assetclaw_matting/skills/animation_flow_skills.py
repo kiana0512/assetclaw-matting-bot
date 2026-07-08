@@ -11,6 +11,7 @@ from typing import Any
 from assetclaw_matting.config import settings
 from assetclaw_matting.runtime_context import get_runtime_context, reset_runtime_context, set_runtime_context
 from assetclaw_matting.skills.frame_skills import default_automation_paths
+from assetclaw_matting.skills import matting_pipeline_skills
 from assetclaw_matting.skills.security import validate_path
 from tools.animation_automation.core import ASSET_KINDS
 from tools.animation_automation.core import build_unity_ready
@@ -82,6 +83,13 @@ def run_start(
     **_: Any,
 ) -> dict[str, Any]:
     selected_mode = _normalize_unity_import_mode(import_mode or unity_import_mode)
+    pipeline_notice = ""
+    if not workflow_path and Path(settings.comfyui_workflow_path).name == settings.matting_pipeline_workflow_name:
+        pipeline = matting_pipeline_skills.ensure_latest_for_task()
+        if not pipeline.get("ok"):
+            raise RuntimeError(str(pipeline.get("error") or "matting pipeline preflight failed"))
+        workflow_path = str(pipeline.get("workflow_path") or "")
+        pipeline_notice = str(pipeline.get("message") or "")
     workflow = _production_workflow_path(workflow_path)
     preview = run_preview(
         date_root=date_root,
@@ -109,6 +117,7 @@ def run_start(
         "unity_import_mode": selected_mode,
         "workflow_path": str(workflow),
         "workflow_name": workflow.name,
+        "pipeline_notice": pipeline_notice,
         "fps": int(fps),
         "notify_interval_seconds": max(30, min(int(notify_interval_seconds), 3600)),
         "allow_p4_writes": bool(allow_p4_writes),
@@ -121,7 +130,8 @@ def run_start(
         "error": "",
     }
     _save(run)
-    _notify(run, "完整动画自动化流程已启动：1-7 步会按顺序推进，P4 submit 永远禁用。")
+    notice = f"\n{pipeline_notice}" if pipeline_notice else ""
+    _notify(run, f"完整动画自动化流程已启动：1-7 步会按顺序推进，P4 submit 永远禁用。{notice}")
     _start_worker(run_id)
     return {"ok": True, "run_id": run_id, **_public(run)}
 
@@ -792,6 +802,7 @@ def _public(run: dict[str, Any]) -> dict[str, Any]:
         "unity_ready": run.get("unity_ready"),
         "workflow_path": run.get("workflow_path") or "",
         "workflow_name": run.get("workflow_name") or (Path(run["workflow_path"]).name if run.get("workflow_path") else ""),
+        "pipeline_notice": run.get("pipeline_notice") or "",
         "unity_project": run.get("unity_project"),
         "unity_import_mode": run.get("unity_import_mode") or "import",
         "priority_characters": run.get("priority_characters") or [],

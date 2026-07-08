@@ -7,6 +7,7 @@ from assetclaw_matting.brain.direct_image_planner import plan_direct_image_task
 from assetclaw_matting.brain.direct_video_planner import plan_direct_video_task
 from assetclaw_matting.brain.file_task_planner import plan_file_task
 from assetclaw_matting.brain.life_planner import plan_life_task
+from assetclaw_matting.brain.matting_pipeline_planner import plan_matting_pipeline_task
 from assetclaw_matting.brain.multimodal_planner import answer_recent_image_question, plan_multimodal_task
 from assetclaw_matting.brain.result_formatter import format_skill_results
 from assetclaw_matting.brain.schemas import BrainMessage, BrainResponse, ToolCall
@@ -40,6 +41,10 @@ def handle_pre_llm_message(provider: PreRouterProvider, message: BrainMessage) -
     direct_image = plan_direct_image_task(message)
     if direct_image:
         return _planned_response(provider, message, direct_image)
+
+    matting_pipeline = plan_matting_pipeline_task(message)
+    if matting_pipeline:
+        return _planned_response(provider, message, matting_pipeline)
 
     animation_flow = _plan_animation_flow(message)
     if animation_flow:

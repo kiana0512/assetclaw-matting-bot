@@ -51,3 +51,12 @@ def test_direct_image_skills_registered_without_confirmation() -> None:
     assert get_skill_meta("direct_image.status")["requires_confirmation"] is False
     assert get_skill_meta("direct_image.resume_postprocess")["requires_confirmation"] is False
     assert get_skill_meta("direct_image.start")["domain"] == "direct_image"
+
+
+def test_matting_pipeline_skills_registered() -> None:
+    from assetclaw_matting.skills.registry import get_skill_meta
+
+    assert get_skill_meta("matting_pipeline.status")["requires_confirmation"] is False
+    assert get_skill_meta("matting_pipeline.verify")["requires_confirmation"] is False
+    assert get_skill_meta("matting_pipeline.update")["requires_confirmation"] is True
+    assert get_skill_meta("matting_pipeline.update")["domain"] == "matting_pipeline"

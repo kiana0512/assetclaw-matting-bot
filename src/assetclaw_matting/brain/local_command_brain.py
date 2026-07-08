@@ -85,6 +85,12 @@ class LocalCommandBrain(BrainProvider):
             return [ToolCall(skill="bot.status", arguments={})]
         if any(kw in text for kw in ("最近错误", "查看错误", "recent errors", "错误记录")):
             return [ToolCall(skill="bot.errors", arguments={})]
+        if _mentions_matting_pipeline(text):
+            if any(kw in text for kw in ("更新", "拉最新", "同步最新", "升级", "pull", "update")):
+                return [ToolCall(skill="matting_pipeline.update", arguments={})]
+            if any(kw in text for kw in ("验证", "检查", "校验", "verify", "有没有问题", "是否正常")):
+                return [ToolCall(skill="matting_pipeline.verify", arguments={})]
+            return [ToolCall(skill="matting_pipeline.status", arguments={})]
         p4_calls = _p4_tool_calls_from_text(text)
         if p4_calls:
             return p4_calls
@@ -635,6 +641,29 @@ def _frame_args_from_paths(paths: list[str], text: str) -> dict:
     if threshold_match:
         args["diff_threshold"] = float(threshold_match.group(1))
     return args
+
+
+def _mentions_matting_pipeline(text: str) -> bool:
+    lowered = text.lower()
+    if "imageclip" in lowered or "cherry_lizi" in lowered:
+        return True
+    return any(
+        kw in text
+        for kw in (
+            "抠图管线",
+            "抠图工作流",
+            "管线版本",
+            "工作流版本",
+            "当前管线",
+            "当前工作流",
+            "现在用的管线",
+            "现在用的工作流",
+            "ComfyUI管线",
+            "ComfyUI 管线",
+            "ComfyUI工作流",
+            "ComfyUI 工作流",
+        )
+    )
 
 
 def _pipeline_args_from_paths(paths: list[str]) -> dict:

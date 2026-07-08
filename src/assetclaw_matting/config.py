@@ -120,9 +120,15 @@ class Settings(BaseSettings):
     comfyui_dir: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3/ComfyUI")
     comfyui_python_dir: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3/python")
     comfyui_url: str = "http://127.0.0.1:8188"
-    comfyui_workflow_path: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3/ComfyUI/user/default/workflows/软边缘抠图-动画专属.json")
+    comfyui_workflow_path: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3/ComfyUI/user/default/workflows/ImageClip.json")
     comfyui_timeout_seconds: int = 600
     comfyui_poll_interval_seconds: int = 2
+    matting_pipeline_repo_url: str = "git@gitlab.lilithgame.com:rd_center/ai_art/imageclip.git"
+    matting_pipeline_repo_dir: Path = Path("E:/imageclip-pipeline/imageclip")
+    matting_pipeline_branch: str = "main"
+    matting_pipeline_workflow_name: str = "ImageClip.json"
+    matting_pipeline_lora_name: str = "Koutu_Flux2klein_v2_000007250.safetensors"
+    matting_pipeline_custom_node_name: str = "Cherry_lizi"
 
     default_batch_input_dir: Path = Path("E:/assetclaw-matting-bot/storage/batch_inputs")
     default_batch_output_dir: Path = Path("E:/assetclaw-matting-bot/storage/batch_outputs")

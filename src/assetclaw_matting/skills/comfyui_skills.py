@@ -13,6 +13,7 @@ from typing import Any
 
 from assetclaw_matting.comfyui.output_resolver import inspect_local_png, resolve_best_output
 from assetclaw_matting.comfyui.workflow_patch import find_primary_save_image_node_id, inspect_workflow, patch_load_image, patch_node_input, prepare_api_prompt_for_run
+from assetclaw_matting.skills import matting_pipeline_skills
 from assetclaw_matting.skills.media_skills import IMAGE_EXTS
 from assetclaw_matting.skills.security import validate_path
 
@@ -107,7 +108,15 @@ def run_start(
 
     if not input_dir or not output_dir:
         raise ValueError("input_dir and output_dir are required")
-    workflow_file = _resolve_workflow_path(workflow_path or _selected_workflow_path() or str(settings.comfyui_workflow_path))
+    selected_workflow = _selected_workflow_path()
+    pipeline_notice = ""
+    if not workflow_path and not selected_workflow and Path(settings.comfyui_workflow_path).name == settings.matting_pipeline_workflow_name:
+        pipeline = matting_pipeline_skills.ensure_latest_for_task()
+        if not pipeline.get("ok"):
+            raise RuntimeError(str(pipeline.get("error") or "matting pipeline preflight failed"))
+        workflow_path = str(pipeline.get("workflow_path") or "")
+        pipeline_notice = str(pipeline.get("message") or "")
+    workflow_file = _resolve_workflow_path(workflow_path or selected_workflow or str(settings.comfyui_workflow_path))
     src = validate_path(input_dir, must_exist=True)
     dst = validate_path(output_dir, must_exist=False)
     if not src.is_dir():
@@ -137,6 +146,7 @@ def run_start(
         "prompt_map": prompt_map,
         "chat_id": (ctx.get("chat_id") or "") if ctx.get("channel") == "feishu" else "",
         "archived": False,
+        "pipeline_notice": pipeline_notice,
     }
     if not settings.comfyui_fake_mode:
         comfyui_client.check_health()
@@ -165,7 +175,8 @@ def run_start(
         )
 
     if options.get("chat_id") and files:
-        _notify(run_id, f"ComfyUI 批量任务已启动：{len(files)} 张\n输入：{src}\n输出：{dst}")
+        notice = f"\n{pipeline_notice}" if pipeline_notice else ""
+        _notify(run_id, f"ComfyUI 批量任务已启动：{len(files)} 张{notice}\n输入：{src}\n输出：{dst}")
         _start_progress_monitor(run_id)
     if files:
         _start_run_worker(run_id)
@@ -176,6 +187,7 @@ def run_start(
         "status": status,
         "fake_mode": settings.comfyui_fake_mode,
         "workflow_path": str(workflow_file),
+        "pipeline_notice": pipeline_notice,
         "input_dir": str(src),
         "output_dir": str(dst),
         "total": len(files),

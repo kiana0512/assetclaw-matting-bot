@@ -15,6 +15,7 @@ from PIL import Image
 
 from assetclaw_matting.config import settings
 from assetclaw_matting.runtime_context import get_runtime_context
+from assetclaw_matting.skills import matting_pipeline_skills
 from assetclaw_matting.skills.media_skills import VIDEO_EXTS
 from assetclaw_matting.skills.security import validate_path
 
@@ -37,6 +38,13 @@ def start(
     if not video_paths:
         raise ValueError("video_paths is required")
     videos = [_validate_video(path) for path in video_paths]
+    pipeline_notice = ""
+    if not workflow_path and Path(settings.comfyui_workflow_path).name == settings.matting_pipeline_workflow_name:
+        pipeline = matting_pipeline_skills.ensure_latest_for_task()
+        if not pipeline.get("ok"):
+            raise RuntimeError(str(pipeline.get("error") or "matting pipeline preflight failed"))
+        workflow_path = str(pipeline.get("workflow_path") or "")
+        pipeline_notice = str(pipeline.get("message") or "")
     names = list(source_names or [])
     run_id = "VID_" + uuid.uuid4().hex[:12].upper()
     run_dir = RUNS_ROOT / run_id
@@ -86,13 +94,15 @@ def start(
         "fps": int(fps),
         "max_frames": int(max_frames or 0),
         "workflow_path": workflow_path or "",
+        "pipeline_notice": pipeline_notice,
         "notify_interval_seconds": max(30, min(int(notify_interval_seconds or 60), 3600)),
         "zip_path": "",
         "error": "",
         "log": [],
     }
     _save(run)
-    _notify(run, f"动画处理任务已开始：{run_id}\n视频：{len(copied)} 个\n步骤：抽帧 -> ComfyUI 抠图 -> Cherry 后处理 -> zip 回传")
+    notice = f"\n{pipeline_notice}" if pipeline_notice else ""
+    _notify(run, f"动画处理任务已开始：{run_id}\n视频：{len(copied)} 个{notice}\n步骤：抽帧 -> ComfyUI 抠图 -> Cherry 后处理 -> zip 回传")
     _start_worker(run_id)
     return {"ok": True, "run_id": run_id, **_public(run)}
 
@@ -481,6 +491,7 @@ def _public(run: dict[str, Any]) -> dict[str, Any]:
         "children": run.get("children") or {},
         "fps": run.get("fps"),
         "zip_path": run.get("zip_path") or "",
+        "pipeline_notice": run.get("pipeline_notice") or "",
         "error": run.get("error") or "",
         "last_log": (run.get("log") or [{}])[-1].get("message", ""),
         "run_dir": str(_run_dir(run)),
