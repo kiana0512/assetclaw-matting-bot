@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     brain_memory_enabled: bool = True
     brain_memory_recent_messages: int = 8
     brain_memory_compact_enabled: bool = True
+    brain_memory_compact_notify_feishu: bool = True
     brain_memory_compact_after_messages: int = 20
     brain_memory_compact_keep_messages: int = 8
     brain_memory_compact_max_chars: int = 2400
@@ -70,11 +71,14 @@ class Settings(BaseSettings):
     feishu_admin_open_ids: str = ""
     feishu_allowed_open_ids: str = ""
     feishu_allowed_chat_ids: str = ""
+    feishu_progress_reaction_enabled: bool = True
+    feishu_progress_reaction_emoji_types: str = "敲键盘;keyboard;KEYBOARD;OK;THUMBSUP"
     bot_require_confirmation_for_write: bool = False
     bot_error_push_enabled: bool = True
     bot_emotional_replies_enabled: bool = True
     bot_sticker_dir: Path = Path("E:/assetclaw-matting-bot/miratsu_stickers")
-    bot_sticker_probability: float = 1.0
+    bot_sticker_probability: float = 0.12
+    bot_sticker_cooldown_seconds: int = 600
     bot_sticker_max_bytes: int = 8_000_000
     bot_sticker_send_max_px: int = 240
     bot_sticker_extensions: str = ".png;.gif"
@@ -129,6 +133,10 @@ class Settings(BaseSettings):
     matting_pipeline_workflow_name: str = "ImageClip.json"
     matting_pipeline_lora_name: str = "Koutu_Flux2klein_v2_000007250.safetensors"
     matting_pipeline_custom_node_name: str = "Cherry_lizi"
+    cherry_html_runner_enabled: bool = True
+    cherry_postprocess_html_path: Path = Path("E:/imageclip-pipeline/imageclip/cherry-postprocess.html")
+    cherry_browser_path: Path | None = None
+    cherry_html_timeout_seconds: int = 900
 
     default_batch_input_dir: Path = Path("E:/assetclaw-matting-bot/storage/batch_inputs")
     default_batch_output_dir: Path = Path("E:/assetclaw-matting-bot/storage/batch_outputs")

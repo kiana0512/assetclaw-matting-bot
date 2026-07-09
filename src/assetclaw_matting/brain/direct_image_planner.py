@@ -7,7 +7,18 @@ from assetclaw_matting.brain.schemas import BrainMessage, ToolCall
 from assetclaw_matting.skills.media_skills import IMAGE_EXTS
 
 
-STATUS_WORDS = ("图片处理进度", "图处理进度", "这张图处理", "这个图片处理", "直传图片进度")
+STATUS_WORDS = (
+    "图片处理进度",
+    "图处理进度",
+    "这张图处理",
+    "这个图片处理",
+    "直传图片进度",
+    "进度如何",
+    "进度怎么样",
+    "进度咋样",
+    "到哪了",
+    "处理到哪",
+)
 
 
 def plan_direct_image_task(message: BrainMessage) -> tuple[list[ToolCall], str] | tuple[None, str] | None:

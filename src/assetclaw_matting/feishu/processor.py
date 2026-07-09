@@ -94,6 +94,8 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
                 event.chat_id,
                 _processing_ack_text(event),
             )
+        if _is_progress_query(event.text):
+            _try_add_progress_reaction(event)
 
         if settings.agent_queue_enabled:
             from assetclaw_matting.services.agent_job_queue import enqueue_brain_job
@@ -270,9 +272,9 @@ def _try_handle_confirmation(
     from assetclaw_matting.skills.registry import call_skill
 
     if len(pending_items) == 1:
-        pending_text = f"确认收到，正在执行：{pending_items[0]['skill']}（{pending_items[0]['id']}）"
+        pending_text = "收到，开始处理。"
     else:
-        pending_text = f"确认收到，正在执行 {len(pending_items)} 个操作。"
+        pending_text = f"收到，开始处理 {len(pending_items)} 个任务。"
     _try_reply(event.message_id, event.chat_id, pending_text)
     context_token = set_runtime_context(
         channel="feishu",
@@ -366,6 +368,27 @@ def _try_send_chat(chat_id: str, text: str) -> None:
         feishu_client.send_text_to_chat(chat_id, text)
     except Exception as exc:
         log.error("send to chat failed: %s", redact_secrets(str(exc)))
+
+
+def _try_add_progress_reaction(event: FeishuMessageEvent) -> None:
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.feishu.client import feishu_client
+
+    if not bool(getattr(settings, "feishu_progress_reaction_enabled", True)):
+        return
+    if not event.message_id:
+        return
+    emoji_types = [
+        item.strip()
+        for item in str(getattr(settings, "feishu_progress_reaction_emoji_types", "") or "").split(";")
+        if item.strip()
+    ]
+    for emoji_type in emoji_types:
+        try:
+            if feishu_client.add_message_reaction(event.message_id, emoji_type):
+                return
+        except Exception as exc:
+            log.debug("add progress reaction failed emoji=%s error=%s", emoji_type, redact_secrets(str(exc)))
 
 
 def _try_send_emotional_sticker(chat_id: str, message_text: str, reply_text: str) -> None:
@@ -606,9 +629,11 @@ def _is_simple_greeting(text: str) -> bool:
 
 def _should_send_processing_ack(event: FeishuMessageEvent) -> bool:
     if event.attachments:
-        return True
+        return _has_audio_attachment(event) and not _is_direct_media_attachment_event(event)
     text = (event.text or "").strip()
     if not text:
+        return False
+    if _is_progress_query(text):
         return False
     try:
         from assetclaw_matting.brain.emotion_planner import plan_emotional_reply
@@ -620,17 +645,54 @@ def _should_send_processing_ack(event: FeishuMessageEvent) -> bool:
     return True
 
 
+def _is_progress_query(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", text or "")
+    return any(
+        keyword in normalized
+        for keyword in (
+            "进度",
+            "状态",
+            "到哪",
+            "哪里了",
+            "做到哪",
+            "跑到哪",
+            "处理到哪",
+            "完成了吗",
+            "好了吗",
+        )
+    )
+
+
+def _is_direct_media_attachment_event(event: FeishuMessageEvent) -> bool:
+    if not event.attachments:
+        return False
+    try:
+        from assetclaw_matting.skills.media_skills import IMAGE_EXTS, VIDEO_EXTS
+    except Exception:
+        IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}  # type: ignore[assignment]
+        VIDEO_EXTS = {".mp4", ".mov", ".avi", ".webm"}  # type: ignore[assignment]
+    media_exts = set(IMAGE_EXTS) | set(VIDEO_EXTS)
+    for item in event.attachments:
+        raw_type = str(item.get("type") or "").lower()
+        if raw_type in {"image", "video", "media"}:
+            return True
+        path = str(item.get("local_path") or item.get("file_name") or "")
+        if Path(path).suffix.lower() in media_exts:
+            return True
+    return False
+
+
 def _processing_ack_text(event: FeishuMessageEvent) -> str:
     if _has_audio_attachment(event):
         suffix = " 如果还要合成语音，我会先发文字结果，再补发语音。"
         if _deepseek_thinking_enabled():
-            return "收到语音了。我会先用本地 ASR 转文字，再让大脑深度思考，通常需要 10-60 秒。" + suffix
-        return "收到语音了。我会先用本地 ASR 转文字，通常 2-8 秒，首次加载模型可能需要 20 秒以上。" + suffix
+            return "收到语音，转文字后处理。" + suffix
+        return "收到语音，转文字中。" + suffix
     if event.attachments:
-        return "附件收到了，我正在下载并分析，通常需要 5-30 秒。"
+        return "附件收到，处理中。"
     if _deepseek_thinking_enabled():
-        return "我收到啦，正在调用 DeepSeek 深度思考，通常需要 10-60 秒。"
-    return "我收到啦，正在处理，通常几秒内回复。"
+        return "收到，思考中。"
+    return "收到，处理中。"
 
 
 def _deepseek_thinking_enabled() -> bool:

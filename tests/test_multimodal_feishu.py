@@ -22,6 +22,7 @@ from assetclaw_matting.feishu.processor import (
     _prepare_attachments,
     _processing_ack_text,
     _should_send_voice_reply,
+    _try_add_progress_reaction,
 )
 
 
@@ -137,6 +138,33 @@ def test_feishu_send_file_falls_back_to_drive_link_on_size_error(monkeypatch, tm
     assert "result.zip" in sent["text"]
     assert "https://lilithgames.feishu.cn/file/token" in sent["text"]
     assert grants == {"file_token": "drive_token", "chat_id": "oc_test", "perm": "full_access"}
+
+
+def test_feishu_client_add_message_reaction(monkeypatch) -> None:
+    from assetclaw_matting.feishu.client import FeishuClient
+
+    calls: list[dict[str, object]] = []
+    client = FeishuClient()
+    monkeypatch.setattr(client, "get_tenant_access_token", lambda: "token")
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"code": 0}
+
+    def fake_post(url: str, headers=None, json=None, timeout=None):
+        calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        return Response()
+
+    monkeypatch.setattr("assetclaw_matting.feishu.client.requests.post", fake_post)
+
+    assert client.add_message_reaction("om_progress", "敲键盘") is True
+    assert calls[0]["url"].endswith("/im/v1/messages/om_progress/reactions")
+    assert calls[0]["json"] == {"reaction_type": {"emoji_type": "敲键盘"}}
 
 
 def test_downloaded_video_rejects_thumbnail_jpeg(tmp_path: Path) -> None:
@@ -382,6 +410,119 @@ def test_direct_image_status_question_routes_without_attachment() -> None:
     assert tool_calls[0].skill == "direct_image.status"
 
 
+def test_generic_progress_question_routes_to_latest_direct_video(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
+    from assetclaw_matting.db.schema import create_tables
+    from assetclaw_matting.db.sqlite import init_db
+    from assetclaw_matting.skills import direct_image_skills, direct_video_skills
+
+    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    create_tables()
+    video_root = tmp_path / "video_runs"
+    image_root = tmp_path / "image_runs"
+    monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", video_root)
+    monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", image_root)
+    (video_root / "VID_NEW").mkdir(parents=True)
+    (image_root / "IMG_OLD").mkdir(parents=True)
+    (video_root / "VID_NEW" / "status.json").write_text(
+        json.dumps(
+            {
+                "id": "VID_NEW",
+                "status": "RUNNING",
+                "stage": "matting",
+                "created_at": "2026-07-09T11:00:00",
+                "updated_at": "2026-07-09T11:10:00",
+                "videos": [{"frame_count": 43, "aspect": "square", "cherry_profile": "half", "cherry_output_size": "256x256"}],
+                "children": {"comfyui": {"completed": 6, "total": 43, "status": "RUNNING"}},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (image_root / "IMG_OLD" / "status.json").write_text(
+        json.dumps(
+            {
+                "id": "IMG_OLD",
+                "status": "DONE",
+                "stage": "done",
+                "created_at": "2026-07-09T10:00:00",
+                "updated_at": "2026-07-09T10:30:00",
+                "images": [],
+                "children": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    response = LocalCommandBrain().handle_message(
+        BrainMessage(text="进度如何了", conversation_id="feishu:oc_progress:ou_progress", user_id="ou_progress")
+    )
+
+    assert response.tool_calls
+    assert response.tool_calls[0].skill == "direct_video.status"
+    assert response.tool_calls[0].arguments["run_id"] == "VID_NEW"
+    assert "当前执行现场" not in response.text
+    assert "VID_NEW" in response.text
+    assert "正方形 256x256×1" in response.text
+
+
+def test_generic_progress_question_routes_to_latest_direct_image(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
+    from assetclaw_matting.db.schema import create_tables
+    from assetclaw_matting.db.sqlite import init_db
+    from assetclaw_matting.skills import direct_image_skills, direct_video_skills
+
+    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    create_tables()
+    video_root = tmp_path / "video_runs"
+    image_root = tmp_path / "image_runs"
+    monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", video_root)
+    monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", image_root)
+    (video_root / "VID_OLD").mkdir(parents=True)
+    (image_root / "IMG_NEW").mkdir(parents=True)
+    (video_root / "VID_OLD" / "status.json").write_text(
+        json.dumps(
+            {
+                "id": "VID_OLD",
+                "status": "DONE",
+                "stage": "done",
+                "created_at": "2026-07-09T10:00:00",
+                "updated_at": "2026-07-09T10:30:00",
+                "videos": [],
+                "children": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (image_root / "IMG_NEW" / "status.json").write_text(
+        json.dumps(
+            {
+                "id": "IMG_NEW",
+                "status": "RUNNING",
+                "stage": "postprocess",
+                "created_at": "2026-07-09T11:00:00",
+                "updated_at": "2026-07-09T11:15:00",
+                "images": [{"aspect": "portrait", "cherry_profile": "full", "cherry_output_size": "384x512"}],
+                "children": {"cherry": {"completed": 0, "total": 1, "status": "RUNNING"}},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    response = LocalCommandBrain().handle_message(
+        BrainMessage(text="进度如何了", conversation_id="feishu:oc_progress_img:ou_progress", user_id="ou_progress")
+    )
+
+    assert response.tool_calls
+    assert response.tool_calls[0].skill == "direct_image.status"
+    assert response.tool_calls[0].arguments["run_id"] == "IMG_NEW"
+    assert "IMG_NEW" in response.text
+    assert "长方形 384x512×1" in response.text
+
+
 def test_matting_pipeline_questions_route_to_pipeline_skills() -> None:
     status = plan_matting_pipeline_task(BrainMessage(conversation_id="conv-pipeline", text="现在用的抠图管线是什么"))
     verify = plan_matting_pipeline_task(BrainMessage(conversation_id="conv-pipeline", text="验证抠图管线有没有问题"))
@@ -408,7 +549,11 @@ def test_direct_video_cherry_runs_per_video_dir(monkeypatch, tmp_path: Path) -> 
 
     def fake_run_start(**kwargs):
         calls.append(kwargs)
-        return {"run_id": f"CHERRY_TEST_{len(calls)}"}
+        size = (256, 256) if kwargs.get("profile") == "half" else (384, 512)
+        return {
+            "run_id": f"CHERRY_TEST_{len(calls)}",
+            "options": {"resize_width": size[0], "resize_height": size[1]},
+        }
 
     def fake_run_status(run_id: str, include_gpu: bool = False):
         return {"ok": True, "run_id": run_id, "status": "DONE", "completed": 1, "total": 1}
@@ -447,6 +592,271 @@ def test_direct_video_cherry_runs_per_video_dir(monkeypatch, tmp_path: Path) -> 
 
     assert [Path(str(call["input_dir"])).name for call in calls] == ["video_01", "video_02"]
     assert [call["profile"] for call in calls] == ["half", "full"]
+    assert [item["cherry_output_size"] for item in run["videos"]] == ["256x256", "384x512"]
+
+
+def test_direct_image_cherry_profile_and_size_are_recorded(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.skills import direct_image_skills
+
+    matte_one = tmp_path / "run" / "matte" / "image_01"
+    matte_two = tmp_path / "run" / "matte" / "image_02"
+    matte_one.mkdir(parents=True, exist_ok=True)
+    matte_two.mkdir(parents=True, exist_ok=True)
+    Image.new("RGBA", (4, 4), (255, 0, 0, 255)).save(matte_one / "0000.png")
+    Image.new("RGBA", (4, 4), (0, 255, 0, 255)).save(matte_two / "0000.png")
+    calls: list[dict[str, object]] = []
+
+    def fake_run_start(**kwargs):
+        calls.append(kwargs)
+        size = (256, 256) if kwargs.get("profile") == "half" else (384, 512)
+        return {
+            "run_id": f"CHERRY_IMG_{len(calls)}",
+            "options": {"resize_width": size[0], "resize_height": size[1]},
+        }
+
+    def fake_run_status(run_id: str, include_gpu: bool = False):
+        return {"ok": True, "run_id": run_id, "status": "DONE", "completed": 1, "total": 1}
+
+    monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", tmp_path)
+    monkeypatch.setattr("assetclaw_matting.skills.cherry_skills.run_start", fake_run_start)
+    monkeypatch.setattr("assetclaw_matting.skills.cherry_skills.run_status", fake_run_status)
+
+    run = {
+        "id": "IMG_TEST_CHERRY",
+        "status": "RUNNING",
+        "stage": "postprocess",
+        "updated_at": "",
+        "children": {},
+        "notify_interval_seconds": 60,
+        "chat_id": "",
+        "images": [
+            {
+                "index": 1,
+                "matte_dir": str(matte_one),
+                "smooth_dir": str(tmp_path / "run" / "smooth" / "image_01"),
+                "aspect": "square",
+                "cherry_profile": "half",
+            },
+            {
+                "index": 2,
+                "matte_dir": str(matte_two),
+                "smooth_dir": str(tmp_path / "run" / "smooth" / "image_02"),
+                "aspect": "portrait",
+                "cherry_profile": "full",
+            },
+        ],
+        "log": [],
+    }
+
+    direct_image_skills._run_cherry(run)
+
+    assert [call["profile"] for call in calls] == ["half", "full"]
+    assert [item["cherry_output_size"] for item in run["images"]] == ["256x256", "384x512"]
+
+
+def test_direct_image_start_uses_exact_square_rule(monkeypatch) -> None:
+    from assetclaw_matting.skills import direct_image_skills
+
+    root = Path("E:/assetclaw-matting-bot/storage/debug/test_direct_image_exact")
+    src = root / "src"
+    src.mkdir(parents=True, exist_ok=True)
+    square = src / "square.png"
+    near_square = src / "near_square.png"
+    Image.new("RGBA", (100, 100), (255, 0, 0, 255)).save(square)
+    Image.new("RGBA", (100, 108), (0, 255, 0, 255)).save(near_square)
+
+    monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", root / "runs")
+    monkeypatch.setattr(direct_image_skills, "_start_worker", lambda _run_id: None)
+
+    result = direct_image_skills.start(
+        [str(square), str(near_square)],
+        source_names=[square.name, near_square.name],
+        workflow_path="E:/assetclaw-matting-bot/workflows/test.json",
+    )
+
+    assert [item["aspect"] for item in result["images"]] == ["square", "portrait"]
+    assert [item["cherry_output_size"] for item in result["images"]] == ["256x256", "384x512"]
+
+
+def test_direct_image_send_results_uses_file_attachment(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.feishu.client import feishu_client
+    from assetclaw_matting.skills import direct_image_skills
+
+    smooth = tmp_path / "smooth" / "image_01"
+    smooth.mkdir(parents=True, exist_ok=True)
+    result_image = smooth / "0000.png"
+    Image.new("RGBA", (256, 256), (255, 0, 0, 255)).save(result_image)
+    calls: list[tuple[str, Path, str]] = []
+
+    def fake_send_file(chat_id: str, path: Path, file_name: str) -> dict[str, object]:
+        calls.append((chat_id, Path(path), file_name))
+        return {"ok": True}
+
+    monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(feishu_client, "send_file_to_chat", fake_send_file)
+    run = {
+        "id": "IMG_SEND_TEST",
+        "chat_id": "oc_test",
+        "updated_at": "",
+        "images": [{"smooth_dir": str(smooth), "name": "source.png"}],
+        "log": [],
+    }
+
+    sent = direct_image_skills._send_results(run)
+
+    assert sent == [str(result_image)]
+    assert calls == [("oc_test", result_image, "source_processed.png")]
+    assert run["images"][0]["result_path"] == str(result_image)
+
+
+def test_direct_video_zip_contains_required_sections(monkeypatch, tmp_path: Path) -> None:
+    import zipfile
+
+    from assetclaw_matting.skills import direct_video_skills
+
+    monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", tmp_path / "runs")
+    run = {
+        "id": "VID_ZIP_TEST",
+        "status": "RUNNING",
+        "stage": "zip",
+        "videos": [],
+        "children": {},
+        "log": [],
+    }
+    run_dir = direct_video_skills._run_dir(run)
+    for folder, name in [
+        ("original_videos", "source.mp4"),
+        ("frames/video_01", "0000.png"),
+        ("matte/video_01", "0000.png"),
+        ("smooth/video_01", "0000.png"),
+    ]:
+        path = run_dir / folder / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+
+    zip_path = direct_video_skills._make_zip(run)
+
+    with zipfile.ZipFile(zip_path) as archive:
+        names = set(archive.namelist())
+    assert "manifest.json" in names
+    assert "original_videos/source.mp4" in names
+    assert "frames/video_01/0000.png" in names
+    assert "matte/video_01/0000.png" in names
+    assert "smooth/video_01/0000.png" in names
+
+
+def test_direct_status_formatter_includes_cherry_plan() -> None:
+    from assetclaw_matting.brain.result_formatter import format_skill_results
+
+    result = {
+        "ok": True,
+        "skill": "direct_video.status",
+        "result": {
+            "ok": True,
+            "run_id": "VID_TEST",
+            "status": "RUNNING",
+            "stage": "matting",
+            "videos": [
+                {"frame_count": 10, "aspect": "square", "cherry_profile": "half", "cherry_output_size": "256x256"},
+                {"frame_count": 12, "aspect": "portrait", "cherry_profile": "full", "cherry_output_size": "384x512"},
+            ],
+            "children": {"comfyui": {"completed": 1, "total": 22, "status": "RUNNING"}},
+        },
+    }
+
+    text = format_skill_results([result])
+
+    assert "⌨️ VID_TEST" in text
+    assert "正方形 256x256×1，长方形 384x512×1" in text
+
+
+def test_progress_question_adds_message_reaction(monkeypatch) -> None:
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.feishu import client as feishu_client_module
+
+    calls: list[tuple[str, str]] = []
+
+    class Client:
+        def add_message_reaction(self, message_id: str, emoji_type: str) -> bool:
+            calls.append((message_id, emoji_type))
+            return True
+
+    monkeypatch.setattr(settings, "feishu_progress_reaction_enabled", True)
+    monkeypatch.setattr(settings, "feishu_progress_reaction_emoji_types", "敲键盘;keyboard")
+    monkeypatch.setattr(feishu_client_module, "feishu_client", Client())
+    event = FeishuMessageEvent(
+        trace_id="trace-progress-reaction",
+        event_id="evt-progress-reaction",
+        message_id="om-progress-reaction",
+        chat_id="oc-progress-reaction",
+        chat_type="p2p",
+        open_id="ou-progress-reaction",
+        user_id="ou-progress-reaction",
+        text="进度如何",
+    )
+
+    _try_add_progress_reaction(event)
+
+    assert calls == [("om-progress-reaction", "敲键盘")]
+
+
+def test_progress_question_does_not_send_processing_ack() -> None:
+    from assetclaw_matting.feishu.processor import _should_send_processing_ack
+
+    event = FeishuMessageEvent(
+        trace_id="trace-progress",
+        event_id="evt-progress",
+        message_id="om-progress",
+        chat_id="oc-progress",
+        chat_type="p2p",
+        open_id="ou-progress",
+        user_id="ou-progress",
+        text="进度如何",
+    )
+
+    assert _should_send_processing_ack(event) is False
+
+
+def test_direct_media_attachment_does_not_send_default_ack() -> None:
+    from assetclaw_matting.feishu.processor import _should_send_processing_ack
+
+    event = FeishuMessageEvent(
+        trace_id="trace-image-ack",
+        event_id="evt-image-ack",
+        message_id="om-image-ack",
+        chat_id="oc-image-ack",
+        chat_type="p2p",
+        open_id="ou-image-ack",
+        user_id="ou-image-ack",
+        text="",
+        attachments=[{"type": "image", "file_name": "source.png", "local_path": "E:/tmp/source.png"}],
+    )
+
+    assert _should_send_processing_ack(event) is False
+
+
+def test_direct_image_start_formatter_mentions_postprocess_preset() -> None:
+    from assetclaw_matting.brain.result_formatter import format_skill_results
+
+    text = format_skill_results(
+        [
+            {
+                "ok": True,
+                "skill": "direct_image.start",
+                "result": {
+                    "ok": True,
+                    "run_id": "IMG_TEST",
+                    "images": [
+                        {"aspect": "portrait", "cherry_profile": "full", "cherry_output_size": "384x512"},
+                    ],
+                    "pipeline_notice": "已确认最新",
+                },
+            }
+        ]
+    )
+
+    assert "已启动 IMG_TEST" in text
+    assert "后处理：长方形 384x512×1" in text
 
 
 def test_multimodal_planner_previews_image() -> None:
@@ -686,7 +1096,7 @@ def test_processing_ack_text_for_voice_and_deepseek(monkeypatch) -> None:
         attachments=[{"type": "audio", "file_name": "voice.wav"}],
     )
     monkeypatch.setattr(settings, "brain_provider", "local_command")
-    assert "本地 ASR" in _processing_ack_text(voice_event)
+    assert "转文字中" in _processing_ack_text(voice_event)
     assert "先发文字结果" in _processing_ack_text(voice_event)
 
     text_event = FeishuMessageEvent(
@@ -702,4 +1112,4 @@ def test_processing_ack_text_for_voice_and_deepseek(monkeypatch) -> None:
     )
     monkeypatch.setattr(settings, "brain_provider", "deepseek")
     monkeypatch.setattr(settings, "deepseek_thinking_type", "enabled")
-    assert "DeepSeek 深度思考" in _processing_ack_text(text_event)
+    assert _processing_ack_text(text_event) == "收到，思考中。"

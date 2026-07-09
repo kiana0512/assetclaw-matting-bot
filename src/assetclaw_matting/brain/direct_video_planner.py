@@ -8,7 +8,18 @@ from assetclaw_matting.skills.media_skills import VIDEO_EXTS
 
 
 START_WORDS = ("动画处理", "开始处理", "处理视频", "处理动画", "抽帧", "抠图", "后处理", "开始")
-STATUS_WORDS = ("动画处理进度", "视频处理进度", "直传视频进度", "这个视频处理", "这个动画处理")
+STATUS_WORDS = (
+    "动画处理进度",
+    "视频处理进度",
+    "直传视频进度",
+    "这个视频处理",
+    "这个动画处理",
+    "进度如何",
+    "进度怎么样",
+    "进度咋样",
+    "到哪了",
+    "处理到哪",
+)
 RESEND_WORDS = ("重发zip", "重发 zip", "重新发zip", "重新发 zip", "发回zip", "发回 zip", "zip再发", "zip 再发")
 
 

@@ -43,6 +43,7 @@ $runtimeDirs = @(
   "storage\agent_jobs",
   "storage\animation_flow_runner",
   "storage\animation_flow_runs",
+  "storage\cherry_html_runner",
   "storage\custom_pipeline_runs",
   "storage\direct_image_runs",
   "storage\direct_video_runs",

@@ -45,7 +45,7 @@ def test_brain_messages_auto_compact(monkeypatch) -> None:
     assert "Recent conversation" in prompt
 
 
-def test_compaction_sends_feishu_hint(monkeypatch) -> None:
+def test_compaction_sends_short_feishu_hint(monkeypatch) -> None:
     from assetclaw_matting.config import settings
     from assetclaw_matting.feishu.client import feishu_client
     from assetclaw_matting.runtime_context import reset_runtime_context, set_runtime_context
@@ -53,6 +53,7 @@ def test_compaction_sends_feishu_hint(monkeypatch) -> None:
     conversation_id = "compact-notify-test"
     sent: list[str] = []
     monkeypatch.setattr(settings, "brain_memory_compact_enabled", True)
+    monkeypatch.setattr(settings, "brain_memory_compact_notify_feishu", True)
     monkeypatch.setattr(settings, "brain_memory_compact_after_messages", 3)
     monkeypatch.setattr(settings, "brain_memory_compact_keep_messages", 2)
     monkeypatch.setattr(feishu_client, "send_text_to_chat", lambda chat_id, text: sent.append(text))
@@ -73,4 +74,4 @@ def test_compaction_sends_feishu_hint(monkeypatch) -> None:
     finally:
         reset_runtime_context(token)
 
-    assert any("自动整理" in item for item in sent)
+    assert sent == ["上下文已整理，会继续接着聊。"]

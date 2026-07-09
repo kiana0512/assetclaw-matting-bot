@@ -35,6 +35,7 @@ def test_sticker_status_and_choose(monkeypatch, tmp_path: Path) -> None:
     assert status["count"] == 2
     assert sticker_service.choose_sticker(reply_text="完成了") is not None
     assert sticker_service.choose_sticker(reply_text="收到，处理中。") is None
+    assert sticker_service.choose_sticker(reply_text="动画处理进度：VID_TEST\n状态：RUNNING / matting") is None
 
 
 def test_sticker_registry_router_and_formatter(monkeypatch, tmp_path: Path) -> None:
@@ -75,6 +76,30 @@ def test_sticker_send_random_uses_feishu_context(monkeypatch, tmp_path: Path) ->
 
     assert result["ok"] is True
     assert result["result"]["sent"] is True
+    assert sent == [("chat-test", path)]
+
+
+def test_auto_sticker_respects_chat_cooldown(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "a.png"
+    path.write_bytes(b"png")
+    sent: list[tuple[str, Path]] = []
+
+    monkeypatch.setattr(settings, "bot_sticker_dir", tmp_path)
+    monkeypatch.setattr(settings, "bot_sticker_extensions", ".png")
+    monkeypatch.setattr(settings, "bot_sticker_probability", 1.0)
+    monkeypatch.setattr(settings, "bot_sticker_cooldown_seconds", 600)
+    sticker_service._LAST_SENT_AT_BY_CHAT.clear()
+
+    from assetclaw_matting.feishu.client import feishu_client
+
+    monkeypatch.setattr(feishu_client, "send_image_to_chat", lambda chat_id, target: sent.append((chat_id, target)))
+
+    first = sticker_service.send_sticker_to_chat("chat-test", reply_text="任务完成了")
+    second = sticker_service.send_sticker_to_chat("chat-test", reply_text="又完成了")
+
+    assert first["sent"] is True
+    assert second["sent"] is False
+    assert second["reason"] == "cooldown"
     assert sent == [("chat-test", path)]
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
 from assetclaw_matting.brain.conversation_recall import answer_recent_question
@@ -33,6 +34,10 @@ class PreRouterProvider(Protocol):
 
 def handle_pre_llm_message(provider: PreRouterProvider, message: BrainMessage) -> BrainResponse | None:
     text = message.text.strip()
+
+    direct_progress = _plan_direct_media_progress(message)
+    if direct_progress:
+        return _planned_response(provider, message, direct_progress)
 
     direct_video = plan_direct_video_task(message)
     if direct_video:
@@ -91,6 +96,62 @@ def handle_pre_llm_message(provider: PreRouterProvider, message: BrainMessage) -
         return _planned_response(provider, message, planned)
 
     return None
+
+
+def _plan_direct_media_progress(message: BrainMessage) -> tuple[list[ToolCall], str] | None:
+    text = message.text.strip()
+    if not _is_generic_direct_progress_query(text):
+        return None
+    from assetclaw_matting.skills import direct_image_skills, direct_video_skills
+
+    candidates: list[tuple[str, dict]] = []
+    for kind, status_fn in (("video", direct_video_skills.status), ("image", direct_image_skills.status)):
+        try:
+            payload = status_fn()
+        except Exception:
+            continue
+        if payload.get("ok") and payload.get("run_id"):
+            candidates.append((kind, payload))
+    if not candidates:
+        return None
+    active = [item for item in candidates if str(item[1].get("status") or "") not in {"DONE", "FAILED", "CANCELED", "DONE_WITH_ERRORS"}]
+    selected = max(active or candidates, key=lambda item: _timestamp_score(str(item[1].get("updated_at") or item[1].get("created_at") or "")))
+    kind, payload = selected
+    skill = "direct_video.status" if kind == "video" else "direct_image.status"
+    return [ToolCall(skill=skill, arguments={"run_id": payload.get("run_id")})], f"latest direct {kind} progress route"
+
+
+def _is_generic_direct_progress_query(text: str) -> bool:
+    normalized = "".join((text or "").split())
+    if not normalized:
+        return False
+    if any(word in normalized for word in ("GPU", "显卡", "显存", "机器", "当前所有任务", "执行现场", "有哪些任务", "什么情况")):
+        return False
+    return any(
+        word in normalized
+        for word in (
+            "进度如何",
+            "进度怎么样",
+            "进度咋样",
+            "处理进度",
+            "到哪了",
+            "哪里了",
+            "做到哪",
+            "处理到哪",
+            "跑到哪",
+            "完成了吗",
+            "好了吗",
+        )
+    )
+
+
+def _timestamp_score(value: str) -> float:
+    if not value:
+        return 0.0
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
 
 
 def _plan_animation_flow(message: BrainMessage) -> tuple[list[ToolCall], str] | None:

@@ -516,27 +516,12 @@ def _format_shared_matting(payload: dict[str, Any]) -> list[str]:
 
 def _format_cherry_run_preview(payload: dict[str, Any], max_items: int) -> list[str]:
     options = payload.get("options") or {}
-    steps = []
-    if options.get("use_denoise"):
-        steps.append(f"去噪 阈值{options.get('denoise_threshold')} 半径{options.get('denoise_radius')}")
-    if options.get("use_blur"):
-        steps.append(f"模糊白叠加 半径{options.get('blur_radius')} 强度{options.get('blur_sigma')}")
-    if options.get("use_resize1"):
-        steps.append(f"缩小① {options.get('resize1_width')}x{options.get('resize1_height')}")
-    if options.get("use_sharp1"):
-        steps.append(f"锐化① 强度{options.get('sharp1_amount')}")
-    if options.get("use_resize2"):
-        steps.append(f"缩小② {options.get('resize2_width')}x{options.get('resize2_height')}")
-    if options.get("use_sharp2"):
-        steps.append(f"锐化② 强度{options.get('sharp2_amount')}")
-    if options.get("use_smooth"):
-        steps.append(f"时序平滑 窗口{options.get('smooth_window')} 强度{options.get('smooth_sigma')}")
+    size = f"{options.get('resize_width') or options.get('resize2_width')}x{options.get('resize_height') or options.get('resize2_height')}"
+    modules = options.get("html_modules") or []
     lines = [
         "Cherry 任务预览：",
-        f"输入：{payload.get('input_dir')}",
-        f"输出：{payload.get('output_dir')}",
         f"图片：{payload.get('total', 0)} 张，序列：{payload.get('sequence_count', 0)} 组",
-        "处理：" + ("、".join(steps) if steps else "无"),
+        f"预设：HTML / {size} / {'/'.join(modules) if modules else '默认模块'}",
     ]
     samples = payload.get("sample_inputs") or []
     if samples:
@@ -547,26 +532,27 @@ def _format_cherry_run_preview(payload: dict[str, Any], max_items: int) -> list[
 
 
 def _format_cherry_run_status(payload: dict[str, Any]) -> list[str]:
-    lines = [
-        f"Cherry 任务：{payload.get('run_id')}",
-        f"状态：{payload.get('status')}",
-        f"进度：{payload.get('completed', 0)}/{payload.get('total', 0)} ({payload.get('progress_percent', 0)}%)",
-        f"失败：{payload.get('failed', 0)}，等待/运行：{payload.get('running_or_pending', 0)}",
-        f"输入：{payload.get('input_dir')}",
-        f"输出：{payload.get('output_dir')}",
-    ]
+    options = payload.get("options") or {}
+    size = ""
+    if options.get("resize_width") and options.get("resize_height"):
+        size = f"{options.get('resize_width')}x{options.get('resize_height')}"
+    profile = options.get("inferred_profile") or options.get("profile") or ""
+    preset = f"{profile} {size}".strip()
+    if options.get("fallback_used"):
+        preset = (preset + " fallback").strip()
+    line = f"⌨️ Cherry {payload.get('run_id')}：{payload.get('status')}，{payload.get('completed', 0)}/{payload.get('total', 0)}"
+    if preset:
+        line += f"，{preset}"
     if payload.get("last_completed"):
-        lines.append(f"刚完成：{payload.get('last_completed')}")
-    detail = payload.get("last_completed_detail") or {}
-    if detail:
-        lines.append(f"刚完成明细：{detail.get('role')}/{detail.get('emotion')}/{detail.get('frame')}")
+        line += f"，刚完成 {payload.get('last_completed')}"
     eta = payload.get("eta_seconds")
-    lines.append(f"预计剩余：{_format_duration(eta) if isinstance(eta, int) else '暂无法估算'}")
+    if isinstance(eta, int):
+        line += f"，剩余约 {_format_duration(eta)}"
+    lines = [line]
+    if payload.get("failed"):
+        lines.append(f"失败：{payload.get('failed')}")
     if payload.get("error"):
         lines.append(f"错误：{payload.get('error')}")
-    gpu = payload.get("gpu") or {}
-    if gpu:
-        lines.extend(_format_gpu_status(gpu))
     return lines
 
 
@@ -858,17 +844,16 @@ def _format_animation_status(payload: dict[str, Any]) -> list[str]:
 
 
 def _format_agent_current_work(payload: dict[str, Any]) -> list[str]:
-    lines = ["当前执行现场："]
     active = payload.get("active") or []
+    lines: list[str] = []
     if active:
+        parts = []
         for item in active[:6]:
-            lines.append(f"- {_run_kind(item)} {item.get('run_id')}：{item.get('status')} {_run_progress(item)}".rstrip())
-            if item.get("input_dir"):
-                lines.append(f"  输入：{item.get('input_dir')}")
-            if item.get("output_dir"):
-                lines.append(f"  输出：{item.get('output_dir')}")
+            progress = _run_progress(item)
+            parts.append(f"{_run_kind(item)} {item.get('run_id')} {item.get('status')}{(' ' + progress) if progress else ''}")
+        lines.append("当前：" + "；".join(parts))
     else:
-        lines.append("当前没有检测到运行中的 ComfyUI / Cherry / 抽帧 / 全流程任务。")
+        lines.append("当前没有检测到运行中的任务。")
 
     confirmations = payload.get("pending_confirmations") or []
     if confirmations:
@@ -1244,11 +1229,8 @@ def _format_direct_video(skill: str, payload: dict[str, Any], max_items: int) ->
     children = payload.get("children") if isinstance(payload.get("children"), dict) else {}
     lines: list[str] = []
     if skill == "direct_video.start":
-        lines.append(f"动画处理任务已启动：{run_id}")
-        lines.append(f"视频：{len(videos)} 个")
-        if payload.get("pipeline_notice"):
-            lines.append(str(payload.get("pipeline_notice")))
-        lines.append("步骤：原视频 -> 抽帧 -> ComfyUI 抠图 -> Cherry 后处理 -> zip 回传")
+        suffix = _brief_pipeline_notice(str(payload.get("pipeline_notice") or ""))
+        lines.append(f"已启动 {run_id}（{len(videos)} 个视频{('，' + suffix) if suffix else ''}）")
         return lines
     if skill == "direct_video.list":
         items = payload.get("items") or []
@@ -1259,30 +1241,26 @@ def _format_direct_video(skill: str, payload: dict[str, Any], max_items: int) ->
     if skill == "direct_video.cancel":
         return [f"{run_id}：{status}"]
 
-    lines.append(f"动画处理进度：{run_id}")
-    lines.append(f"状态：{status} / {stage}")
+    summary = f"⌨️ {run_id}：{stage}/{status}"
     if videos:
-        lines.append(f"视频：{len(videos)} 个")
-        for item in videos[:max_items]:
-            detail = []
-            if item.get("frame_count"):
-                detail.append(f"{item.get('frame_count')} 帧")
-            if item.get("aspect"):
-                detail.append(str(item.get("aspect")))
-            if item.get("cherry_profile"):
-                detail.append(f"后处理 {item.get('cherry_profile')}")
-            suffix = "，" + "，".join(detail) if detail else ""
-            lines.append(f"- {item.get('name')}{suffix}")
+        frame_total = sum(int(item.get("frame_count") or 0) for item in videos)
+        summary += f"，视频 {len(videos)}"
+        if frame_total:
+            summary += f"，帧 {frame_total}"
+        cherry_plan = _cherry_plan_summary(videos)
+        if cherry_plan:
+            summary += f"，{cherry_plan.replace('后处理：', '').replace('后处理 ', '')}"
     comfy = children.get("comfyui") if isinstance(children.get("comfyui"), dict) else {}
     if comfy:
-        lines.append(f"抠图：{comfy.get('completed', 0)}/{comfy.get('total', 0)}，{comfy.get('status')}")
+        summary += f"，抠图 {comfy.get('completed', 0)}/{comfy.get('total', 0)}"
     cherry = children.get("cherry") if isinstance(children.get("cherry"), dict) else {}
     if cherry:
-        lines.append(f"后处理：{cherry.get('completed', 0)}/{cherry.get('total', 0)}，{cherry.get('status')}")
+        summary += f"，后处理 {cherry.get('completed', 0)}/{cherry.get('total', 0)}"
+    lines.append(summary)
     if payload.get("zip_path"):
-        lines.append(f"zip：{payload.get('zip_path')}")
-    if payload.get("last_log"):
-        lines.append(f"最近：{payload.get('last_log')}")
+        lines.append("zip：已生成")
+    if payload.get("error"):
+        lines.append(f"错误：{payload.get('error')}")
     return lines
 
 
@@ -1297,13 +1275,10 @@ def _format_direct_image(skill: str, payload: dict[str, Any], max_items: int) ->
     comfy = children.get("comfyui") if isinstance(children.get("comfyui"), dict) else {}
     cherry = children.get("cherry") if isinstance(children.get("cherry"), dict) else {}
     if skill == "direct_image.start":
-        lines = [
-            f"图片处理任务已启动：{run_id}",
-            f"图片：{len(images)} 张",
-        ]
-        if payload.get("pipeline_notice"):
-            lines.append(str(payload.get("pipeline_notice")))
-        lines.append("步骤：ComfyUI 抠图 -> Cherry 后处理 -> 文件附件回传")
+        suffix = _brief_pipeline_notice(str(payload.get("pipeline_notice") or ""))
+        plan = _cherry_plan_summary(images)
+        extra = "，".join(item for item in (suffix, plan) if item)
+        lines = [f"已启动 {run_id}（{len(images)} 张图片{('，' + extra) if extra else ''}）"]
         return lines
     if skill == "direct_image.list":
         items = payload.get("items") or []
@@ -1313,21 +1288,46 @@ def _format_direct_image(skill: str, payload: dict[str, Any], max_items: int) ->
         return lines
     if skill == "direct_image.cancel":
         return [f"{run_id}：{status}"]
-    lines = [
-        f"图片处理进度：{run_id}",
-        f"状态：{status} / {stage}",
-        f"图片：{len(images)} 张",
-    ]
+    summary = f"⌨️ {run_id}：{stage}/{status}，图片 {len(images)}"
+    cherry_plan = _cherry_plan_summary(images)
+    if cherry_plan:
+        summary += f"，{cherry_plan.replace('后处理：', '').replace('后处理 ', '')}"
     if comfy:
-        lines.append(f"抠图：{comfy.get('completed', 0)}/{comfy.get('total', 0)}，{comfy.get('status')}")
+        summary += f"，抠图 {comfy.get('completed', 0)}/{comfy.get('total', 0)}"
     if cherry:
-        lines.append(f"后处理：{cherry.get('completed', 0)}/{cherry.get('total', 0)}，{cherry.get('status')}")
+        summary += f"，后处理 {cherry.get('completed', 0)}/{cherry.get('total', 0)}"
+    lines = [summary]
     sent = payload.get("sent_files") or []
     if sent:
         lines.append(f"已发回附件：{len(sent)} 个")
     if payload.get("error"):
         lines.append(f"错误：{payload.get('error')}")
     return lines
+
+
+def _brief_pipeline_notice(text: str) -> str:
+    if "已自动更新" in text:
+        return "管线：已自动更新"
+    if "最新" in text or "up-to-date" in text.lower():
+        return "管线：已确认最新"
+    if text:
+        return "管线：已确认"
+    return ""
+
+
+def _cherry_plan_summary(items: list[dict[str, Any]]) -> str:
+    counts: dict[str, int] = {}
+    for item in items:
+        profile = str(item.get("cherry_profile") or "")
+        if not profile:
+            continue
+        aspect = "正方形" if str(item.get("aspect") or "").lower() == "square" or profile == "half" else "长方形"
+        size = str(item.get("cherry_output_size") or ("256x256" if profile == "half" else "384x512"))
+        key = f"{aspect} {size}"
+        counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return ""
+    return "后处理：" + "，".join(f"{key}×{count}" for key, count in counts.items())
 
 
 def _run_kind(item: dict[str, Any]) -> str:

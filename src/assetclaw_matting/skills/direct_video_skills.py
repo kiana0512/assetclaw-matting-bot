@@ -87,6 +87,7 @@ def start(
                 "frame_count": 0,
                 "aspect": "",
                 "cherry_profile": "",
+                "cherry_output_size": "",
             }
             for index in range(1, len(copied) + 1)
         ],
@@ -101,8 +102,6 @@ def start(
         "log": [],
     }
     _save(run)
-    notice = f"\n{pipeline_notice}" if pipeline_notice else ""
-    _notify(run, f"动画处理任务已开始：{run_id}\n视频：{len(copied)} 个{notice}\n步骤：抽帧 -> ComfyUI 抠图 -> Cherry 后处理 -> zip 回传")
     _start_worker(run_id)
     return {"ok": True, "run_id": run_id, **_public(run)}
 
@@ -184,19 +183,16 @@ def _worker(run_id: str) -> None:
     try:
         _mark(run, "RUNNING", "extract_frames")
         _extract_all(run)
-        _notify(run, _format_stage_summary(run, "抽帧完成"))
         if _is_canceled(run):
             return
 
         _mark(run, "RUNNING", "matting")
         _run_comfyui(run)
-        _notify(run, _format_stage_summary(run, "ComfyUI 抠图完成"))
         if _is_canceled(run):
             return
 
         _mark(run, "RUNNING", "postprocess")
         _run_cherry(run)
-        _notify(run, _format_stage_summary(run, "Cherry 后处理完成"))
         if _is_canceled(run):
             return
 
@@ -207,7 +203,9 @@ def _worker(run_id: str) -> None:
         run["stage"] = "done"
         run["updated_at"] = _now()
         _save(run)
-        _notify(run, f"动画处理完成：{run['id']}\n正在发送 zip：{zip_path.name}")
+        plan = _cherry_plan_summary(run.get("videos") or [])
+        suffix = f"，{plan}" if plan else ""
+        _notify(run, f"动画完成：{run['id']}，正在发送 zip{suffix}。")
         _send_zip(run, zip_path)
     except Exception as exc:
         run = _load(run_id) or run
@@ -258,9 +256,13 @@ def _extract_all(run: dict[str, Any]) -> None:
             raise RuntimeError(stderr.strip() or f"extract worker exited with {rc}")
         item["frame_count"] = int(last_payload.get("frame_count") or len(list(out_dir.glob("*.png"))))
         width, height = _first_frame_size(out_dir)
-        item["aspect"] = "square" if width and height and abs(width - height) <= max(width, height) * 0.08 else "portrait"
+        item["aspect"] = "square" if width and height and width == height else "portrait"
         item["cherry_profile"] = "half" if item["aspect"] == "square" else "full"
-        _append_log(run, f"抽帧完成：{item['name']}，{item['frame_count']} 帧，{width}x{height}，{item['aspect']}")
+        item["cherry_output_size"] = _cherry_output_size(str(item["cherry_profile"]))
+        _append_log(
+            run,
+            f"抽帧完成：{item['name']}，{item['frame_count']} 帧，{width}x{height}，{item['aspect']}，后处理 {item['cherry_output_size']}",
+        )
         run["updated_at"] = _now()
         _save(run)
 
@@ -305,6 +307,7 @@ def _run_cherry(run: dict[str, Any]) -> None:
         if not any(matte_dir.rglob("*.png")):
             raise RuntimeError(f"matte_dir has no png images: {matte_dir}")
         profile = str(item.get("cherry_profile") or "auto")
+        item["cherry_output_size"] = item.get("cherry_output_size") or _cherry_output_size(profile)
         result = run_start(
             input_dir=str(matte_dir),
             output_dir=str(smooth_dir),
@@ -313,6 +316,9 @@ def _run_cherry(run: dict[str, Any]) -> None:
             notify_interval_seconds=run["notify_interval_seconds"],
             profile=profile,
         )
+        options = result.get("options") if isinstance(result.get("options"), dict) else {}
+        if options.get("resize_width") and options.get("resize_height"):
+            item["cherry_output_size"] = f"{options.get('resize_width')}x{options.get('resize_height')}"
         child_id = result["run_id"]
         run["children"]["cherry_run_id"] = child_id
         run["children"].setdefault("cherry_run_ids", []).append(child_id)
@@ -402,22 +408,24 @@ def _format_progress(run: dict[str, Any]) -> str:
 
 
 def _format_stage_summary(run: dict[str, Any], title: str) -> str:
-    lines = [
-        f"{title}：{run['id']}",
-        f"状态：{run.get('status')} / {run.get('stage')}",
-        f"视频：{len(run.get('videos') or [])} 个",
-    ]
+    parts = [f"{title}：{run['id']}"]
+    details = [f"视频 {len(run.get('videos') or [])}"]
     frame_total = sum(int(item.get("frame_count") or 0) for item in run.get("videos") or [])
     if frame_total:
-        lines.append(f"已抽帧：{frame_total} 张")
+        details.append(f"抽帧 {frame_total}")
     children = run.get("children") or {}
     comfy = children.get("comfyui") if isinstance(children.get("comfyui"), dict) else {}
     if comfy:
-        lines.append(f"抠图：{comfy.get('completed', 0)}/{comfy.get('total', 0)}，{comfy.get('status')}")
+        details.append(f"抠图 {comfy.get('completed', 0)}/{comfy.get('total', 0)}")
     cherry = children.get("cherry") if isinstance(children.get("cherry"), dict) else {}
     if cherry:
-        lines.append(f"后处理：{cherry.get('completed', 0)}/{cherry.get('total', 0)}，{cherry.get('status')}")
-    return "\n".join(lines)
+        details.append(f"后处理 {cherry.get('completed', 0)}/{cherry.get('total', 0)}")
+    cherry_plan = _cherry_plan_summary(run.get("videos") or [])
+    if cherry_plan:
+        details.append(cherry_plan)
+    if details:
+        parts.append("，".join(details))
+    return "；".join(parts)
 
 
 def _format_comfyui_failure(run_id: str, payload: dict[str, Any]) -> str:
@@ -462,15 +470,8 @@ def _mark(run: dict[str, Any], status_text: str, stage: str) -> None:
     run["updated_at"] = _now()
     _append_log(run, f"进入阶段：{stage}")
     _save(run)
-    stage_names = {
-        "extract_frames": "开始抽帧",
-        "matting": "开始 ComfyUI 抠图",
-        "postprocess": "开始 Cherry 后处理",
-        "zip": "开始打包 zip",
-        "canceled": "任务已取消",
-    }
-    if stage in stage_names:
-        _notify(run, _format_stage_summary(run, stage_names[stage]))
+    if stage == "canceled":
+        _notify(run, f"任务已取消：{run['id']}")
 
 
 def _append_log(run: dict[str, Any], message: str) -> None:
@@ -496,6 +497,33 @@ def _public(run: dict[str, Any]) -> dict[str, Any]:
         "last_log": (run.get("log") or [{}])[-1].get("message", ""),
         "run_dir": str(_run_dir(run)),
     }
+
+
+def _brief_pipeline_notice(text: str) -> str:
+    if "已自动更新" in (text or ""):
+        return "管线已自动更新"
+    if "最新" in (text or ""):
+        return "管线已确认最新"
+    return "管线已确认"
+
+
+def _cherry_output_size(profile: str) -> str:
+    return "256x256" if str(profile or "").lower() in {"half", "emoji", "square"} else "384x512"
+
+
+def _cherry_plan_summary(items: list[dict[str, Any]]) -> str:
+    counts: dict[str, int] = {}
+    for item in items:
+        profile = str(item.get("cherry_profile") or "")
+        if not profile:
+            continue
+        aspect = "正方形" if str(item.get("aspect") or "").lower() == "square" or profile == "half" else "长方形"
+        size = str(item.get("cherry_output_size") or _cherry_output_size(profile))
+        key = f"{aspect} {size}"
+        counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return ""
+    return "后处理 " + "，".join(f"{key}×{count}" for key, count in counts.items())
 
 
 def _load(run_id: str | None = None) -> dict[str, Any] | None:

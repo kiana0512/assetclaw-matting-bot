@@ -173,4 +173,4 @@ def test_task_message_keeps_processing_ack(monkeypatch) -> None:
     result = process_feishu_message(_event("今天天气怎么样", f"evt_weather_{uuid.uuid4().hex}"))
 
     assert result.ok is True
-    assert replies == ["我收到啦，正在处理，通常几秒内回复。", "上海现在：Clear。"]
+    assert replies == ["收到，处理中。", "上海现在：Clear。"]

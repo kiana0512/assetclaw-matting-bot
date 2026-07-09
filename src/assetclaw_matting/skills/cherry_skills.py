@@ -68,11 +68,12 @@ def info() -> dict[str, Any]:
     source = _tool_source_path()
     return {
         "ok": True,
-        "name": "Cherry_帧序列处理工具",
+        "name": "Cherry HTML 帧序列处理工具",
         "source_path": str(source),
         "exists": source.exists(),
-        "steps": ["去除外部噪点", "阴影分离", "透明图模糊自叠加", "缩小①", "锐化①", "缩小②", "锐化②"],
-        "temporal_smooth": "optional_off_by_default",
+        "engine": "headless_chrome_html",
+        "steps": ["fringe", "hairinset", "feather(rect only)", "blur", "resize2"],
+        "temporal_smooth": "controlled_by_html_default_off",
         "defaults": _default_options(),
         "presets": {"auto": preset_options("auto"), "full": preset_options("full"), "half": preset_options("half")},
     }
@@ -316,6 +317,11 @@ def _run_worker(run_id: str) -> None:
         row = _get_run(run_id)
         if not row:
             return
+        from assetclaw_matting.config import settings
+
+        if settings.cherry_html_runner_enabled:
+            _run_worker_html(run_id, row)
+            return
         python = _cherry_python_path()
         if python.exists():
             _run_worker_subprocess(run_id, row, python)
@@ -370,6 +376,109 @@ def _run_worker(run_id: str) -> None:
         _WORKER_RUNS.discard(run_id)
 
 
+def _run_worker_html(run_id: str, row: Any) -> None:
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.services.cherry_python_fallback import run_cherry_python_fallback
+    from assetclaw_matting.services.cherry_html_runner import run_cherry_html
+
+    src = Path(row["input_dir"])
+    dst = Path(row["output_dir"])
+    files = [Path(path) for path in json.loads(row["files_json"] or "[]")]
+    options = json.loads(row["options_json"] or "{}")
+    processed = options.get("processed") or []
+    errors = options.get("errors") or []
+    done = {item.get("src_path") for item in processed}
+    groups = _group_sequences(src, files)
+    options.setdefault("engine", "headless_chrome_html")
+    options["source_path"] = str(_tool_source_path())
+
+    for group_files in groups:
+        latest = _get_run(run_id)
+        if not latest or latest["status"] == "CANCELED":
+            return
+        pending = [path for path in group_files if str(path) not in done]
+        if not pending:
+            continue
+        try:
+            result = run_cherry_html(
+                _tool_source_path(),
+                src,
+                dst,
+                pending,
+                chrome_path=Path(settings.cherry_browser_path) if settings.cherry_browser_path else None,
+                timeout_seconds=int(settings.cherry_html_timeout_seconds),
+                storage_dir=Path(settings.storage_dir),
+            )
+            width, height = _parse_resize(result.resize)
+            if width and height:
+                options["resize_width"] = width
+                options["resize_height"] = height
+            options["inferred_profile"] = result.profile
+            options["html_feather_enabled"] = result.feather_enabled
+            options["html_steps"] = result.steps
+            options.setdefault("html_runs", []).append(
+                {
+                    "input_dir": str(pending[0].parent),
+                    "count": len(pending),
+                    "profile": result.profile,
+                    "resize": result.resize,
+                    "feather_enabled": result.feather_enabled,
+                    "steps": result.steps,
+                }
+            )
+            for image_path in pending:
+                target = _output_target(src, dst, image_path)
+                if not target.exists():
+                    raise FileNotFoundError(str(target))
+                processed.append({"src_path": str(image_path), "dst_path": str(target), "rel_path": str(image_path.relative_to(src))})
+            options["processed"] = processed
+            _save_progress(run_id, completed=len(processed), failed=len(errors), options=options)
+        except Exception as exc:
+            html_error = str(exc)
+            try:
+                result = run_cherry_python_fallback(src, dst, pending)
+                width, height = _parse_resize(result.resize)
+                if width and height:
+                    options["resize_width"] = width
+                    options["resize_height"] = height
+                options["inferred_profile"] = result.profile
+                options["html_feather_enabled"] = result.feather_enabled
+                options["html_steps"] = result.steps
+                options["fallback_used"] = True
+                options["fallback_reason"] = html_error
+                options.setdefault("html_runs", []).append(
+                    {
+                        "input_dir": str(pending[0].parent),
+                        "count": len(pending),
+                        "profile": result.profile,
+                        "resize": result.resize,
+                        "feather_enabled": result.feather_enabled,
+                        "steps": result.steps,
+                        "fallback": "html_python_fallback",
+                        "html_error": html_error,
+                    }
+                )
+                for image_path in pending:
+                    target = _output_target(src, dst, image_path)
+                    if not target.exists():
+                        raise FileNotFoundError(str(target))
+                    processed.append({"src_path": str(image_path), "dst_path": str(target), "rel_path": str(image_path.relative_to(src))})
+                options["processed"] = processed
+                _save_progress(run_id, completed=len(processed), failed=len(errors), options=options, error=f"HTML fallback used: {html_error}")
+            except Exception as fallback_exc:
+                for image_path in pending:
+                    errors.append({"src_path": str(image_path), "rel_path": str(image_path.relative_to(src)), "error": str(fallback_exc)})
+                options["errors"] = errors
+                options["fallback_reason"] = html_error
+                _save_progress(run_id, completed=len(processed), failed=len(errors), options=options, error=str(fallback_exc))
+                _set_run_status(run_id, "FAILED")
+                _notify(run_id, f"Cherry 后处理失败：{pending[0].parent}\nHTML: {html_error}\nFallback: {fallback_exc}")
+                return
+
+    final_status = "DONE_WITH_ERRORS" if errors else "DONE"
+    _set_run_status(run_id, final_status)
+
+
 def _run_worker_subprocess(run_id: str, row: Any, python: Path) -> None:
     from assetclaw_matting.config import settings
 
@@ -385,7 +494,7 @@ def _run_worker_subprocess(run_id: str, row: Any, python: Path) -> None:
     config_path.write_text(
         json.dumps(
             {
-                "source_path": str(_tool_source_path()),
+                "source_path": str(_legacy_tool_source_path()),
                 "input_dir": str(src),
                 "output_dir": str(dst),
                 "files": [str(path) for path in files],
@@ -589,7 +698,7 @@ def _load_cherry_module() -> ModuleType:
     global _MODULE
     if _MODULE is not None:
         return _MODULE
-    source = _tool_source_path()
+    source = _legacy_tool_source_path()
     if not source.exists():
         raise FileNotFoundError(str(source))
     spec = importlib.util.spec_from_file_location("assetclaw_cherry_temporal_smooth", source)
@@ -611,6 +720,12 @@ def _processing_deps():
 
 
 def _tool_source_path() -> Path:
+    from assetclaw_matting.config import settings
+
+    return Path(settings.cherry_postprocess_html_path)
+
+
+def _legacy_tool_source_path() -> Path:
     from assetclaw_matting.config import settings
 
     root = Path(settings.assetclaw_root)
@@ -661,6 +776,14 @@ def _output_target(src: Path, dst: Path, image_path: Path) -> Path:
     return dst / image_path.relative_to(src).with_suffix(".png")
 
 
+def _parse_resize(value: str) -> tuple[int | None, int | None]:
+    try:
+        left, right = str(value).lower().split("x", 1)
+        return int(left), int(right)
+    except Exception:
+        return None, None
+
+
 def _default_options() -> dict[str, Any]:
     return preset_options("auto")
 
@@ -668,14 +791,16 @@ def _default_options() -> dict[str, Any]:
 def preset_options(profile: str = "full", use_smooth: bool = False) -> dict[str, Any]:
     normalized = str(profile or "full").lower()
     auto_profile = normalized in {"auto", "adaptive", "size"}
-    is_half = normalized in {"half", "emoji", "portrait", "bust", "story"}
+    is_half = normalized in {"half", "emoji", "square"}
     width, height = (256, 256) if is_half else (384, 512)
     return {
+        "engine": "headless_chrome_html",
+        "source": "cherry-postprocess.html",
         "profile": "auto" if auto_profile else ("half" if is_half else "full"),
         "auto_profile_by_size": auto_profile,
         "use_denoise": True,
-        "denoise_threshold": 0.10 if is_half else 0.85,
-        "denoise_radius": 0,
+        "denoise_threshold": 1.0,
+        "denoise_radius": 9,
         "use_shadow": not is_half,
         "shadow_gray_limit": 0.35,
         "shadow_protect_radius": -70,
@@ -683,41 +808,43 @@ def preset_options(profile: str = "full", use_smooth: bool = False) -> dict[str,
         "shadow_blur_radius": 2,
         "shadow_blur_sigma": 2.4,
         "use_blur": True,
-        "blur_radius": 1,
-        "blur_sigma": 10.0,
-        "use_resize1": True,
+        "blur_radius": 14,
+        "blur_sigma": 12.0,
+        "use_resize1": False,
         "resize1_width": width,
         "resize1_height": height,
-        "use_sharp1": True,
-        "sharp1_amount": 1.0,
+        "use_sharp1": False,
+        "sharp1_amount": 0.3,
         "sharp1_radius": 2,
         "sharp1_threshold": 0.02,
-        "sharp1_shrink": 0,
-        "use_resize2": not is_half,
+        "sharp1_shrink": 11,
+        "use_resize2": True,
         "resize2_width": width,
         "resize2_height": height,
-        "use_sharp2": not is_half,
-        "sharp2_amount": 1.0,
+        "use_sharp2": False,
+        "sharp2_amount": 0.3,
         "sharp2_radius": 2,
         "sharp2_threshold": 0.02,
-        "sharp2_shrink": 5,
-        "use_smooth": bool(use_smooth),
-        "smooth_window": 5,
-        "smooth_sigma": 1.0,
+        "sharp2_shrink": 11,
+        "use_smooth": False,
+        "smooth_window": 7,
+        "smooth_sigma": 1.5,
         "min_alpha": 0.05,
         "sync_rgb": False,
-        "ring_width": 25,
-        "smooth_method": "中值+高斯",
+        "ring_width": 10,
+        "smooth_method": "html_default_off",
         "fill_gap": True,
         "bg_thresh": 0.02,
         "use_resize": True,
         "resize_width": width,
         "resize_height": height,
-        "use_sharpen": True,
-        "sharpen_amount": 1.0,
+        "use_sharpen": False,
+        "sharpen_amount": 0.3,
         "sharpen_radius": 2,
         "sharpen_threshold": 0.02,
-        "sharpen_shrink": 5,
+        "sharpen_shrink": 11,
+        "html_modules": ["fringe", "hairinset", *([] if is_half else ["feather"]), "blur", "resize2"],
+        "html_feather_enabled": not is_half,
     }
 
 
@@ -1027,6 +1154,10 @@ def _temporal_smooth(module: ModuleType, batch: Any, options: dict[str, Any]) ->
 
 
 def _steps_text(options: dict[str, Any]) -> str:
+    if options.get("engine") == "headless_chrome_html":
+        modules = options.get("html_modules") or ["fringe", "hairinset", "feather", "blur", "resize2"]
+        feather = "开" if options.get("html_feather_enabled") else "关"
+        return f"HTML 默认预设，输出 {options.get('resize_width')}x{options.get('resize_height')}，feather {feather}，模块 {'/'.join(modules)}"
     steps = []
     if options.get("use_denoise"):
         steps.append(f"去噪 阈值{options.get('denoise_threshold')} 半径{options.get('denoise_radius')}")

@@ -41,25 +41,23 @@ def test_cherry_info_preview_and_real_processing() -> None:
 
     available = info()
     assert available["exists"] is True
-    assert "Cherry_后处理网页_源码_20260615_0658" in available["source_path"]
-    assert "去除外部噪点" in available["steps"]
-    assert "阴影分离" in available["steps"]
-    assert "透明图模糊自叠加" in available["steps"]
+    assert available["source_path"].endswith("cherry-postprocess.html")
+    assert available["engine"] == "headless_chrome_html"
+    assert "fringe" in available["steps"]
+    assert "resize2" in available["steps"]
     assert available["defaults"]["use_denoise"] is True
-    assert available["defaults"]["denoise_threshold"] == 0.85
-    assert available["defaults"]["use_shadow"] is True
+    assert available["defaults"]["engine"] == "headless_chrome_html"
+    assert available["defaults"]["html_feather_enabled"] is True
     assert available["defaults"]["use_smooth"] is False
     assert available["defaults"]["profile"] == "auto"
     assert available["defaults"]["auto_profile_by_size"] is True
-    assert available["defaults"]["resize1_width"] == 384
-    assert available["defaults"]["resize1_height"] == 512
     assert available["defaults"]["resize2_width"] == 384
     assert available["defaults"]["resize2_height"] == 512
 
     half = preset_options("half")
-    assert half["denoise_threshold"] == 0.10
-    assert half["use_shadow"] is False
-    assert half["use_resize2"] is False
+    assert half["engine"] == "headless_chrome_html"
+    assert half["html_feather_enabled"] is False
+    assert half["use_resize2"] is True
     assert half["use_sharp2"] is False
     assert half["resize_width"] == 256
     assert half["resize_height"] == 256
@@ -83,7 +81,8 @@ def test_cherry_info_preview_and_real_processing() -> None:
     assert (dst / "seq_a" / "002.png").exists()
 
     text = format_skill_results([{"ok": True, "skill": "cherry.run_status", "result": status}])
-    assert "Cherry 任务" in text
+    assert "⌨️ Cherry" in text
+    assert "half 256x256" in text
 
 
 def test_cherry_registry_and_router() -> None:

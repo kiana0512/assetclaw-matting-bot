@@ -73,6 +73,28 @@ class FeishuClient:
         )
         response.raise_for_status()
 
+    def add_message_reaction(self, message_id: str, emoji_type: str) -> bool:
+        if not message_id or not emoji_type:
+            return False
+        payload = {"reaction_type": {"emoji_type": emoji_type}}
+        response = requests.post(
+            f"{FEISHU_BASE}/im/v1/messages/{message_id}/reactions",
+            headers=self._headers(),
+            json=payload,
+            timeout=15,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("code") != 0:
+            log.warning(
+                "feishu add reaction failed code=%s msg=%s emoji=%s",
+                data.get("code"),
+                data.get("msg"),
+                emoji_type,
+            )
+            return False
+        return True
+
     def upload_file(self, path: Path, file_name: str | None = None) -> str:
         sent_name = file_name or path.name
         with path.open("rb") as f:

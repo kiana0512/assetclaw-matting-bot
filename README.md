@@ -88,6 +88,12 @@ E:\assetclaw-matting-bot\README.md 是否存在
 ### 抠图批次（fake mode）
 - `matting.batch_create/start/status/list/detail/pause/resume/cancel`
 
+### 飞书直传动画处理
+- 视频文件：飞书按“文件”发送 `.mp4/.mov` 后，确认执行再启动；流程为原视频 -> OpenCV 抽帧 -> ComfyUI 抠图 -> Cherry HTML 后处理 -> zip 文件回传。
+- 图片文件/图片消息：收到后无需确认，直接 ComfyUI 抠图 -> Cherry HTML 后处理 -> 处理结果按文件附件回传，避免飞书压缩。
+- 后处理预设：宽高完全相同走正方形 `256x256`，其他比例走长方形 `384x512`；状态回复会带当前预设。
+- 抠图管线：默认使用 `E:\imageclip-pipeline\imageclip` Git 管理的 `ImageClip.json`、LoRA 和 `Cherry_lizi`，启动任务前会快速确认本地管线是否最新。
+
 ### 系统 / 帮助
 - `bot.help` / `bot.skills` / `bot.permissions` / `bot.status` / `bot.errors`
 
@@ -111,6 +117,13 @@ E:\assetclaw-matting-bot\README.md 是否存在
 - 允许路径：`ALLOWED_ROOTS=D:;E:;F:` 下受控操作，`C:` 不开放
 - 禁用：Cloudflare Tunnel、ngrok、frp、任何内网穿透工具
 - 事件模式：飞书长连接（WebSocket），无公网暴露
+
+## 回复策略
+
+- 普通对话保持短回复。
+- 上下文自动整理时会提示：`上下文已整理，会继续接着聊。`
+- 动画/图片任务只在开始、关键阶段完成、失败、最终回传时主动通知；用户问“进度如何”时，会定位最近的直传图片/视频任务并回复一条精简状态。
+- 进度类提问会优先给原消息加飞书表情反应，减少刷屏。
 
 ## 详细文档
 
