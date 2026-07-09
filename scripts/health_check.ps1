@@ -1,0 +1,8 @@
+$ErrorActionPreference = "Stop"
+$base = "http://127.0.0.1:7865"
+Invoke-RestMethod "$base/health"
+Invoke-RestMethod "$base/skills/v1/manifest"
+Invoke-RestMethod "$base/admin/queue"
+Write-Host "Feishu event mode: ws"
+Write-Host "Cloudflare/tunnel: disabled"
+Write-Host "Public URL: not required"

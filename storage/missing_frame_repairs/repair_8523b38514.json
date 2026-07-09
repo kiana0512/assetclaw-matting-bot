@@ -1,0 +1,47 @@
+{
+  "ok": true,
+  "root": "E:\\animation_automation\\2026-06-02",
+  "fps": 24,
+  "max_frames": 24,
+  "patch_dir": "E:\\animation_automation\\2026-06-02\\frames_missing_patch",
+  "sequence_count": 0,
+  "missing_count": 0,
+  "saved_count": 0,
+  "saved": [],
+  "filled_from_previous": [],
+  "errors": [],
+  "patch_image_count": 243,
+  "pipeline": {
+    "ok": false,
+    "comfyui": {
+      "ok": true,
+      "run_id": "COMFY_8B75956072AA",
+      "status": "CANCELED",
+      "fake_mode": false,
+      "workflow_path": "C:\\Users\\lilithgames\\Downloads\\ComfyUI-aki-v3\\ComfyUI\\user\\default\\workflows\\软边缘测试-动画批量.json",
+      "input_dir": "E:\\animation_automation\\2026-06-02\\frames_missing_patch",
+      "output_dir": "E:\\animation_automation\\2026-06-02\\matte",
+      "total": 243,
+      "completed": 1,
+      "failed": 0,
+      "running_or_pending": 242,
+      "progress_percent": 0.4,
+      "eta_seconds": 14539,
+      "queue_running": 1,
+      "queue_pending": 0,
+      "prompt_ids": [
+        "a154805c-71e8-4f0d-b1a1-32e8e50182fe",
+        "4a4c3a43-a5d8-447e-ba85-2a89c1c1a5cb"
+      ],
+      "last_completed": "0006.png",
+      "last_completed_detail": {
+        "role": "creamy",
+        "emotion": "excited",
+        "frame": "0006.png",
+        "rel_path": "creamy\\excited\\0006.png"
+      }
+    },
+    "cherry": null
+  },
+  "report_path": "E:\\assetclaw-matting-bot\\storage\\missing_frame_repairs\\repair_8523b38514.json"
+}

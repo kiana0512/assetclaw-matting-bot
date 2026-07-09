@@ -1,0 +1,59 @@
+{
+  "ok": false,
+  "root": "E:\\animation_automation\\2026-06-02",
+  "backup_root": "E:\\animation_automation\\2026-06-02\\_rerun_backups\\20260604_101839",
+  "fps": 24,
+  "frame_count": 1848,
+  "sequence_count": 42,
+  "pipeline": {
+    "ok": false,
+    "comfyui": {
+      "ok": true,
+      "run_id": "COMFY_4DE14F0C4A16",
+      "status": "FAILED",
+      "fake_mode": false,
+      "workflow_path": "C:\\Users\\lilithgames\\Downloads\\ComfyUI-aki-v3\\ComfyUI\\user\\default\\workflows\\软边缘测试-动画批量.json",
+      "input_dir": "E:\\animation_automation\\2026-06-02\\frames",
+      "output_dir": "E:\\animation_automation\\2026-06-02\\matte",
+      "total": 1848,
+      "completed": 533,
+      "failed": 1,
+      "running_or_pending": 1314,
+      "progress_percent": 28.9,
+      "eta_seconds": 48674,
+      "queue_running": 0,
+      "queue_pending": 0,
+      "prompt_ids": [
+        "7552a784-6823-43f5-bbe6-84b13c80b249",
+        "235c3fea-b6cd-48b0-bc4f-948532084f3e",
+        "ec3c660b-63a0-46d0-a3f6-0bf753754ae2",
+        "c52f480d-8c63-4dcc-acbb-088233da660d",
+        "40c33614-d677-4326-a65d-49ea3de2ee62",
+        "1537fe8e-1515-4412-b156-a54a22c52cf2",
+        "7973812f-7da6-4b4e-b354-5b7b807ae839",
+        "18180afe-fe9a-410d-a81d-46dab154c8cc",
+        "35a699c2-184f-4b24-94a1-d9d6402d5d01",
+        "325a969e-f7bf-4c70-8c22-9a331107eb24",
+        "22709a65-4fd5-468a-ae6e-a2074798f0c7",
+        "b3924430-1144-456a-8ef4-0a25e44a3a97",
+        "a0264b9d-9602-4451-a175-9c9b54cbc744",
+        "614c83c6-0bda-46f0-ad57-b850574e6788",
+        "aecc302b-f591-44ba-aeab-ba581ec4e370",
+        "36691459-3bc6-4880-9f9b-8707c137f200",
+        "9747de80-5c4e-4b0e-b5b0-219dc69b58a9",
+        "b093028a-d906-442f-8a4b-d02ae7571630",
+        "401e756e-2af5-4ea8-a9b4-d34874e06d2a",
+        "1bb1458d-2861-4cdd-8a5a-9d9996cf8625"
+      ],
+      "last_completed": "0053.png",
+      "last_completed_detail": {
+        "role": "eliot",
+        "emotion": "excited",
+        "frame": "0053.png",
+        "rel_path": "eliot\\excited\\0053.png"
+      }
+    },
+    "cherry": null
+  },
+  "report_path": "E:\\assetclaw-matting-bot\\storage\\animation_reruns\\rerun_20260604_154834.json"
+}
