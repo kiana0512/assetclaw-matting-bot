@@ -25,9 +25,29 @@ def test_sync_repo_overwrites_local_changes(monkeypatch, tmp_path: Path) -> None
 
     assert calls == [
         ["fetch", "--prune", "origin"],
-        ["checkout", "-B", "main", "origin/main"],
+        ["reset", "--hard"],
+        ["clean", "-fd"],
+        ["checkout", "--force", "-B", "main", "origin/main"],
         ["reset", "--hard", "origin/main"],
         ["clean", "-fd"],
         ["lfs", "pull"],
     ]
     assert "git-lfs is not installed" in output
+
+
+def test_pipeline_git_error_is_hidden_from_user() -> None:
+    from assetclaw_matting.brain.result_formatter import format_skill_results
+
+    text = format_skill_results(
+        [
+            {
+                "ok": False,
+                "skill": "direct_video.start",
+                "error": "git checkout --force -B main origin/main failed:\nerror: ImageClip.json would be overwritten",
+            }
+        ]
+    )
+
+    assert "抠图管线更新失败：ImageClip.json" in text
+    assert "git checkout" not in text
+    assert "direct_video.start" not in text

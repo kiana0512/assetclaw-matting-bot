@@ -14,7 +14,7 @@ def format_skill_results(results: list[dict[str, Any]], max_items: int = 8) -> s
             lines.append(item.get("message") or f"{skill} 需要确认后执行。")
             continue
         if not item.get("ok"):
-            lines.append(f"{skill} 失败：{item.get('error', '未知错误')}")
+            lines.append(_format_error_message(skill, str(item.get("error") or "未知错误")))
             continue
 
         payload = item.get("result") or {}
@@ -341,6 +341,31 @@ def format_skill_results(results: list[dict[str, Any]], max_items: int = 8) -> s
             lines.append(f"{skill} 完成。")
 
     return "\n".join(line for line in lines if line).strip() or "完成。"
+
+
+def _format_error_message(skill: str, error: str) -> str:
+    text = str(error or "未知错误")
+    lower = text.lower()
+    pipeline_skills = {"direct_video.start", "direct_image.start", "comfyui.run_start", "matting_pipeline.update"}
+    if skill in pipeline_skills and ("git " in lower or "imageclip.json" in lower or "matting pipeline" in lower):
+        files = _extract_error_files(text)
+        detail = f"：{', '.join(files)}" if files else ""
+        return f"抠图管线更新失败{detail}。系统会以最新管线为准强制同步，请稍后重试一次。"
+    return f"{skill} 失败：{text}"
+
+
+def _extract_error_files(text: str) -> list[str]:
+    items: list[str] = []
+    for raw in str(text or "").splitlines():
+        line = raw.strip().strip('"').strip("'")
+        if not line or line.lower().startswith(("error:", "please ", "aborting", "git ", "your local changes", "would be overwritten")):
+            continue
+        if any(line.lower().endswith(suffix) for suffix in (".json", ".html", ".safetensors", ".md", ".py", ".txt")):
+            if line not in items:
+                items.append(line)
+    if "ImageClip.json" in text and "ImageClip.json" not in items:
+        items.append("ImageClip.json")
+    return items[:5]
 
 
 def _format_listing(payload: dict[str, Any], max_items: int) -> list[str]:

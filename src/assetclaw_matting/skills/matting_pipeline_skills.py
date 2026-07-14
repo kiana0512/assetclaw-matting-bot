@@ -202,7 +202,9 @@ def _sync_repo(repo: Path) -> str:
     branch = settings.matting_pipeline_branch
     remote_ref = f"origin/{branch}"
     output.append(_git(["fetch", "--prune", "origin"], cwd=repo))
-    output.append(_git(["checkout", "-B", branch, remote_ref], cwd=repo))
+    output.append(_git(["reset", "--hard"], cwd=repo))
+    output.append(_git(["clean", "-fd"], cwd=repo))
+    output.append(_git(["checkout", "--force", "-B", branch, remote_ref], cwd=repo))
     output.append(_git(["reset", "--hard", remote_ref], cwd=repo))
     output.append(_git(["clean", "-fd"], cwd=repo))
     output.append(_git_lfs_pull(repo))
