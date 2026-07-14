@@ -110,6 +110,38 @@ def test_bare_confirmation_code_executes_animation_flow_with_normalized_args(mon
     assert "需要确认" not in "\n".join(replies)
 
 
+def test_duplicate_direct_video_confirmations_start_once(monkeypatch) -> None:
+    replies: list[str] = []
+    calls: list[tuple[str, dict]] = []
+    conversation_id = "feishu:chat_confirm:user_confirm"
+    args = {
+        "video_paths": [r"E:\assetclaw-matting-bot\storage\feishu_inbox\clip.mp4"],
+        "source_names": ["clip.mp4"],
+        "run_label": "clip.mp4",
+    }
+
+    monkeypatch.setattr("assetclaw_matting.feishu.processor._try_reply", lambda _mid, _cid, text: replies.append(text))
+    monkeypatch.setattr("assetclaw_matting.feishu.processor._try_send_chat", lambda _cid, text: replies.append(text))
+
+    def fake_call_skill(skill: str, arguments: dict, requested_by: str = "brain") -> dict:
+        calls.append((skill, arguments))
+        return {"ok": True, "skill": skill, "result": {"run_id": "VID_ONCE", "videos": [{"name": "clip.mp4"}]}}
+
+    monkeypatch.setattr("assetclaw_matting.skills.registry.call_skill", fake_call_skill)
+    create_pending_confirmation(conversation_id, "user_confirm", "direct_video.start", args)
+    create_pending_confirmation(conversation_id, "user_confirm", "direct_video.start", args)
+
+    first = process_feishu_message(_event("确认执行", f"evt_duplicate_confirm_first_{uuid.uuid4().hex}"))
+    second = process_feishu_message(_event("确认执行", f"evt_duplicate_confirm_second_{uuid.uuid4().hex}"))
+
+    assert first.ok is True
+    assert second.ok is True
+    assert calls == [("direct_video.start", args)]
+    assert replies.count("收到，开始处理。") == 1
+    assert "已启动 VID_ONCE（1 个视频）" in replies
+    assert "当前没有等待你确认的操作。" in replies
+
+
 def test_cancel_named_comfy_run_is_not_treated_as_confirmation_cancel(monkeypatch) -> None:
     replies: list[str] = []
     seen: list[str] = []

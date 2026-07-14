@@ -77,8 +77,8 @@ class Settings(BaseSettings):
     bot_error_push_enabled: bool = True
     bot_emotional_replies_enabled: bool = True
     bot_sticker_dir: Path = Path("E:/assetclaw-matting-bot/miratsu_stickers")
-    bot_sticker_probability: float = 0.12
-    bot_sticker_cooldown_seconds: int = 600
+    bot_sticker_probability: float = 0.28
+    bot_sticker_cooldown_seconds: int = 180
     bot_sticker_max_bytes: int = 8_000_000
     bot_sticker_send_max_px: int = 240
     bot_sticker_extensions: str = ".png;.gif"

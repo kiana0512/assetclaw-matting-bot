@@ -258,12 +258,13 @@ def run_list(limit: int = 10, include_archived: bool = False, include_finished: 
     return {"ok": True, "count": len(items), "items": items}
 
 
-def run_cancel(run_id: str | None = None) -> dict[str, Any]:
+def run_cancel(run_id: str | None = None, notify: bool = True) -> dict[str, Any]:
     row = _get_run(run_id)
     if not row:
         return {"ok": False, "error": "cherry run not found"}
     _set_run_status(row["id"], "CANCELED")
-    _notify(row["id"], f"Cherry 任务已终止：{row['id']}")
+    if notify:
+        _notify(row["id"], f"Cherry 任务已终止：{row['id']}")
     return {"ok": True, "run_id": row["id"], "status": "CANCELED"}
 
 

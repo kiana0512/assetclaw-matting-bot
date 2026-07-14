@@ -149,13 +149,16 @@ def cancel(run_id: str | None = None, **_: Any) -> dict[str, Any]:
     run = _load(run_id)
     if not run:
         return {"ok": False, "error": "direct video run not found"}
+    cancel_results = _cancel_child_runs(run)
     run["status"] = "CANCELED"
     run["stage"] = "canceled"
+    run.setdefault("children", {})["cancel_results"] = cancel_results
     run["updated_at"] = _now()
     _append_log(run, "用户请求取消任务。")
+    if cancel_results:
+        _append_log(run, "已同步取消子任务：" + "，".join(_child_cancel_label(item) for item in cancel_results))
     _save(run)
-    _notify(run, f"已取消动画处理任务：{run['id']}")
-    return {"ok": True, "run_id": run["id"], "status": "CANCELED"}
+    return {"ok": True, "run_id": run["id"], "status": "CANCELED", "cancel_results": cancel_results, **_public(run)}
 
 
 def preview_start_confirmation(arguments: dict[str, Any], confirmation_id: str) -> str:
@@ -447,6 +450,38 @@ def _format_comfyui_failure(run_id: str, payload: dict[str, Any]) -> str:
     return "；".join(detail)
 
 
+def _cancel_child_runs(run: dict[str, Any]) -> list[dict[str, Any]]:
+    children = run.get("children") if isinstance(run.get("children"), dict) else {}
+    results: list[dict[str, Any]] = []
+    comfy_id = str(children.get("comfyui_run_id") or "").strip()
+    if comfy_id:
+        try:
+            from assetclaw_matting.skills.comfyui_skills import run_cancel as cancel_comfyui
+
+            result = cancel_comfyui(comfy_id, interrupt_current=True, notify=False)
+            results.append({"kind": "ComfyUI", "run_id": comfy_id, "ok": bool(result.get("ok")), "status": result.get("status"), "error": result.get("error") or result.get("queue_error") or ""})
+        except Exception as exc:
+            results.append({"kind": "ComfyUI", "run_id": comfy_id, "ok": False, "error": str(exc)})
+    cherry_ids = list(dict.fromkeys(str(item).strip() for item in (children.get("cherry_run_ids") or []) if str(item).strip()))
+    cherry_id = str(children.get("cherry_run_id") or "").strip()
+    if cherry_id and cherry_id not in cherry_ids:
+        cherry_ids.append(cherry_id)
+    for child_id in cherry_ids:
+        try:
+            from assetclaw_matting.skills.cherry_skills import run_cancel as cancel_cherry
+
+            result = cancel_cherry(child_id, notify=False)
+            results.append({"kind": "Cherry", "run_id": child_id, "ok": bool(result.get("ok")), "status": result.get("status"), "error": result.get("error") or ""})
+        except Exception as exc:
+            results.append({"kind": "Cherry", "run_id": child_id, "ok": False, "error": str(exc)})
+    return results
+
+
+def _child_cancel_label(item: dict[str, Any]) -> str:
+    status = item.get("status") or ("OK" if item.get("ok") else "失败")
+    return f"{item.get('kind')} {item.get('run_id')} {status}"
+
+
 def _notify(run: dict[str, Any], text: str) -> None:
     chat_id = str(run.get("chat_id") or "")
     if not chat_id:
@@ -533,9 +568,12 @@ def _cherry_plan_summary(items: list[dict[str, Any]]) -> str:
 def _load(run_id: str | None = None) -> dict[str, Any] | None:
     if run_id:
         path = RUNS_ROOT / run_id / "status.json"
-        if not path.exists():
-            return None
-        return json.loads(path.read_text(encoding="utf-8"))
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+        matched = _find_run_by_text(run_id)
+        if matched:
+            return matched
+        return None
     if not RUNS_ROOT.exists():
         return None
     paths = sorted(RUNS_ROOT.glob("VID_*/status.json"), key=lambda item: item.stat().st_mtime, reverse=True)
@@ -550,6 +588,29 @@ def _load(run_id: str | None = None) -> dict[str, Any] | None:
         if run.get("status") not in FINISHED:
             active.append(run)
     return active[0] if active else json.loads(paths[0].read_text(encoding="utf-8"))
+
+
+def _find_run_by_text(value: str) -> dict[str, Any] | None:
+    query = str(value or "").strip().lower()
+    if not query or not RUNS_ROOT.exists():
+        return None
+    paths = sorted(RUNS_ROOT.glob("VID_*/status.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+    fallback: dict[str, Any] | None = None
+    for path in paths:
+        try:
+            run = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        haystack = " ".join(
+            [str(run.get("id") or ""), str(run.get("run_label") or "")]
+            + [str(item.get("name") or item.get("source_path") or item.get("original_path") or "") for item in run.get("videos") or []]
+        ).lower()
+        if query not in haystack:
+            continue
+        if run.get("status") not in FINISHED:
+            return run
+        fallback = fallback or run
+    return fallback
 
 
 def _save(run: dict[str, Any]) -> None:

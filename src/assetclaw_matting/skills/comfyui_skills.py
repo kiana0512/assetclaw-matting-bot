@@ -350,7 +350,7 @@ def run_resume(run_id: str | None = None) -> dict[str, Any]:
     return {"ok": True, "run_id": row["id"], "status": "RUNNING", "message": "已拉起提交 worker。"}
 
 
-def run_cancel(run_id: str | None = None, interrupt_current: bool = True) -> dict[str, Any]:
+def run_cancel(run_id: str | None = None, interrupt_current: bool = True, notify: bool = True) -> dict[str, Any]:
     from assetclaw_matting.config import settings
     from assetclaw_matting.comfyui.client import comfyui_client
 
@@ -368,7 +368,8 @@ def run_cancel(run_id: str | None = None, interrupt_current: bool = True) -> dic
                 comfyui_client.interrupt()
         except Exception as exc:
             queue_error = str(exc)
-    _notify(row["id"], f"ComfyUI 任务已终止：{row['id']}")
+    if notify:
+        _notify(row["id"], f"ComfyUI 任务已终止：{row['id']}")
     return {"ok": True, "run_id": row["id"], "status": "CANCELED", "queue_error": queue_error}
 
 

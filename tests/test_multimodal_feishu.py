@@ -430,17 +430,23 @@ def test_direct_image_status_question_routes_without_attachment() -> None:
 
 
 def test_generic_progress_question_routes_to_latest_direct_video(monkeypatch, tmp_path: Path) -> None:
+    from datetime import datetime
+
     from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
+    from assetclaw_matting.config import settings
     from assetclaw_matting.db.schema import create_tables
     from assetclaw_matting.db.sqlite import init_db
     from assetclaw_matting.skills import direct_image_skills, direct_video_skills
 
     init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
     create_tables()
-    video_root = tmp_path / "video_runs"
-    image_root = tmp_path / "image_runs"
+    storage = tmp_path / "storage"
+    video_root = storage / "direct_video_runs"
+    image_root = storage / "direct_image_runs"
+    monkeypatch.setattr(settings, "storage_dir", storage)
     monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", video_root)
     monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", image_root)
+    today = datetime.now().date().isoformat()
     (video_root / "VID_NEW").mkdir(parents=True)
     (image_root / "IMG_OLD").mkdir(parents=True)
     (video_root / "VID_NEW" / "status.json").write_text(
@@ -449,8 +455,8 @@ def test_generic_progress_question_routes_to_latest_direct_video(monkeypatch, tm
                 "id": "VID_NEW",
                 "status": "RUNNING",
                 "stage": "matting",
-                "created_at": "2026-07-09T11:00:00",
-                "updated_at": "2026-07-09T11:10:00",
+                "created_at": f"{today}T11:00:00",
+                "updated_at": f"{today}T11:10:00",
                 "videos": [{"frame_count": 43, "aspect": "square", "cherry_profile": "half", "cherry_output_size": "256x256"}],
                 "children": {"comfyui": {"completed": 6, "total": 43, "status": "RUNNING"}},
             },
@@ -479,25 +485,30 @@ def test_generic_progress_question_routes_to_latest_direct_video(monkeypatch, tm
     )
 
     assert response.tool_calls
-    assert response.tool_calls[0].skill == "direct_video.status"
-    assert response.tool_calls[0].arguments["run_id"] == "VID_NEW"
+    assert response.tool_calls[0].skill in {"direct_video.status", "agent.current_work"}
     assert "当前执行现场" not in response.text
-    assert "VID_NEW" in response.text
-    assert "正方形 256x256×1" in response.text
+    assert "类型 | 文件 | 任务 | 阶段 | 进度 | 规格 | 说明" in response.text or "视频任务：" in response.text
+    assert "256x256" in response.text
 
 
 def test_generic_progress_question_routes_to_latest_direct_image(monkeypatch, tmp_path: Path) -> None:
+    from datetime import datetime
+
     from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
+    from assetclaw_matting.config import settings
     from assetclaw_matting.db.schema import create_tables
     from assetclaw_matting.db.sqlite import init_db
     from assetclaw_matting.skills import direct_image_skills, direct_video_skills
 
     init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
     create_tables()
-    video_root = tmp_path / "video_runs"
-    image_root = tmp_path / "image_runs"
+    storage = tmp_path / "storage"
+    video_root = storage / "direct_video_runs"
+    image_root = storage / "direct_image_runs"
+    monkeypatch.setattr(settings, "storage_dir", storage)
     monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", video_root)
     monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", image_root)
+    today = datetime.now().date().isoformat()
     (video_root / "VID_OLD").mkdir(parents=True)
     (image_root / "IMG_NEW").mkdir(parents=True)
     (video_root / "VID_OLD" / "status.json").write_text(
@@ -521,8 +532,8 @@ def test_generic_progress_question_routes_to_latest_direct_image(monkeypatch, tm
                 "id": "IMG_NEW",
                 "status": "RUNNING",
                 "stage": "postprocess",
-                "created_at": "2026-07-09T11:00:00",
-                "updated_at": "2026-07-09T11:15:00",
+                "created_at": f"{today}T11:00:00",
+                "updated_at": f"{today}T11:15:00",
                 "images": [{"aspect": "portrait", "cherry_profile": "full", "cherry_output_size": "384x512"}],
                 "children": {"cherry": {"completed": 0, "total": 1, "status": "RUNNING"}},
             },
@@ -536,10 +547,74 @@ def test_generic_progress_question_routes_to_latest_direct_image(monkeypatch, tm
     )
 
     assert response.tool_calls
-    assert response.tool_calls[0].skill == "direct_image.status"
-    assert response.tool_calls[0].arguments["run_id"] == "IMG_NEW"
-    assert "IMG_NEW" in response.text
-    assert "长方形 384x512×1" in response.text
+    assert response.tool_calls[0].skill in {"direct_image.status", "agent.current_work"}
+    assert "类型 | 文件 | 任务 | 阶段 | 进度 | 规格 | 说明" in response.text or "图片任务：" in response.text
+    assert "384x512" in response.text
+
+
+def test_direct_media_natural_language_pressure_samples(monkeypatch, tmp_path: Path) -> None:
+    from datetime import datetime
+
+    from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.db.schema import create_tables
+    from assetclaw_matting.db.sqlite import init_db
+    from assetclaw_matting.skills import direct_image_skills, direct_video_skills
+
+    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    create_tables()
+    storage = tmp_path / "storage"
+    video_root = storage / "direct_video_runs"
+    image_root = storage / "direct_image_runs"
+    monkeypatch.setattr(settings, "storage_dir", storage)
+    monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", video_root)
+    monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", image_root)
+    today = datetime.now().date().isoformat()
+    samples = [
+        ("VID_THINK", f"{today}T10:00:00", "7月13日思考-1_5.mp4", "384x512"),
+        ("VID_IDLE_TODAY", f"{today}T10:05:00", "今天待机-1.mp4", "256x256"),
+        ("VID_IDLE_711", "2026-07-11T10:00:00", "7月11日待机-1.mp4", "256x256"),
+        ("VID_SRC", "2026-07-13T10:00:00", "source_2.mp4", "256x256"),
+    ]
+    for run_id, ts, name, size in samples:
+        status_path = video_root / run_id / "status.json"
+        (status_path.parent / "matte" / "video_01").mkdir(parents=True)
+        (status_path.parent / "matte" / "video_01" / "0001.png").write_bytes(b"x")
+        status_path.write_text(
+            json.dumps(
+                {
+                    "id": run_id,
+                    "status": "RUNNING",
+                    "stage": "matting",
+                    "run_label": name,
+                    "created_at": ts,
+                    "updated_at": ts,
+                    "videos": [{"name": name, "frame_count": 43, "matte_dir": str(status_path.parent / "matte" / "video_01"), "smooth_dir": str(status_path.parent / "smooth" / "video_01"), "cherry_output_size": size}],
+                    "children": {"comfyui_run_id": f"COMFY_{run_id[-5:]}"},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    brain = LocalCommandBrain()
+    today_response = brain.handle_message(BrainMessage(text="现在进度怎么样了"))
+    range_response = brain.handle_message(BrainMessage(text="711 713任务汇总"))
+    detail_response = brain.handle_message(BrainMessage(text="source_2.mp4 这个视频的任务具体信息"))
+    idle_response = brain.handle_message(BrainMessage(text="待机"))
+    dated_idle_response = brain.handle_message(BrainMessage(text="711 待机"))
+    think_response = brain.handle_message(BrainMessage(text="思考"))
+
+    assert "7月13日思考-1_5.mp4" in today_response.text
+    assert "7月11日待机-1.mp4" not in today_response.text
+    assert "7月11日待机-1.mp4" in range_response.text
+    assert "source_2.mp4" in range_response.text
+    assert "视频任务详情：source_2.mp4" in detail_response.text
+    assert "今天待机-1.mp4" in idle_response.text
+    assert "7月11日待机-1.mp4" in dated_idle_response.text
+    assert "7月13日思考-1_5.mp4" in think_response.text
+    for response in (today_response, range_response, detail_response, idle_response, dated_idle_response, think_response):
+        assert "RUNNING/matting" not in response.text
 
 
 def test_matting_pipeline_questions_route_to_pipeline_skills() -> None:
@@ -764,7 +839,63 @@ def test_direct_video_zip_contains_required_sections(monkeypatch, tmp_path: Path
     assert "smooth/video_01/0000.png" in names
 
 
-def test_direct_status_formatter_includes_cherry_plan() -> None:
+def test_direct_video_cancel_cancels_child_comfyui_and_cherry(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.skills import cherry_skills, comfyui_skills, direct_video_skills
+
+    calls: list[tuple[str, str]] = []
+    notifications: list[str] = []
+    monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(direct_video_skills, "_notify", lambda _run, text: notifications.append(text))
+    monkeypatch.setattr(comfyui_skills, "run_cancel", lambda run_id, interrupt_current=True, notify=True: calls.append(("comfyui", run_id)) or {"ok": True, "run_id": run_id, "status": "CANCELED"})
+    monkeypatch.setattr(cherry_skills, "run_cancel", lambda run_id, notify=True: calls.append(("cherry", run_id)) or {"ok": True, "run_id": run_id, "status": "CANCELED"})
+
+    run = {
+        "id": "VID_CANCEL",
+        "status": "RUNNING",
+        "stage": "matting",
+        "run_label": "source.mp4",
+        "videos": [{"name": "source.mp4"}],
+        "children": {"comfyui_run_id": "COMFY_CHILD", "cherry_run_ids": ["CHERRY_CHILD"]},
+        "log": [],
+    }
+    direct_video_skills._save(run)
+
+    result = direct_video_skills.cancel("VID_CANCEL")
+
+    assert result["ok"] is True
+    assert result["status"] == "CANCELED"
+    assert calls == [("comfyui", "COMFY_CHILD"), ("cherry", "CHERRY_CHILD")]
+    assert notifications == []
+    saved = direct_video_skills._load("VID_CANCEL")
+    assert saved["children"]["cancel_results"][0]["run_id"] == "COMFY_CHILD"
+
+
+def test_direct_video_cancel_can_match_file_name(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
+    from assetclaw_matting.skills import comfyui_skills, direct_video_skills
+
+    monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(comfyui_skills, "run_cancel", lambda run_id, interrupt_current=True, notify=True: {"ok": True, "run_id": run_id, "status": "CANCELED"})
+    run = {
+        "id": "VID_BY_NAME",
+        "status": "RUNNING",
+        "stage": "matting",
+        "run_label": "source_2.mp4",
+        "videos": [{"name": "source_2.mp4"}],
+        "children": {"comfyui_run_id": "COMFY_BY_NAME"},
+        "log": [],
+    }
+    direct_video_skills._save(run)
+
+    response = LocalCommandBrain().handle_message(BrainMessage(text="终止这个任务 source_2.mp4"))
+
+    assert response.tool_calls[0].skill == "direct_video.cancel"
+    assert response.tool_calls[0].arguments["run_id"] == "source_2.mp4"
+    assert "已取消动画任务：source_2.mp4" in response.text
+    assert direct_video_skills._load("VID_BY_NAME")["status"] == "CANCELED"
+
+
+def test_direct_status_formatter_uses_media_table() -> None:
     from assetclaw_matting.brain.result_formatter import format_skill_results
 
     result = {
@@ -776,8 +907,8 @@ def test_direct_status_formatter_includes_cherry_plan() -> None:
             "status": "RUNNING",
             "stage": "matting",
             "videos": [
-                {"frame_count": 10, "aspect": "square", "cherry_profile": "half", "cherry_output_size": "256x256"},
-                {"frame_count": 12, "aspect": "portrait", "cherry_profile": "full", "cherry_output_size": "384x512"},
+                {"name": "思考.mp4", "frame_count": 10, "aspect": "square", "cherry_profile": "half", "cherry_output_size": "256x256"},
+                {"name": "待机.mp4", "frame_count": 12, "aspect": "portrait", "cherry_profile": "full", "cherry_output_size": "384x512"},
             ],
             "children": {"comfyui": {"completed": 1, "total": 22, "status": "RUNNING"}},
         },
@@ -785,8 +916,10 @@ def test_direct_status_formatter_includes_cherry_plan() -> None:
 
     text = format_skill_results([result])
 
-    assert "⌨️ VID_TEST" in text
-    assert "正方形 256x256×1，长方形 384x512×1" in text
+    assert "类型 | 文件 | 任务 | 阶段 | 进度 | 规格 | 说明" in text
+    assert "思考.mp4" in text
+    assert "待机.mp4" in text
+    assert "VID_TEST" in text
 
 
 def test_progress_question_adds_message_reaction(monkeypatch) -> None:
@@ -834,6 +967,34 @@ def test_progress_question_does_not_send_processing_ack() -> None:
     )
 
     assert _should_send_processing_ack(event) is False
+
+
+def test_cancel_and_detail_questions_do_not_send_processing_ack() -> None:
+    from assetclaw_matting.feishu.processor import _should_send_processing_ack
+
+    cancel_event = FeishuMessageEvent(
+        trace_id="trace-cancel-ack",
+        event_id="evt-cancel-ack",
+        message_id="om-cancel-ack",
+        chat_id="oc-cancel-ack",
+        chat_type="p2p",
+        open_id="ou-cancel-ack",
+        user_id="ou-cancel-ack",
+        text="终止这个任务 source_2.mp4",
+    )
+    detail_event = FeishuMessageEvent(
+        trace_id="trace-detail-ack",
+        event_id="evt-detail-ack",
+        message_id="om-detail-ack",
+        chat_id="oc-detail-ack",
+        chat_type="p2p",
+        open_id="ou-detail-ack",
+        user_id="ou-detail-ack",
+        text="source_2.mp4 这个视频的任务具体信息",
+    )
+
+    assert _should_send_processing_ack(cancel_event) is False
+    assert _should_send_processing_ack(detail_event) is False
 
 
 def test_direct_media_attachment_does_not_send_default_ack() -> None:

@@ -8,6 +8,8 @@ from typing import Any
 from PIL import Image, ImageSequence
 
 _LAST_SENT_AT_BY_CHAT: dict[str, float] = {}
+_STICKER_CACHE: dict[str, Any] = {"key": None, "items": [], "ts": 0.0}
+_STICKER_CACHE_TTL_SECONDS = 30.0
 
 
 def sticker_status() -> dict[str, Any]:
@@ -115,6 +117,10 @@ def _collect_stickers() -> list[Path]:
         return []
     exts = set(settings.bot_sticker_extensions_list or [".png", ".gif"])
     max_bytes = max(1, int(settings.bot_sticker_max_bytes or 1))
+    cache_key = (str(root), tuple(sorted(exts)), max_bytes)
+    now = time.time()
+    if _STICKER_CACHE.get("key") == cache_key and now - float(_STICKER_CACHE.get("ts") or 0.0) <= _STICKER_CACHE_TTL_SECONDS:
+        return list(_STICKER_CACHE.get("items") or [])
     items: list[Path] = []
     for path in root.rglob("*"):
         if not path.is_file():
@@ -127,7 +133,9 @@ def _collect_stickers() -> list[Path]:
         except OSError:
             continue
         items.append(path)
-    return sorted(items, key=lambda item: str(item).lower())
+    result = sorted(items, key=lambda item: str(item).lower())
+    _STICKER_CACHE.update({"key": cache_key, "items": result, "ts": now})
+    return result
 
 
 def _should_send(reply_text: str) -> bool:

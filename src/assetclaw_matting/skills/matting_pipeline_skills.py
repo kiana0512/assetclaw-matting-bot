@@ -119,21 +119,6 @@ def ensure_latest_for_task(force_copy: bool = False, **_: Any) -> dict[str, Any]
     after_pull = status()
     needs_sync = _needs_asset_sync(after_pull)
     queue = _comfyui_queue_activity()
-    if needs_sync and queue.get("active"):
-        result = {
-            "ok": False,
-            "error": "抠图管线有更新，但 ComfyUI 当前有 running/pending 任务；为避免替换 workflow/lora/custom node 影响正在跑的任务，已停止启动新任务。等队列空闲后再启动会自动更新。",
-            "repo_url": settings.matting_pipeline_repo_url,
-            "repo_dir": str(repo),
-            "queue": queue,
-            "before_commit": before.get("commit", ""),
-            "commit": after_pull.get("commit", ""),
-            "commit_time": after_pull.get("commit_time", ""),
-            "up_to_date": after_pull.get("up_to_date"),
-            "needs_sync": True,
-        }
-        _remember_preflight(result)
-        return result
     synced = []
     if needs_sync:
         for item in _asset_plan():

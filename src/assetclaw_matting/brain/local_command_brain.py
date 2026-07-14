@@ -120,9 +120,19 @@ class LocalCommandBrain(BrainProvider):
             return [ToolCall(skill="direct_video.status", arguments={"run_id": match.group(1) if match else None})]
         if any(kw in text for kw in ("视频处理任务", "直传视频任务")) and any(kw in text for kw in ("有哪些", "列表", "列出", "当前任务")):
             return [ToolCall(skill="direct_video.list", arguments={"include_finished": any(kw in text for kw in ("全部", "历史", "已结束"))})]
-        if any(kw in text for kw in ("取消视频处理", "停止视频处理", "取消直传视频", "停止直传视频")):
-            match = re.search(r"(VID_[A-Fa-f0-9]{12})", text)
-            return [ToolCall(skill="direct_video.cancel", arguments={"run_id": match.group(1) if match else None})]
+        comfy_cancel_match = re.search(r"(COMFY_[A-Fa-f0-9]{12})", text)
+        if comfy_cancel_match and any(kw in text for kw in ("终止", "取消", "停止", "别跑了")):
+            return [ToolCall(skill="comfyui.run_cancel", arguments={"run_id": comfy_cancel_match.group(1), "interrupt_current": True})]
+        if any(kw in text for kw in ("取消视频处理", "停止视频处理", "取消直传视频", "停止直传视频", "取消这个任务", "终止这个任务", "停止这个任务", "结束这个任务")):
+            match = re.search(r"(VID_[A-Fa-f0-9]{8,16})", text)
+            file_match = re.search(r"([^\s，。|/\\]+(?:\s?\([^)]+\))?\.(?:mp4|mov|avi|webm))", text, re.IGNORECASE)
+            run_id = match.group(1) if match else (file_match.group(1).strip(" ：:，。,.") if file_match else None)
+            return [ToolCall(skill="direct_video.cancel", arguments={"run_id": run_id})]
+        if any(kw in text for kw in ("取消图片处理", "停止图片处理", "取消这张图", "停止这张图")):
+            match = re.search(r"(IMG_[A-Fa-f0-9]{8,16})", text)
+            file_match = re.search(r"([^\s，。|/\\]+(?:\s?\([^)]+\))?\.(?:png|jpg|jpeg|webp))", text, re.IGNORECASE)
+            run_id = match.group(1) if match else (file_match.group(1).strip(" ：:，。,.") if file_match else None)
+            return [ToolCall(skill="direct_image.cancel", arguments={"run_id": run_id})]
         if any(kw in text for kw in ("表情包状态", "情绪回复配置", "表情包池", "sticker status")):
             return [ToolCall(skill="sticker.info", arguments={})]
         if any(kw in text for kw in ("随机发个表情包", "发个表情包", "来个表情包", "发个 sticker", "发个sticker")):

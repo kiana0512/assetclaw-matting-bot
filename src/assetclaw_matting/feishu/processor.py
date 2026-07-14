@@ -220,7 +220,9 @@ def _try_handle_confirmation(
     from assetclaw_matting.db.repos import (
         get_pending_confirmation_by_id,
         get_latest_pending_confirmation,
+        claim_pending_confirmation,
         mark_pending_confirmation,
+        supersede_similar_pending_confirmations,
         update_event_dedup_status,
     )
 
@@ -271,11 +273,6 @@ def _try_handle_confirmation(
     from assetclaw_matting.brain.result_formatter import format_skill_results
     from assetclaw_matting.skills.registry import call_skill
 
-    if len(pending_items) == 1:
-        pending_text = "收到，开始处理。"
-    else:
-        pending_text = f"收到，开始处理 {len(pending_items)} 个任务。"
-    _try_reply(event.message_id, event.chat_id, pending_text)
     context_token = set_runtime_context(
         channel="feishu",
         chat_id=event.chat_id,
@@ -285,8 +282,15 @@ def _try_handle_confirmation(
         trace_id=trace_id,
     )
     results = []
+    claimed_count = 0
     try:
         for pending in pending_items:
+            if not claim_pending_confirmation(pending["id"]):
+                continue
+            claimed_count += 1
+            if claimed_count == 1:
+                pending_text = "收到，开始处理。" if len(pending_items) == 1 else f"收到，开始处理 {len(pending_items)} 个任务。"
+                _try_reply(event.message_id, event.chat_id, pending_text)
             trace(
                 "skill.confirmed_execute",
                 trace_id=trace_id,
@@ -296,11 +300,17 @@ def _try_handle_confirmation(
                 arguments=pending["arguments"],
             )
             arguments = _normalize_confirmed_arguments(pending["skill"], dict(pending["arguments"] or {}))
+            supersede_similar_pending_confirmations(conversation_id, user_key, pending["skill"], arguments, pending["id"])
             result = call_skill(pending["skill"], arguments, requested_by="feishu_confirmed")
             mark_pending_confirmation(pending["id"], "executed" if result.get("ok") else "failed")
             results.append(result)
     finally:
         reset_runtime_context(context_token)
+    if not results:
+        text_out = "这个确认已经处理过了。"
+        update_event_dedup_status(dedup_key, "success")
+        _try_send_chat(event.chat_id, text_out)
+        return FeishuProcessResult(ok=True, trace_id=trace_id, reply_text=text_out)
     update_event_dedup_status(dedup_key, "success" if all(result.get("ok") for result in results) else "failed")
     text_out = format_skill_results(results)
     if missing:
@@ -635,6 +645,8 @@ def _should_send_processing_ack(event: FeishuMessageEvent) -> bool:
         return False
     if _is_progress_query(text):
         return False
+    if _is_task_control_query(text):
+        return False
     try:
         from assetclaw_matting.brain.emotion_planner import plan_emotional_reply
 
@@ -659,6 +671,31 @@ def _is_progress_query(text: str) -> bool:
             "处理到哪",
             "完成了吗",
             "好了吗",
+            "具体信息",
+            "详细信息",
+            "任务详情",
+            "汇总",
+        )
+    )
+
+
+def _is_task_control_query(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", text or "")
+    return any(
+        keyword in normalized
+        for keyword in (
+            "取消任务",
+            "终止任务",
+            "停止任务",
+            "取消这个任务",
+            "终止这个任务",
+            "停止这个任务",
+            "取消视频",
+            "终止视频",
+            "停止视频",
+            "取消图片",
+            "终止图片",
+            "停止图片",
         )
     )
 

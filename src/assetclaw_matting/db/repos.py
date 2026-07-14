@@ -399,3 +399,37 @@ def mark_pending_confirmation(confirmation_id: str, status: str) -> None:
             "UPDATE pending_confirmations SET status = ? WHERE id = ?",
             (status, confirmation_id),
         )
+
+
+def claim_pending_confirmation(confirmation_id: str) -> bool:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "UPDATE pending_confirmations SET status = 'executing' WHERE id = ? AND status = 'pending'",
+            (confirmation_id,),
+        )
+        return cursor.rowcount > 0
+
+
+def supersede_similar_pending_confirmations(
+    conversation_id: str,
+    user_id: str,
+    skill: str,
+    arguments: dict[str, Any],
+    keep_id: str,
+) -> int:
+    args_json = redact_secrets(json.dumps(arguments, ensure_ascii=False, default=str))
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE pending_confirmations
+            SET status = 'superseded'
+            WHERE conversation_id = ?
+              AND user_id = ?
+              AND skill = ?
+              AND arguments_json = ?
+              AND id != ?
+              AND status = 'pending'
+            """,
+            (conversation_id, user_id, skill, args_json, keep_id),
+        )
+        return cursor.rowcount

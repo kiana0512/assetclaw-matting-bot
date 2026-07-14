@@ -871,7 +871,10 @@ def _format_animation_status(payload: dict[str, Any]) -> list[str]:
 def _format_agent_current_work(payload: dict[str, Any]) -> list[str]:
     active = payload.get("active") or []
     lines: list[str] = []
-    if active:
+    media_lines = _format_direct_media_overview(payload)
+    if media_lines:
+        lines.extend(media_lines)
+    elif active:
         parts = []
         for item in active[:6]:
             progress = _run_progress(item)
@@ -889,6 +892,204 @@ def _format_agent_current_work(payload: dict[str, Any]) -> list[str]:
     if gpu:
         lines.extend(_format_gpu_status(gpu))
     return lines
+
+
+def _format_direct_media_overview(payload: dict[str, Any]) -> list[str]:
+    video_runs = payload.get("direct_videos") or []
+    image_runs = payload.get("direct_images") or []
+    filters = payload.get("filters") or {}
+    lines: list[str] = []
+    if filters.get("detail"):
+        detail_lines = _format_direct_media_detail(video_runs, image_runs, filters)
+        if detail_lines:
+            return detail_lines
+    active_video_runs = [run for run in video_runs if str(run.get("status") or "") not in {"DONE", "FAILED", "CANCELED", "DONE_WITH_ERRORS"}]
+    active_image_runs = [run for run in image_runs if str(run.get("status") or "") not in {"DONE", "FAILED", "CANCELED", "DONE_WITH_ERRORS"}]
+    explicit_scope = bool(filters.get("date_start") or filters.get("date_end") or filters.get("query"))
+    recent_video_runs = video_runs if explicit_scope else (active_video_runs or video_runs[:2])
+    recent_image_runs = image_runs if explicit_scope else (active_image_runs or image_runs[:2])
+    rows: list[dict[str, str]] = []
+    seen_files: set[tuple[str, str]] = set()
+    for run in recent_video_runs[:4]:
+        for item in (run.get("items") or [])[:6]:
+            row = _media_item_row("视频", item)
+            key = ("视频", row["文件"].lower())
+            if key in seen_files:
+                continue
+            seen_files.add(key)
+            rows.append(row)
+    for run in recent_image_runs[:4]:
+        for item in (run.get("items") or [])[:6]:
+            row = _media_item_row("图片", item)
+            key = ("图片", row["文件"].lower())
+            if key in seen_files:
+                continue
+            seen_files.add(key)
+            rows.append(row)
+    if rows:
+        lines.append(_media_scope_title(filters, len(rows)))
+        lines.extend(_format_media_table(rows))
+    return lines
+
+
+def _format_direct_media_detail(video_runs: list[dict[str, Any]], image_runs: list[dict[str, Any]], filters: dict[str, Any]) -> list[str]:
+    runs = [("视频", run) for run in video_runs] + [("图片", run) for run in image_runs]
+    if not runs:
+        return []
+    kind, run = runs[0]
+    items = run.get("items") or []
+    title_name = _clean_media_name(str((items[0] or {}).get("name") or run.get("run_label") or "未命名素材")) if items else str(run.get("run_label") or run.get("run_id") or "未命名任务")
+    lines = [f"{kind}任务详情：{title_name}（{run.get('run_id')}）"]
+    lines.append(f"状态：{_run_status_label(str(run.get('status') or ''))} / {_stage_label(str(run.get('stage') or ''))}")
+    if run.get("updated_at"):
+        lines.append(f"更新时间：{run.get('updated_at')}")
+    if items:
+        lines.append("素材：")
+        for item in items[:8]:
+            row = _media_item_row(kind, item)
+            lines.append(f"- {row['文件']}：{row['阶段']}，{row['进度']}，规格 {row['规格'] or '-'}")
+    frame_total = sum(int(item.get("frame_done") or item.get("total") or 0) for item in items) if kind == "视频" else 0
+    matte_total = sum(int(item.get("total") or 0) for item in items)
+    matte_done = sum(int(item.get("matte_done") or 0) for item in items)
+    smooth_done = sum(int(item.get("smooth_done") or 0) for item in items)
+    lines.append("阶段：")
+    if kind == "视频":
+        lines.append(f"- 抽帧：{frame_total} 帧" if frame_total else "- 抽帧：等待/未开始")
+    else:
+        lines.append("- 抽帧：图片任务不需要抽帧")
+    comfy_id = str((items[0] or {}).get("comfyui_run_id") or "") if items else ""
+    lines.append(f"- 抠图：{matte_done}/{matte_total}" + (f"，{comfy_id}" if comfy_id else ""))
+    cherry_id = str((items[0] or {}).get("cherry_run_id") or "") if items else ""
+    lines.append(f"- 后处理：{smooth_done}/{matte_total}" + (f"，{cherry_id}" if cherry_id else ""))
+    if run.get("status") == "DONE":
+        lines.append("- 打包/发送：完成")
+    elif run.get("status") == "CANCELED":
+        lines.append("- 打包/发送：已取消")
+    elif str(run.get("stage") or "") in {"zip", "send", "done"}:
+        lines.append(f"- 打包/发送：{_stage_label(str(run.get('stage') or ''))}")
+    else:
+        lines.append("- 打包/发送：等待前序阶段完成")
+    last_log = ""
+    for item in items:
+        last_log = str(item.get("last_log") or "").strip()
+        if last_log:
+            break
+    if last_log:
+        lines.append(f"最近记录：{last_log}")
+    return lines
+
+
+def _media_scope_title(filters: dict[str, Any], count: int) -> str:
+    start = str(filters.get("date_start") or "")
+    end = str(filters.get("date_end") or "")
+    query = str(filters.get("query") or "").strip()
+    if start and end and start == end:
+        scope = f"{start} 任务"
+    elif start and end:
+        scope = f"{start} 至 {end} 任务"
+    elif query:
+        scope = f"{query} 相关任务"
+    else:
+        scope = "当前任务"
+    return f"{scope}：{count} 项"
+
+
+def _stage_label(stage: str) -> str:
+    return {
+        "extract_frames": "抽帧",
+        "matting": "抠图",
+        "postprocess": "后处理",
+        "zip": "打包",
+        "send": "发送",
+        "done": "完成",
+        "canceled": "取消",
+        "queued": "排队",
+        "pending": "排队",
+    }.get(stage, stage or "-")
+
+
+def _run_status_label(status: str) -> str:
+    return {
+        "RUNNING": "运行中",
+        "QUEUED": "排队中",
+        "PENDING": "等待中",
+        "PAUSED": "已暂停",
+        "DONE": "完成",
+        "DONE_WITH_ERRORS": "部分完成",
+        "FAILED": "失败",
+        "CANCELED": "已取消",
+    }.get(status, status or "-")
+
+
+def _format_media_item_line(kind: str, item: dict[str, Any]) -> str:
+    row = _media_item_row(kind, item)
+    return f"- {row['文件']}：{row['阶段']}，{row['进度']}{('，' + row['规格']) if row['规格'] else ''}"
+
+
+def _media_item_row(kind: str, item: dict[str, Any]) -> dict[str, str]:
+    name = _clean_media_name(str(item.get("name") or "未命名素材"))
+    status = str(item.get("status") or "处理中")
+    run_id = str(item.get("run_id") or "")
+    run_status = str(item.get("run_status") or "")
+    run_stage = str(item.get("run_stage") or "")
+    total = int(item.get("total") or 0)
+    matte_done = int(item.get("matte_done") or 0)
+    smooth_done = int(item.get("smooth_done") or 0)
+    output_size = str(item.get("output_size") or "")
+    if status in {"抠图中", "排队抠图", "等待抠图", "等待后处理"}:
+        progress = f"抠图 {matte_done}/{total}" if total else "抠图中"
+    elif status in {"后处理中", "排队后处理", "等待打包"}:
+        progress = f"后处理 {smooth_done}/{total}" if total else "后处理中"
+    elif status == "完成":
+        progress = "已完成"
+    elif status == "抽帧中":
+        progress = f"已抽帧 {total}" if total else "抽帧中"
+    else:
+        progress = status
+    note_parts = []
+    if run_status and run_stage:
+        note_parts.append(f"{_run_status_label(run_status)}/{_stage_label(run_stage)}")
+    elif run_status:
+        note_parts.append(_run_status_label(run_status))
+    child_id = str(item.get("comfyui_run_id") or item.get("cherry_run_id") or "")
+    if child_id:
+        note_parts.append(child_id)
+    if status == "已取消":
+        note_parts.append("后端队列已同步取消")
+    last_log = str(item.get("last_log") or "").strip()
+    if last_log and status not in {"完成", "已取消"}:
+        note_parts.append(last_log)
+    return {
+        "类型": kind,
+        "文件": name,
+        "任务": run_id,
+        "阶段": status,
+        "进度": progress,
+        "规格": output_size,
+        "说明": "；".join(note_parts),
+    }
+
+
+def _format_media_table(rows: list[dict[str, str]]) -> list[str]:
+    headers = ["类型", "文件", "任务", "阶段", "进度", "规格", "说明"]
+    lines = [" | ".join(headers), " | ".join("---" for _ in headers)]
+    for row in rows[:12]:
+        lines.append(" | ".join(_table_cell(row.get(header, "")) for header in headers))
+    if len(rows) > 12:
+        lines.append(f"还有 {len(rows) - 12} 项未显示。")
+    return lines
+
+
+def _table_cell(value: str) -> str:
+    text = str(value or "").replace("\r", " ").replace("\n", " ").replace("|", "/").strip()
+    return text if len(text) <= 34 else text[:31] + "..."
+
+
+def _clean_media_name(name: str) -> str:
+    text = name.strip().replace("\\", "/").split("/")[-1]
+    if text.startswith(("01_", "02_", "03_", "04_", "05_", "06_", "07_", "08_", "09_")):
+        return text[3:]
+    return text
 
 
 def _format_agent_diagnose(payload: dict[str, Any]) -> list[str]:
@@ -1263,9 +1464,15 @@ def _format_direct_video(skill: str, payload: dict[str, Any], max_items: int) ->
             lines.append(f"- {item.get('run_id')}：{item.get('status')} / {item.get('stage')} / {len(item.get('videos') or [])} 个视频")
         return lines
     if skill == "direct_video.cancel":
-        return [f"{run_id}：{status}"]
+        names = "、".join(_clean_media_name(str(item.get("name") or item.get("source_path") or "")) for item in videos[:4] if item)
+        label = names or str(payload.get("run_label") or run_id)
+        return [f"已取消动画任务：{label}。ComfyUI 队列已同步取消。"]
 
-    summary = f"⌨️ {run_id}：{stage}/{status}"
+    media_items = [_direct_video_status_item(payload, item) for item in videos]
+    if media_items:
+        lines.append("视频任务：")
+        lines.extend(_format_media_table([_media_item_row("视频", item) for item in media_items[:max_items]]))
+    summary = f"任务状态：{stage}/{status}"
     if videos:
         frame_total = sum(int(item.get("frame_count") or 0) for item in videos)
         summary += f"，视频 {len(videos)}"
@@ -1280,7 +1487,8 @@ def _format_direct_video(skill: str, payload: dict[str, Any], max_items: int) ->
     cherry = children.get("cherry") if isinstance(children.get("cherry"), dict) else {}
     if cherry:
         summary += f"，后处理 {cherry.get('completed', 0)}/{cherry.get('total', 0)}"
-    lines.append(summary)
+    if not media_items:
+        lines.append(summary)
     if payload.get("zip_path"):
         lines.append("zip：已生成")
     if payload.get("error"):
@@ -1309,22 +1517,107 @@ def _format_direct_image(skill: str, payload: dict[str, Any], max_items: int) ->
             lines.append(f"- {item.get('run_id')}：{item.get('status')} / {item.get('stage')} / {len(item.get('images') or [])} 张图片")
         return lines
     if skill == "direct_image.cancel":
-        return [f"{run_id}：{status}"]
-    summary = f"⌨️ {run_id}：{stage}/{status}，图片 {len(images)}"
+        names = "、".join(_clean_media_name(str(item.get("name") or item.get("source_path") or "")) for item in images[:4] if item)
+        label = names or str(payload.get("run_label") or run_id)
+        return [f"已取消图片任务：{label}。ComfyUI 队列已同步取消。"]
+    media_items = [_direct_image_status_item(payload, item) for item in images]
+    if media_items:
+        lines = ["图片任务："]
+        lines.extend(_format_media_table([_media_item_row("图片", item) for item in media_items[:max_items]]))
+    else:
+        lines = [f"图片任务：{stage}/{status}，图片 {len(images)}"]
     cherry_plan = _cherry_plan_summary(images)
     if cherry_plan:
-        summary += f"，{cherry_plan.replace('后处理：', '').replace('后处理 ', '')}"
+        lines.append(cherry_plan)
     if comfy:
-        summary += f"，抠图 {comfy.get('completed', 0)}/{comfy.get('total', 0)}"
+        lines.append(f"整体抠图：{comfy.get('completed', 0)}/{comfy.get('total', 0)}")
     if cherry:
-        summary += f"，后处理 {cherry.get('completed', 0)}/{cherry.get('total', 0)}"
-    lines = [summary]
+        lines.append(f"整体后处理：{cherry.get('completed', 0)}/{cherry.get('total', 0)}")
     sent = payload.get("sent_files") or []
     if sent:
         lines.append(f"已发回附件：{len(sent)} 个")
     if payload.get("error"):
         lines.append(f"错误：{payload.get('error')}")
     return lines
+
+
+def _direct_video_status_item(payload: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    frame_total = int(item.get("frame_count") or 0)
+    matte_done = _count_pngs_text(item.get("matte_dir"))
+    smooth_done = _count_pngs_text(item.get("smooth_dir"))
+    children = payload.get("children") if isinstance(payload.get("children"), dict) else {}
+    return {
+        "run_id": payload.get("run_id") or payload.get("id") or "",
+        "run_status": payload.get("status") or "",
+        "run_stage": payload.get("stage") or "",
+        "run_label": payload.get("run_label") or "",
+        "updated_at": payload.get("updated_at") or "",
+        "name": item.get("name") or item.get("source_path") or "未命名视频",
+        "status": _media_status_from_stage(str(payload.get("status") or ""), str(payload.get("stage") or ""), frame_total, matte_done, smooth_done),
+        "total": frame_total,
+        "matte_done": matte_done,
+        "smooth_done": smooth_done,
+        "output_size": item.get("cherry_output_size") or "",
+        "comfyui_run_id": children.get("comfyui_run_id") or "",
+        "cherry_run_id": children.get("cherry_run_id") or "",
+        "last_log": payload.get("last_log") or "",
+    }
+
+
+def _direct_image_status_item(payload: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    matte_done = _count_pngs_text(item.get("matte_dir"))
+    smooth_done = _count_pngs_text(item.get("smooth_dir"))
+    children = payload.get("children") if isinstance(payload.get("children"), dict) else {}
+    return {
+        "run_id": payload.get("run_id") or payload.get("id") or "",
+        "run_status": payload.get("status") or "",
+        "run_stage": payload.get("stage") or "",
+        "run_label": payload.get("run_label") or "",
+        "updated_at": payload.get("updated_at") or "",
+        "name": item.get("name") or item.get("source_path") or "未命名图片",
+        "status": _media_status_from_stage(str(payload.get("status") or ""), str(payload.get("stage") or ""), 1, matte_done, smooth_done),
+        "total": 1,
+        "matte_done": matte_done,
+        "smooth_done": smooth_done,
+        "output_size": item.get("cherry_output_size") or "",
+        "comfyui_run_id": children.get("comfyui_run_id") or "",
+        "cherry_run_id": children.get("cherry_run_id") or "",
+        "last_log": payload.get("last_log") or "",
+    }
+
+
+def _media_status_from_stage(run_status: str, stage: str, total: int, matte_done: int, smooth_done: int) -> str:
+    if run_status == "DONE":
+        return "完成"
+    if run_status in {"FAILED", "CANCELED", "DONE_WITH_ERRORS"}:
+        return {"FAILED": "失败", "CANCELED": "已取消", "DONE_WITH_ERRORS": "部分完成"}.get(run_status, run_status)
+    if stage == "extract_frames":
+        return "抽帧中"
+    if stage == "matting":
+        if total and matte_done >= total:
+            return "等待后处理"
+        return "抠图中" if matte_done else "排队抠图"
+    if stage == "postprocess":
+        if total and smooth_done >= total:
+            return "等待打包"
+        return "后处理中" if smooth_done else "排队后处理"
+    if stage == "zip":
+        return "打包中"
+    if stage == "done":
+        return "完成"
+    return stage or run_status or "处理中"
+
+
+def _count_pngs_text(path_value: object) -> int:
+    from pathlib import Path
+
+    path = Path(str(path_value or ""))
+    if not path.exists():
+        return 0
+    try:
+        return sum(1 for item in path.rglob("*.png") if item.is_file())
+    except OSError:
+        return 0
 
 
 def _brief_pipeline_notice(text: str) -> str:
@@ -1403,54 +1696,49 @@ def _format_gpu_status(payload: dict[str, Any]) -> list[str]:
 
 
 def _format_matting_pipeline(skill: str, payload: dict[str, Any], max_items: int) -> list[str]:
-    lines = ["抠图管线：ImageClip"]
-    repo_dir = payload.get("repo_dir")
-    if repo_dir:
-        lines.append(f"本地仓库：{repo_dir}")
-    if payload.get("repo_url"):
-        lines.append(f"远程：{payload.get('repo_url')}")
+    lines: list[str] = []
+    name = "抠图管线：ImageClip"
+    if payload.get("up_to_date") is True:
+        name += "，已是最新版本。"
+    elif payload.get("up_to_date") is False:
+        name += "，发现远端有更新。"
+    else:
+        name += "。"
+    lines.append(name)
+
     if payload.get("branch") or payload.get("commit"):
         branch = payload.get("branch") or "-"
         commit = payload.get("commit") or "-"
         lines.append(f"版本：{branch} / {commit}")
-    if payload.get("commit_time"):
-        lines.append(f"Git 更新时间：{payload.get('commit_time')}")
+
     if payload.get("commit_subject"):
-        lines.append(f"提交说明：{payload.get('commit_subject')}")
+        lines.append(f"说明：{payload.get('commit_subject')}")
+
     if payload.get("dirty"):
-        lines.append("状态：本地仓库有未提交改动")
-    if payload.get("workflow_path"):
-        workflow_state = "存在" if payload.get("workflow_exists") else "缺失"
-        lines.append(f"默认工作流：{payload.get('workflow_path')}（{workflow_state}）")
-    if payload.get("workflow_nodes") is not None:
-        lines.append(f"工作流节点：{payload.get('workflow_nodes')}")
+        lines.append("本地仓库有改动，下次任务会自动按最新管线覆盖。")
 
     assets = payload.get("synced") or payload.get("assets") or []
-    if assets:
-        lines.append("资源同步：")
-    for item in assets[:max_items]:
-        name = item.get("name")
-        kind = item.get("kind")
-        source = item.get("source")
-        target = item.get("target")
-        mode = item.get("mode") or item.get("target_mode") or "-"
-        if "source_exists" in item or "target_exists" in item:
-            source_state = "源OK" if item.get("source_exists") else "源缺失"
-            target_state = "目标OK" if item.get("target_exists") else "目标缺失"
-            link_state = "已链接" if item.get("linked_to_source") else mode
-            lines.append(f"- {kind} {name}：{source_state} / {target_state} / {link_state}")
-        else:
-            lines.append(f"- {kind} {name}：{mode}")
-        if source and target:
-            lines.append(f"  {source} -> {target}")
-
     errors = payload.get("errors") or payload.get("verify_errors") or []
+    missing = []
+    for item in assets:
+        if item.get("source_exists") is False:
+            missing.append(f"{item.get('name')} 源文件缺失")
+        if item.get("target_exists") is False:
+            missing.append(f"{item.get('name')} ComfyUI 目标缺失")
+    if payload.get("workflow_exists") is False:
+        missing.append("ImageClip.json 工作流缺失")
+
+    if errors or missing:
+        lines.append("需要检查：")
+    for issue in missing[:max_items]:
+        lines.append(f"- {issue}")
     for error in errors[:max_items]:
         lines.append(f"问题：{error}")
+
     if skill == "matting_pipeline.update":
         lines.append("结论：已更新并同步到 ComfyUI。")
     elif payload.get("all_ready") is True:
-        lines.append("结论：当前管线资源齐全，可以使用。")
+        lines.append("资源：工作流、Lora、Cherry 节点都已就绪，可以使用。")
     elif payload.get("all_ready") is False:
         lines.append("结论：当前管线还没完全就绪。")
     return lines
