@@ -1229,8 +1229,7 @@ def _format_direct_video(skill: str, payload: dict[str, Any], max_items: int) ->
     children = payload.get("children") if isinstance(payload.get("children"), dict) else {}
     lines: list[str] = []
     if skill == "direct_video.start":
-        suffix = _brief_pipeline_notice(str(payload.get("pipeline_notice") or ""))
-        lines.append(f"已启动 {run_id}（{len(videos)} 个视频{('，' + suffix) if suffix else ''}）")
+        lines.append(f"已启动 {run_id}（{len(videos)} 个视频）")
         return lines
     if skill == "direct_video.list":
         items = payload.get("items") or []
@@ -1275,10 +1274,8 @@ def _format_direct_image(skill: str, payload: dict[str, Any], max_items: int) ->
     comfy = children.get("comfyui") if isinstance(children.get("comfyui"), dict) else {}
     cherry = children.get("cherry") if isinstance(children.get("cherry"), dict) else {}
     if skill == "direct_image.start":
-        suffix = _brief_pipeline_notice(str(payload.get("pipeline_notice") or ""))
         plan = _cherry_plan_summary(images)
-        extra = "，".join(item for item in (suffix, plan) if item)
-        lines = [f"已启动 {run_id}（{len(images)} 张图片{('，' + extra) if extra else ''}）"]
+        lines = [f"已启动 {run_id}（{len(images)} 张图片{('，' + plan) if plan else ''}）"]
         return lines
     if skill == "direct_image.list":
         items = payload.get("items") or []
@@ -1426,11 +1423,7 @@ def _format_matting_pipeline(skill: str, payload: dict[str, Any], max_items: int
     for error in errors[:max_items]:
         lines.append(f"问题：{error}")
     if skill == "matting_pipeline.update":
-        if payload.get("git_output"):
-            last_line = str(payload.get("git_output")).strip().splitlines()[-1:]
-            if last_line:
-                lines.append(f"Git：{last_line[0]}")
-        lines.append("同步完成后请重启 ComfyUI 或用秋叶重载，让 custom node / workflow / lora 全部生效。")
+        lines.append("结论：已更新并同步到 ComfyUI。")
     elif payload.get("all_ready") is True:
         lines.append("结论：当前管线资源齐全，可以使用。")
     elif payload.get("all_ready") is False:

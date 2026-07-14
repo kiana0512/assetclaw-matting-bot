@@ -163,16 +163,20 @@ def preview_start_confirmation(arguments: dict[str, Any], confirmation_id: str) 
     names = arguments.get("source_names") or []
     count = len(videos)
     lines = [
-        f"收到 {count} 个动画视频，是否开始处理？",
-        "处理内容：原视频 + 抽帧 + 抠图 + 后处理，完成后打包 zip 发回。",
+        f"收到 {count} 个动画视频，可以开始处理。",
     ]
     for index, path in enumerate(videos[:8], start=1):
         display = names[index - 1] if index - 1 < len(names) else Path(str(path)).name
-        lines.append(f"- {index}. {display}")
+        lines.append(f"{index}. {display}")
     if count > 8:
-        lines.append(f"- 还有 {count - 8} 个视频未显示")
-    lines.append(f"确认执行：确认执行 {confirmation_id}")
-    lines.append(f"取消：取消 {confirmation_id}")
+        lines.append(f"还有 {count - 8} 个视频也会一起处理。")
+    lines.extend(
+        [
+            "流程：抽帧、抠图、后处理，完成后发 zip。",
+            "后处理：正方形 256x256，长方形 384x512，自动判断。",
+            "回复“确认执行”开始。",
+        ]
+    )
     return "\n".join(lines)
 
 

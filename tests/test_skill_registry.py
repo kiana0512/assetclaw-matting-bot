@@ -58,5 +58,5 @@ def test_matting_pipeline_skills_registered() -> None:
 
     assert get_skill_meta("matting_pipeline.status")["requires_confirmation"] is False
     assert get_skill_meta("matting_pipeline.verify")["requires_confirmation"] is False
-    assert get_skill_meta("matting_pipeline.update")["requires_confirmation"] is True
+    assert get_skill_meta("matting_pipeline.update")["requires_confirmation"] is False
     assert get_skill_meta("matting_pipeline.update")["domain"] == "matting_pipeline"

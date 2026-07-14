@@ -328,6 +328,25 @@ def test_direct_video_attachment_routes_to_confirmed_processing(tmp_path: Path) 
     assert tool_calls[0].arguments["video_paths"] == [str(video)]
 
 
+def test_direct_video_confirmation_is_human_readable() -> None:
+    from assetclaw_matting.skills.direct_video_skills import preview_start_confirmation
+
+    text = preview_start_confirmation(
+        {
+            "video_paths": ["E:/assetclaw-matting-bot/storage/source.mp4"],
+            "source_names": ["7月13日思考-1_3.mp4"],
+        },
+        "abc123",
+    )
+
+    assert "收到 1 个动画视频，可以开始处理。" in text
+    assert "7月13日思考-1_3.mp4" in text
+    assert "正方形 256x256，长方形 384x512" in text
+    assert "回复“确认执行”开始。" in text
+    assert "abc123" not in text
+    assert "direct_video.start" not in text
+
+
 def test_direct_video_rejects_feishu_media_video_for_original_quality(tmp_path: Path) -> None:
     video = tmp_path / "compressed.mp4"
     video.write_bytes(b"fake-video")

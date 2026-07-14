@@ -154,10 +154,19 @@ class BrainProvider(ABC):
                     confirmation_id=confirmation_id,
                     arguments=args,
                 )
-                notify_progress(f"需要确认：{tool_call.skill}，回复“确认执行 {confirmation_id}”后才会继续。")
+                confirmation_progress = {
+                    "direct_video.start": "视频已收到，等你回复“确认执行”后开始。",
+                    "direct_image.start": "图片已收到，等你回复“确认执行”后开始。",
+                }.get(tool_call.skill, f"等你确认后继续：回复“确认执行 {confirmation_id}”。")
+                notify_progress(confirmation_progress)
                 results.append(result)
                 continue
-            notify_progress(f"正在调用工具：{tool_call.skill}")
+            progress_text = {
+                "direct_video.start": "正在准备动画处理",
+                "direct_image.start": "正在准备图片处理",
+                "matting_pipeline.update": "正在更新抠图管线",
+            }.get(tool_call.skill, f"正在处理：{tool_call.skill}")
+            notify_progress(progress_text)
             context_token = None
             try:
                 from assetclaw_matting.runtime_context import get_runtime_context, reset_runtime_context, set_runtime_context

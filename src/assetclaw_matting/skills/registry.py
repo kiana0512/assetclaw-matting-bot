@@ -1387,12 +1387,12 @@ SKILLS: list[dict[str, Any]] = [
     _skill(
         "matting_pipeline.update",
         "Clone or pull the GitLab ImageClip pipeline repo, then sync workflow, lora, and Cherry_lizi into the Aki ComfyUI runtime via symlink with copy fallback.",
-        True,
+        False,
         matting_pipeline_skills.update,
         {"force_copy": "boolean optional"},
         domain="matting_pipeline",
         risk_level="write_safe",
-        requires_confirmation=True,
+        requires_confirmation=False,
         natural_language_examples=["更新抠图管线", "拉最新 ImageClip", "同步最新 ComfyUI 抠图工作流"],
     ),
     _skill(

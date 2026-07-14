@@ -110,6 +110,9 @@ def ensure_latest_for_task(force_copy: bool = False, **_: Any) -> dict[str, Any]
     cached = _cached_preflight()
     if cached:
         return cached
+    from assetclaw_matting.progress import notify_progress
+
+    notify_progress("正在更新抠图管线")
     repo = _repo_dir()
     before = status()
     git_output = _sync_repo(repo)
@@ -196,10 +199,24 @@ def _sync_repo(repo: Path) -> str:
     if not (repo / ".git").exists():
         raise RuntimeError(f"matting pipeline repo_dir exists but is not a git repo: {repo}")
     output = []
-    output.append(_git(["fetch", "--prune"], cwd=repo))
-    output.append(_git(["checkout", settings.matting_pipeline_branch], cwd=repo))
-    output.append(_git(["pull", "--ff-only"], cwd=repo))
+    branch = settings.matting_pipeline_branch
+    remote_ref = f"origin/{branch}"
+    output.append(_git(["fetch", "--prune", "origin"], cwd=repo))
+    output.append(_git(["checkout", "-B", branch, remote_ref], cwd=repo))
+    output.append(_git(["reset", "--hard", remote_ref], cwd=repo))
+    output.append(_git(["clean", "-fd"], cwd=repo))
+    output.append(_git_lfs_pull(repo))
     return "\n".join(output)
+
+
+def _git_lfs_pull(repo: Path) -> str:
+    try:
+        return _git(["lfs", "pull"], cwd=repo)
+    except RuntimeError as exc:
+        text = str(exc)
+        if "git: 'lfs' is not a git command" in text or "git-lfs" in text.lower():
+            return "git lfs pull skipped: git-lfs is not installed"
+        raise
 
 
 def _needs_asset_sync(payload: dict[str, Any]) -> bool:
@@ -217,8 +234,8 @@ def _task_notice(payload: dict[str, Any], changed: bool) -> str:
     commit = str(payload.get("commit") or "")[:12] or "-"
     when = payload.get("commit_time") or "-"
     if changed:
-        return f"抠图管线：已自动更新到 Git 最新版本 {commit}（{when}），本次任务使用 ImageClip。"
-    return f"抠图管线：已确认 Git 最新版本 {commit}（{when}），本次任务使用 ImageClip。"
+        return f"抠图管线已同步最新版本 {commit}（{when}）。"
+    return f"抠图管线已确认最新版本 {commit}（{when}）。"
 
 
 def _comfyui_queue_activity() -> dict[str, Any]:
