@@ -13,6 +13,7 @@ from typing import Any
 
 from assetclaw_matting.comfyui.output_resolver import inspect_local_png, resolve_best_output
 from assetclaw_matting.comfyui.workflow_patch import find_primary_save_image_node_id, inspect_workflow, patch_load_image, patch_node_input, prepare_api_prompt_for_run
+from assetclaw_matting.skills import matting_pipeline_skills
 from assetclaw_matting.skills.media_skills import IMAGE_EXTS
 from assetclaw_matting.skills.security import validate_path
 
@@ -107,7 +108,15 @@ def run_start(
 
     if not input_dir or not output_dir:
         raise ValueError("input_dir and output_dir are required")
-    workflow_file = _resolve_workflow_path(workflow_path or _selected_workflow_path() or str(settings.comfyui_workflow_path))
+    selected_workflow = _selected_workflow_path()
+    pipeline_notice = ""
+    if not workflow_path and not selected_workflow and Path(settings.comfyui_workflow_path).name == settings.matting_pipeline_workflow_name:
+        pipeline = matting_pipeline_skills.ensure_latest_for_task()
+        if not pipeline.get("ok"):
+            raise RuntimeError(str(pipeline.get("error") or "matting pipeline preflight failed"))
+        workflow_path = str(pipeline.get("workflow_path") or "")
+        pipeline_notice = str(pipeline.get("message") or "")
+    workflow_file = _resolve_workflow_path(workflow_path or selected_workflow or str(settings.comfyui_workflow_path))
     src = validate_path(input_dir, must_exist=True)
     dst = validate_path(output_dir, must_exist=False)
     if not src.is_dir():
@@ -137,6 +146,7 @@ def run_start(
         "prompt_map": prompt_map,
         "chat_id": (ctx.get("chat_id") or "") if ctx.get("channel") == "feishu" else "",
         "archived": False,
+        "pipeline_notice": pipeline_notice,
     }
     if not settings.comfyui_fake_mode:
         comfyui_client.check_health()
@@ -165,7 +175,8 @@ def run_start(
         )
 
     if options.get("chat_id") and files:
-        _notify(run_id, f"ComfyUI 批量任务已启动：{len(files)} 张\n输入：{src}\n输出：{dst}")
+        notice = f"\n{pipeline_notice}" if pipeline_notice else ""
+        _notify(run_id, f"ComfyUI 批量任务已启动：{len(files)} 张{notice}\n输入：{src}\n输出：{dst}")
         _start_progress_monitor(run_id)
     if files:
         _start_run_worker(run_id)
@@ -176,6 +187,7 @@ def run_start(
         "status": status,
         "fake_mode": settings.comfyui_fake_mode,
         "workflow_path": str(workflow_file),
+        "pipeline_notice": pipeline_notice,
         "input_dir": str(src),
         "output_dir": str(dst),
         "total": len(files),
@@ -206,6 +218,7 @@ def run_status(run_id: str | None = None, include_gpu: bool = True) -> dict[str,
     prompt_map = options.get("prompt_map") or []
     completed = sum(1 for item in prompt_map if not item.get("error") and Path(str(item.get("dst_path") or "")).exists())
     failed = sum(1 for item in prompt_map if item.get("error"))
+    error_items = [item for item in prompt_map if item.get("error")]
     if not settings.comfyui_fake_mode and not completed + failed:
         for prompt_id in prompt_ids:
             try:
@@ -257,6 +270,8 @@ def run_status(run_id: str | None = None, include_gpu: bool = True) -> dict[str,
         "prompt_ids": prompt_ids[:20],
         "last_completed": _last_completed_name(prompt_map),
         "last_completed_detail": _path_detail(_last_completed_rel_path(prompt_map)),
+        "last_error": _last_error_summary(error_items),
+        "error_items": _error_item_summaries(error_items[:5]),
     }
     if include_gpu:
         result["gpu"] = gpu_status()
@@ -335,7 +350,7 @@ def run_resume(run_id: str | None = None) -> dict[str, Any]:
     return {"ok": True, "run_id": row["id"], "status": "RUNNING", "message": "已拉起提交 worker。"}
 
 
-def run_cancel(run_id: str | None = None, interrupt_current: bool = True) -> dict[str, Any]:
+def run_cancel(run_id: str | None = None, interrupt_current: bool = True, notify: bool = True) -> dict[str, Any]:
     from assetclaw_matting.config import settings
     from assetclaw_matting.comfyui.client import comfyui_client
 
@@ -353,7 +368,8 @@ def run_cancel(run_id: str | None = None, interrupt_current: bool = True) -> dic
                 comfyui_client.interrupt()
         except Exception as exc:
             queue_error = str(exc)
-    _notify(row["id"], f"ComfyUI 任务已终止：{row['id']}")
+    if notify:
+        _notify(row["id"], f"ComfyUI 任务已终止：{row['id']}")
     return {"ok": True, "run_id": row["id"], "status": "CANCELED", "queue_error": queue_error}
 
 
@@ -938,6 +954,30 @@ def _last_completed_name(prompt_map: list[dict[str, str]]) -> str:
 def _last_completed_rel_path(prompt_map: list[dict[str, str]]) -> str:
     completed = [str(item.get("rel_path") or "") for item in prompt_map if Path(str(item.get("dst_path") or "")).exists()]
     return completed[-1] if completed else ""
+
+
+def _last_error_summary(error_items: list[dict[str, Any]]) -> str:
+    if not error_items:
+        return ""
+    item = error_items[-1]
+    frame = Path(str(item.get("src_path") or item.get("rel_path") or "")).name
+    error = _compact_error(str(item.get("error") or ""))
+    return f"{frame}: {error}" if frame else error
+
+
+def _error_item_summaries(error_items: list[dict[str, Any]]) -> list[dict[str, str]]:
+    return [
+        {
+            "frame": Path(str(item.get("src_path") or item.get("rel_path") or "")).name,
+            "error": _compact_error(str(item.get("error") or "")),
+        }
+        for item in error_items
+    ]
+
+
+def _compact_error(text: str, limit: int = 400) -> str:
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    return cleaned[:limit] + ("..." if len(cleaned) > limit else "")
 
 
 def _path_detail(rel_path: str) -> dict[str, str]:

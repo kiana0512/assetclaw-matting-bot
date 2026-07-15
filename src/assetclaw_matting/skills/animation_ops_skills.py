@@ -54,11 +54,21 @@ def manual_smooth_current(
     resize_width: int = 384,
     resize_height: int = 512,
 ) -> dict[str, Any]:
-    from assetclaw_matting.skills.cherry_skills import run_start
+    from assetclaw_matting.skills.cherry_skills import preset_options, run_start
 
     workspace = _workspace(root, must_exist=True)
     src = validate_path(input_dir or str(workspace / "matte"), must_exist=True)
     dst = validate_path(output_dir or str(workspace / "smooth"), must_exist=False)
+    profile = _cherry_profile_from_path(src)
+    if profile == "half" and int(resize_width) == 384 and int(resize_height) == 512:
+        resize_width, resize_height = 256, 256
+    cherry_options = preset_options(profile, use_smooth=bool(use_smooth))
+    cherry_options["resize_width"] = int(resize_width)
+    cherry_options["resize_height"] = int(resize_height)
+    cherry_options["resize1_width"] = int(resize_width)
+    cherry_options["resize1_height"] = int(resize_height)
+    cherry_options["resize2_width"] = int(resize_width)
+    cherry_options["resize2_height"] = int(resize_height)
     result = run_start(
         input_dir=str(src),
         output_dir=str(dst),
@@ -66,9 +76,7 @@ def manual_smooth_current(
         max_images=50000,
         skip_existing=bool(skip_existing),
         notify_interval_seconds=int(notify_interval_seconds),
-        use_smooth=bool(use_smooth),
-        resize_width=int(resize_width),
-        resize_height=int(resize_height),
+        **cherry_options,
     )
     return {
         "ok": True,
@@ -140,6 +148,11 @@ def preview_manual_smooth_current_confirmation(arguments: dict[str, Any], confir
         src = validate_path(arguments.get("input_dir") or str(workspace / "matte"), must_exist=True)
         dst = validate_path(arguments.get("output_dir") or str(workspace / "smooth"), must_exist=False)
         total = _count_files(src, IMAGE_EXTS)
+        profile = _cherry_profile_from_path(src)
+        width = int(arguments.get("resize_width") or 384)
+        height = int(arguments.get("resize_height") or 512)
+        if profile == "half" and width == 384 and height == 512:
+            width, height = 256, 256
         lines = [
             "请确认是否基于当前 matte 重新做 Cherry 平滑：",
             f"工作区：{workspace}",
@@ -147,7 +160,7 @@ def preview_manual_smooth_current_confirmation(arguments: dict[str, Any], confir
             f"输出：{dst}",
             f"当前可处理图片：{total} 张",
             f"跳过已有输出：{'是' if arguments.get('skip_existing') else '否'}",
-            f"后处理：{int(arguments.get('resize_width') or 384)}x{int(arguments.get('resize_height') or 512)}，时序平滑：{'开' if arguments.get('use_smooth') else '关'}",
+            f"后处理：{width}x{height}，时序平滑：{'开' if arguments.get('use_smooth') else '关'}",
             f"回复：确认执行 {confirmation_id}",
         ]
         return "\n".join(lines)
@@ -186,6 +199,11 @@ def _standard_dirs(root: Path) -> dict[str, Path]:
         "matte": root / "matte",
         "smooth": root / "smooth",
     }
+
+
+def _cherry_profile_from_path(path: Path) -> str:
+    parts = {part.lower() for part in path.parts}
+    return "half" if "emoji" in parts else "full"
 
 
 def _count_files(root: Path, extensions: set[str]) -> int:

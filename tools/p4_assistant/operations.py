@@ -475,6 +475,9 @@ def _unity_ready_report_lines(manifest_path: str) -> list[str]:
                 "Emoji JSON:",
                 str(ready_root / payload.get("packages", {}).get("emoji", {}).get("json", "emoji/animation_resource_manifest.json")),
                 "",
+                "Story JSON:",
+                str(ready_root / payload.get("packages", {}).get("story", {}).get("json", "story/animation_resource_manifest.json")),
+                "",
                 "Source Manifest:",
                 str((ready_root / str(payload.get("sourceManifest", "../source_manifest.json"))).resolve()),
             ]

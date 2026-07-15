@@ -100,7 +100,7 @@ function animationFlowSnapshot(limit = 20, includeFinished = true) {
 
 function workspaceSummary(rootRaw = "") {
   const root = path.resolve(String(rootRaw || "E:/animation_automation").replaceAll("\\", "/"));
-  const routed = (stage) => [path.join(root, "scene", stage), path.join(root, "emoji", stage)];
+  const routed = (stage) => ["scene", "emoji", "story"].map((kind) => path.join(root, kind, stage));
   const specs = [
     ["videos", "视频", routed("videos"), new Set([".mp4", ".mov", ".avi", ".mkv", ".webm"])],
     ["frames", "帧", routed("frames"), new Set([".png", ".jpg", ".jpeg", ".webp"])],

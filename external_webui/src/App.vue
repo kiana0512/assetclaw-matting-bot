@@ -43,7 +43,7 @@ const state = reactive({
   form: {
     date: todayLabel(),
     mode: "iteration",
-    priority: "casualheather",
+    priority: "",
     workflowPath: "",
     unityProject: "D:/Spark/Client",
     package: "both",
@@ -413,6 +413,9 @@ function normalizeTask(module, raw) {
   const created = raw.created_at || raw.createdAt || raw.updated_at || "";
   const input = raw.date_root || raw.input_dir || raw.download_dir || raw.workspace_root || "";
   const output = raw.output_dir || raw.export_dir || raw.unity_ready || raw.matte_output_dir || raw.smooth_output_dir || "";
+  const activeChild = module === "AFLOW" ? flowActiveChild(raw) : null;
+  const position = taskPosition(module, raw) || (activeChild ? taskPosition(activeChild.module, activeChild.raw) : "");
+  const eta = etaText(raw) || (activeChild ? etaText(activeChild.raw) : "");
   return {
     module,
     id,
@@ -423,11 +426,21 @@ function normalizeTask(module, raw) {
     progress: flowUi?.progress ?? progressFrom(raw),
     count: countText(raw),
     last: flowUi?.short || lastDoneText(raw),
+    position,
+    eta,
     detail: flowUi?.detail || taskDetail(module, raw, input, output),
     time: formatDateTime(created),
     timeValue: Date.parse(created) || 0,
     raw,
   };
+}
+
+function flowActiveChild(run) {
+  const stage = run?.current_stage || "";
+  if (stage === "frame_extract" && state.frameStatus) return { module: "FRAME", raw: state.frameStatus };
+  if (stage === "matting" && state.comfyStatus) return { module: "COMFY", raw: state.comfyStatus };
+  if (stage === "cherry_smooth" && state.cherryStatus) return { module: "CHERRY", raw: state.cherryStatus };
+  return null;
 }
 
 function progressFrom(raw) {
@@ -453,6 +466,53 @@ function lastDoneText(raw) {
   return raw.last_completed || "";
 }
 
+function taskPosition(module, raw) {
+  const direct = itemDetailText(raw.current_item, "正在处理")
+    || itemDetailText(raw.current_detail, "正在处理")
+    || itemDetailText(raw.processing_detail, "正在处理");
+  if (direct) return direct;
+
+  if (module === "AFLOW") {
+    const stage = raw.current_stage || "";
+    const childKey = stage === "frame_extract" ? "frame"
+      : stage === "matting" ? "comfyui"
+        : stage === "cherry_smooth" ? "cherry"
+          : "";
+    const child = childKey ? raw.children?.[childKey] || raw[childKey] : null;
+    const childText = child
+      ? itemDetailText(child.current_item, "正在处理")
+        || itemDetailText(child.current_detail, "正在处理")
+        || itemDetailText(child.processing_detail, "正在处理")
+        || itemDetailText(child.last_completed_detail, "刚完成")
+        || pathDetailText(child.last_completed, "刚完成")
+      : "";
+    if (childText) return childText;
+  }
+
+  return itemDetailText(raw.last_completed_detail, "刚完成")
+    || pathDetailText(raw.last_completed, "刚完成");
+}
+
+function itemDetailText(detail, prefix) {
+  if (!detail || typeof detail !== "object") return "";
+  const role = detail.role || detail.character || detail.character_name || detail.name || "";
+  const emotion = detail.emotion || detail.animation || detail.expression || detail.action || "";
+  const frame = detail.frame || detail.file || detail.filename || detail.file_name || detail.video || "";
+  const parts = [role, emotion, frame].filter(Boolean);
+  return parts.length ? `${prefix} ${parts.join(" / ")}` : "";
+}
+
+function pathDetailText(value, prefix) {
+  if (!value) return "";
+  const parts = String(value).split(/[\\/]+/).filter(Boolean);
+  if (!parts.length) return "";
+  const file = parts.at(-1) || "";
+  const emotion = parts.at(-2) || "";
+  const role = parts.at(-3) || "";
+  const readable = [role, emotion, file].filter(Boolean).join(" / ");
+  return readable ? `${prefix} ${readable}` : "";
+}
+
 function taskDetail(module, raw, input, output) {
   const bits = [];
   const count = countText(raw);
@@ -462,6 +522,47 @@ function taskDetail(module, raw, input, output) {
   if (output) bits.push(`输出 ${output}`);
   else if (input) bits.push(`输入 ${input}`);
   return bits.join(" · ");
+}
+
+function etaText(raw) {
+  const seconds = etaSeconds(raw);
+  return seconds === null ? "" : `预计剩余 ${formatDuration(seconds)}`;
+}
+
+function etaSeconds(raw) {
+  const direct = firstNumber(
+    raw.eta_seconds,
+    raw.estimated_remaining_seconds,
+    raw.remaining_seconds,
+    raw.eta,
+    raw.remaining
+  );
+  if (direct !== null && direct >= 0) return Math.round(direct);
+  const total = firstNumber(raw.total, raw.total_records);
+  const done = firstNumber(raw.completed, raw.processed_records);
+  if (total === null || done === null || total <= 0 || done <= 0 || done >= total) return null;
+  const started = Date.parse(raw.started_at || raw.created_at || raw.createdAt || "");
+  if (!Number.isFinite(started)) return null;
+  const elapsed = Math.max(1, (Date.now() - started) / 1000);
+  return Math.max(0, Math.round((elapsed / done) * (total - done)));
+}
+
+function firstNumber(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null || value === "") continue;
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function formatDuration(seconds) {
+  if (seconds < 60) return `${Math.max(1, Math.round(seconds))} 秒`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours} 小时 ${rest} 分钟` : `${hours} 小时`;
 }
 
 function buildStageCards(run) {
@@ -765,8 +866,9 @@ function toast(message, type = "ok") {
             <b>{{ primaryTask.count || `${primaryTask.progress}%` }}</b>
           </div>
           <div class="focus-detail">
-            <span>{{ primaryTask.last ? `刚完成 ${primaryTask.last}` : formatStage(primaryTask.stage) }}</span>
-            <small>{{ primaryTask.output || primaryTask.input || "暂无路径" }}</small>
+            <span>{{ primaryTask.position || (primaryTask.last ? `刚完成 ${primaryTask.last}` : formatStage(primaryTask.stage)) }}</span>
+            <small>{{ primaryTask.eta || "预计剩余计算中" }}</small>
+            <small class="focus-path">{{ primaryTask.output || primaryTask.input || "暂无路径" }}</small>
           </div>
         </section>
 
@@ -818,7 +920,8 @@ function toast(message, type = "ok") {
             <span :class="['status-pill', statusClass(task.status)]">{{ task.status }}</span>
             <div class="task-progress">
               <div class="progress"><i :style="{ width: `${task.progress}%` }"></i></div>
-              <small>{{ task.detail || formatStage(task.stage) }}</small>
+              <small>{{ task.position || task.detail || formatStage(task.stage) }}</small>
+              <small v-if="task.eta" class="task-eta">{{ task.eta }}</small>
             </div>
             <button class="ghost" @click="state.detail = task.raw">详情</button>
           </article>
@@ -839,7 +942,9 @@ function toast(message, type = "ok") {
             <div class="path-cell">
               <small><em>输入</em><span>{{ task.input || "-" }}</span></small>
               <small><em>输出</em><span>{{ task.output || "-" }}</span></small>
-              <small v-if="task.detail"><em>位置</em><span>{{ task.detail }}</span></small>
+              <small v-if="task.position"><em>位置</em><span>{{ task.position }}</span></small>
+              <small v-if="task.eta"><em>ETA</em><span>{{ task.eta }}</span></small>
+              <small v-if="task.detail"><em>明细</em><span>{{ task.detail }}</span></small>
             </div>
             <div class="task-actions">
               <button v-if="task.module === 'COMFY' && task.status === 'RUNNING'" class="ghost" @click="controlComfy('pause', task.id)">暂停</button>
@@ -858,10 +963,10 @@ function toast(message, type = "ok") {
           <div class="form-grid">
             <label><span>日期</span><input v-model="state.form.date" /></label>
             <label><span>Unity 模式</span><select v-model="state.form.mode"><option value="iteration">替换 / 迭代</option><option value="import">新导入</option></select></label>
-            <label><span>优先角色</span><input v-model="state.form.priority" placeholder="casualheather" /></label>
+            <label><span>优先角色</span><input v-model="state.form.priority" placeholder="留空则不指定" /></label>
             <label><span>Unity Project</span><input v-model="state.form.unityProject" /></label>
             <label class="wide"><span>ComfyUI 工作流</span><input v-model="state.form.workflowPath" placeholder="留空使用后端默认工作流" /></label>
-            <label><span>Package</span><select v-model="state.form.package"><option value="both">both</option><option value="scene">scene</option><option value="emoji">emoji</option></select></label>
+            <label><span>Package</span><select v-model="state.form.package"><option value="both">both</option><option value="scene">scene</option><option value="emoji">emoji</option><option value="story">story</option></select></label>
             <label><span>P4 Stream</span><input v-model="state.form.p4Stream" /></label>
             <label class="check"><input v-model="state.form.allowP4Writes" type="checkbox" /><span>允许 P4 create/reconcile/shelve</span></label>
             <label class="check"><input v-model="state.form.fakeMatting" type="checkbox" /><span>测试模式：抽帧当抠图</span></label>

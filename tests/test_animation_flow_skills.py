@@ -9,6 +9,7 @@ from assetclaw_matting.brain.result_formatter import format_skill_results
 from assetclaw_matting.config import settings
 from assetclaw_matting.skills import animation_flow_skills
 from assetclaw_matting.skills.animation_flow_skills import run_preview
+from assetclaw_matting.skills.pipeline_skills import _route_cherry_options
 from assetclaw_matting.skills.registry import get_skill_meta
 from assetclaw_matting.skills.unity_import_skills import preview as unity_preview, run_import
 
@@ -32,7 +33,7 @@ def _unity_ready_fixture() -> Path:
 
 def test_animation_flow_registry_and_router() -> None:
     assert get_skill_meta("animation_flow.start")["requires_confirmation"] is True
-    assert get_skill_meta("animation_flow.resume")["requires_confirmation"] is True
+    assert get_skill_meta("animation_flow.resume")["requires_confirmation"] is False
     assert get_skill_meta("unity_import.run")["requires_confirmation"] is True
 
     call = LocalCommandBrain()._infer_tool_calls("开始这个动画自动化流程")
@@ -69,11 +70,42 @@ def test_animation_flow_preview_formats_seven_steps() -> None:
 
     assert len(payload["stages"]) == 7
     assert payload["unity_import_mode"] == "iteration"
-    assert payload["feishu_progress_policy"]["skip"] == ["已完成", "不处理"]
+    assert payload["feishu_progress_policy"]["include"] == ["待抽帧"]
     assert "Cherry 平滑后处理" in " ".join(stage["label"] for stage in payload["stages"])
     assert "Unity 插件导入引擎" in text
-    assert "其他状态重新下载并抽帧" in text
+    assert "仅处理 待抽帧" in text
     assert "P4 submit：disabled" in text
+
+
+def test_animation_flow_cherry_route_presets() -> None:
+    scene = _route_cherry_options(Path("E:/animation_automation/2026-06-17/scene"))
+    emoji = _route_cherry_options(Path("E:/animation_automation/2026-06-17/emoji"))
+    story = _route_cherry_options(Path("E:/animation_automation/2026-06-17/story"))
+    temporal = _route_cherry_options(Path("E:/animation_automation/2026-06-17/scene/temporal_smooth"))
+
+    assert scene is not None
+    assert scene["resize_width"] == 384
+    assert scene["resize_height"] == 512
+    assert scene["use_shadow"] is True
+    assert scene["use_resize2"] is True
+    assert scene["use_smooth"] is False
+
+    assert emoji is not None
+    assert emoji["resize_width"] == 256
+    assert emoji["resize_height"] == 256
+    assert emoji["use_shadow"] is False
+    assert emoji["use_resize2"] is False
+    assert emoji["use_smooth"] is False
+
+    assert story is not None
+    assert story["resize_width"] == 256
+    assert story["resize_height"] == 256
+    assert story["use_shadow"] is False
+    assert story["use_resize2"] is False
+    assert story["use_smooth"] is False
+
+    assert temporal is not None
+    assert temporal["use_smooth"] is True
 
 
 def test_animation_flow_locks_configured_comfyui_workflow(monkeypatch) -> None:
@@ -117,6 +149,8 @@ def test_unity_import_preview_skips_empty_package_without_frames_root() -> None:
     assert packages["emoji"]["frames_root_exists"] is False
     assert packages["emoji"]["skipped"] is True
     assert packages["emoji"]["skip_reason"] == "empty manifest"
+    assert packages["story"]["task_count"] == 0
+    assert packages["story"]["skipped"] is True
 
 
 def test_unity_import_timeout_keeps_runner_for_late_unity_completion(monkeypatch) -> None:

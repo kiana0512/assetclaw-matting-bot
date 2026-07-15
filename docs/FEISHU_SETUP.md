@@ -32,6 +32,8 @@ Win3090 本地 -> 飞书 WebSocket 端点
    - `im:message` 或 `im:message:receive_v1`（接收消息）
    - `im:message.group_at_msg` （可选，群聊 @机器人）
    - `im:message:create_and_send_msg`（发送消息）
+   - 文件上传/下载相关权限（用于接收原视频文件、回传 zip 和处理后的图片附件）
+   - 消息表情反应相关权限（可选，用于“进度如何”这类消息上的轻量反馈）
 7. 发布版本（应用版本）。
 
 ---

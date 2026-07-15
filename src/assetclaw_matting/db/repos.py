@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import time
 import uuid
 from typing import Any
 
@@ -11,6 +12,9 @@ from assetclaw_matting.skills.security import redact_secrets
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_memory_compaction_notify_at: dict[str, float] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +144,9 @@ def insert_brain_message(
         from assetclaw_matting.brain.memory_compactor import compact_conversation_if_needed
 
         compacted = compact_conversation_if_needed(conversation_id)
-        if compacted:
+        from assetclaw_matting.config import settings
+
+        if compacted and bool(getattr(settings, "brain_memory_compact_notify_feishu", False)):
             _notify_memory_compacted()
     except Exception:
         # Compaction is a cost-control optimization. A failure here must not
@@ -258,13 +264,18 @@ def _notify_memory_compacted() -> None:
     ctx = get_runtime_context()
     if ctx.get("channel") != "feishu" or not ctx.get("chat_id"):
         return
+    chat_id = str(ctx["chat_id"])
+    now = time.monotonic()
+    if now - _memory_compaction_notify_at.get(chat_id, 0.0) < 60:
+        return
     try:
         from assetclaw_matting.feishu.client import feishu_client
 
         feishu_client.send_text_to_chat(
-            ctx["chat_id"],
-            "我已自动整理了一下较早的对话，只保留摘要和最近几条原文，后面会继续接着上下文走。",
+            chat_id,
+            "上下文已整理，会继续接着聊。",
         )
+        _memory_compaction_notify_at[chat_id] = now
     except Exception:
         pass
 
@@ -388,3 +399,37 @@ def mark_pending_confirmation(confirmation_id: str, status: str) -> None:
             "UPDATE pending_confirmations SET status = ? WHERE id = ?",
             (status, confirmation_id),
         )
+
+
+def claim_pending_confirmation(confirmation_id: str) -> bool:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "UPDATE pending_confirmations SET status = 'executing' WHERE id = ? AND status = 'pending'",
+            (confirmation_id,),
+        )
+        return cursor.rowcount > 0
+
+
+def supersede_similar_pending_confirmations(
+    conversation_id: str,
+    user_id: str,
+    skill: str,
+    arguments: dict[str, Any],
+    keep_id: str,
+) -> int:
+    args_json = redact_secrets(json.dumps(arguments, ensure_ascii=False, default=str))
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE pending_confirmations
+            SET status = 'superseded'
+            WHERE conversation_id = ?
+              AND user_id = ?
+              AND skill = ?
+              AND arguments_json = ?
+              AND id != ?
+              AND status = 'pending'
+            """,
+            (conversation_id, user_id, skill, args_json, keep_id),
+        )
+        return cursor.rowcount

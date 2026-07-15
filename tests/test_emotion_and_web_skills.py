@@ -80,6 +80,17 @@ def test_bare_ok_still_gets_warm_ack() -> None:
     assert "初音也开心" in response.text
 
 
+def test_local_command_routes_matting_pipeline_questions() -> None:
+    brain = LocalCommandBrain()
+    status = brain.handle_message(BrainMessage(text="当前抠图管线版本", conversation_id="pipeline-local"))
+    verify = brain.handle_message(BrainMessage(text="检查 ImageClip 管线是否正常", conversation_id="pipeline-local"))
+
+    assert status.tool_calls
+    assert verify.tool_calls
+    assert status.tool_calls[0].skill == "matting_pipeline.status"
+    assert verify.tool_calls[0].skill == "matting_pipeline.verify"
+
+
 def test_singing_mode_is_removed() -> None:
     brain = LocalCommandBrain()
     conversation_id = "sing-mode-removed"
@@ -132,7 +143,7 @@ def test_removed_singing_mode_never_swallow_normal_tasks(monkeypatch, tmp_path) 
     )
     assert "我接原创下一句" not in translated.text
     assert translated.tool_calls
-    assert translated.tool_calls[0].skill == "translate.image_text"
+    assert translated.tool_calls[0].skill == "direct_image.start"
 
 
 def test_explicit_url_routes_to_web_fetch() -> None:

@@ -1,0 +1,2 @@
+# Optional local Bilibili cookie for bili_dynamic_emoji_downloader.py.
+# Keep the real cookie in cookie.txt or BILI_COOKIE; never commit it.

@@ -11,6 +11,33 @@ Python：C:\Users\lilithgames\Downloads\ComfyUI-aki-v3\python
 后端：http://127.0.0.1:8188
 ```
 
+## GitLab 管线同步
+
+默认抠图管线由公司 GitLab 仓库管理：
+
+```text
+远程仓库：git@gitlab.lilithgame.com:rd_center/ai_art/imageclip.git
+本地仓库：E:\imageclip-pipeline\imageclip
+默认工作流：C:\Users\lilithgames\Downloads\ComfyUI-aki-v3\ComfyUI\user\default\workflows\ImageClip.json
+```
+
+机器人支持在飞书里直接询问或更新：
+
+```text
+现在用的抠图管线是什么
+当前抠图管线版本
+验证抠图管线
+更新抠图管线
+```
+
+同步内容：
+
+- `ImageClip.json` -> `ComfyUI\user\default\workflows\ImageClip.json`
+- `Koutu_Flux2klein_v2_000007250.safetensors` -> `ComfyUI\models\loras\Koutu_Flux2klein_v2_000007250.safetensors`
+- `Cherry_lizi` -> `ComfyUI\custom_nodes\Cherry_lizi`
+
+同步优先创建软链接；如果当前 Windows 权限不允许创建软链接，会复制文件或目录作为兜底。更新后需要重启 ComfyUI 或用秋叶重新加载。机器人会在状态里返回 Git branch、commit、commit 时间、工作流路径、资源链接状态，并会检查 lora 是否疑似 Git LFS pointer。
+
 环境边界：
 
 - 启动 ComfyUI：只使用秋叶目录里的 `python\python.exe`。

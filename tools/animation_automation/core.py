@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any
 
 
-ASSET_KINDS = ("scene", "emoji")
+ASSET_KINDS = ("scene", "emoji", "story")
 PROCESS_VARIANTS = ("default",)
+FRAME_TARGET_PROGRESS = {"待抽帧"}
 SKIP_PROGRESS = {"已完成", "不处理"}
 VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v"}
 
@@ -83,6 +84,11 @@ def video_attachments(raw: Any) -> list[dict[str, Any]]:
 def classify_asset_kind(fields: dict[str, Any], fallback_texts: list[str] | None = None) -> str:
     texts = candidate_texts(fields, ASSET_FIELD_CANDIDATES) + list(fallback_texts or [])
     lowered = " ".join(texts).lower()
+    hierarchy = [str(item or "").strip().lower() for item in (fallback_texts or [])]
+    if hierarchy and any(item in {"剧情动画", "劇情動畫", "story", "story animation"} for item in hierarchy[:1]):
+        return "story"
+    if any(token in lowered for token in ("剧情动画", "劇情動畫", "story animation")):
+        return "story"
     if any(token in lowered for token in ("表情", "订单", "劇情", "剧情", "emoji", "order")):
         return "emoji"
     if any(token in lowered for token in ("场景", "場景", "角色动画", "角色動畫", "scene", "character animation")):
@@ -104,6 +110,8 @@ def unity_types(fields: dict[str, Any], asset_kind: str, scene_default: str = "�
         values.append(text)
     if asset_kind == "scene" and not values:
         values.append(scene_default)
+    if asset_kind == "story" and not values:
+        values.append("剧情")
     seen: set[str] = set()
     result: list[str] = []
     for item in values:
@@ -311,7 +319,7 @@ def build_unity_ready(
 def format_unity_ready_summary(date_root: Path, report: dict[str, Any]) -> str:
     ready = date_root / "unity_ready"
     lines = ["【Unity Ready 已生成】", ""]
-    for label, key in (("Scene", "scene"), ("Emoji", "emoji")):
+    for label, key in (("Scene", "scene"), ("Emoji", "emoji"), ("Story", "story")):
         package = report["packages"][key]
         lines.extend(
             [

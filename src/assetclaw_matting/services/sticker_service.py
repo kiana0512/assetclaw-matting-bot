@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import random
+import time
 from pathlib import Path
 from typing import Any
+
+from PIL import Image, ImageSequence
+
+_LAST_SENT_AT_BY_CHAT: dict[str, float] = {}
+_STICKER_CACHE: dict[str, Any] = {"key": None, "items": [], "ts": 0.0}
+_STICKER_CACHE_TTL_SECONDS = 30.0
 
 
 def sticker_status() -> dict[str, Any]:
@@ -15,7 +22,9 @@ def sticker_status() -> dict[str, Any]:
         "directory": str(settings.bot_sticker_dir),
         "directory_exists": settings.bot_sticker_dir.exists(),
         "probability": float(settings.bot_sticker_probability),
+        "cooldown_seconds": int(settings.bot_sticker_cooldown_seconds),
         "max_bytes": int(settings.bot_sticker_max_bytes),
+        "send_max_px": int(settings.bot_sticker_send_max_px),
         "extensions": settings.bot_sticker_extensions_list,
         "count": len(items),
         "sample": [str(path) for path in items[:8]],
@@ -43,13 +52,61 @@ def choose_sticker(message_text: str = "", reply_text: str = "", force: bool = F
 def send_sticker_to_chat(chat_id: str, message_text: str = "", reply_text: str = "", force: bool = False) -> dict[str, Any]:
     if not chat_id:
         return {"ok": False, "sent": False, "reason": "missing chat_id"}
+    if not force and _is_in_cooldown(chat_id):
+        return {"ok": True, "sent": False, "reason": "cooldown"}
     path = choose_sticker(message_text=message_text, reply_text=reply_text, force=force)
     if not path:
         return {"ok": True, "sent": False, "reason": "not_selected"}
     from assetclaw_matting.feishu.client import feishu_client
 
-    feishu_client.send_image_to_chat(chat_id, path)
-    return {"ok": True, "sent": True, "path": str(path)}
+    send_path = _prepare_sticker_for_send(path)
+    feishu_client.send_image_to_chat(chat_id, send_path)
+    if not force:
+        _LAST_SENT_AT_BY_CHAT[chat_id] = time.time()
+    return {"ok": True, "sent": True, "path": str(send_path), "source_path": str(path)}
+
+
+def _prepare_sticker_for_send(path: Path) -> Path:
+    from assetclaw_matting.config import settings
+
+    max_px = max(64, min(int(settings.bot_sticker_send_max_px or 240), 1024))
+    cache_dir = settings.storage_dir / "sticker_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    suffix = path.suffix.lower()
+    target = cache_dir / f"{path.stem}_{max_px}px{suffix if suffix == '.gif' else '.png'}"
+    try:
+        if target.exists() and target.stat().st_mtime >= path.stat().st_mtime:
+            return target
+        with Image.open(path) as img:
+            if suffix == ".gif":
+                _save_resized_gif(img, target, max_px)
+            else:
+                resized = img.convert("RGBA")
+                resized.thumbnail((max_px, max_px), Image.Resampling.LANCZOS)
+                resized.save(target)
+        return target
+    except Exception:
+        return path
+
+
+def _save_resized_gif(img: Image.Image, target: Path, max_px: int) -> None:
+    frames: list[Image.Image] = []
+    durations: list[int] = []
+    for frame in ImageSequence.Iterator(img):
+        resized = frame.convert("RGBA")
+        resized.thumbnail((max_px, max_px), Image.Resampling.LANCZOS)
+        frames.append(resized)
+        durations.append(int(frame.info.get("duration", img.info.get("duration", 80)) or 80))
+    if not frames:
+        raise ValueError("gif has no frames")
+    frames[0].save(
+        target,
+        save_all=True,
+        append_images=frames[1:],
+        duration=durations,
+        loop=int(img.info.get("loop", 0) or 0),
+        disposal=2,
+    )
 
 
 def _collect_stickers() -> list[Path]:
@@ -60,6 +117,10 @@ def _collect_stickers() -> list[Path]:
         return []
     exts = set(settings.bot_sticker_extensions_list or [".png", ".gif"])
     max_bytes = max(1, int(settings.bot_sticker_max_bytes or 1))
+    cache_key = (str(root), tuple(sorted(exts)), max_bytes)
+    now = time.time()
+    if _STICKER_CACHE.get("key") == cache_key and now - float(_STICKER_CACHE.get("ts") or 0.0) <= _STICKER_CACHE_TTL_SECONDS:
+        return list(_STICKER_CACHE.get("items") or [])
     items: list[Path] = []
     for path in root.rglob("*"):
         if not path.is_file():
@@ -72,22 +133,59 @@ def _collect_stickers() -> list[Path]:
         except OSError:
             continue
         items.append(path)
-    return sorted(items, key=lambda item: str(item).lower())
+    result = sorted(items, key=lambda item: str(item).lower())
+    _STICKER_CACHE.update({"key": cache_key, "items": result, "ts": now})
+    return result
 
 
 def _should_send(reply_text: str) -> bool:
     text = (reply_text or "").strip()
     if not text:
         return False
-    if text in {"收到，处理中。", "确认收到，正在执行。"}:
+    if text in {"收到，处理中。", "确认收到，正在执行。", "完成。"}:
         return False
-    if text.startswith("收到，处理中"):
+    quiet_prefixes = (
+        "收到",
+        "确认收到",
+        "请确认是否",
+        "动画处理进度",
+        "图片处理进度",
+        "动画处理任务",
+        "图片处理任务",
+        "动画处理已",
+        "图片处理已",
+        "抽帧完成",
+        "ComfyUI 抠图完成",
+        "Cherry 后处理完成",
+        "开始抽帧",
+        "开始 ComfyUI",
+        "开始 Cherry",
+        "开始打包",
+    )
+    if text.startswith(quiet_prefixes):
         return False
-    if text.startswith("请确认是否"):
-        return False
-    if "回复：确认执行" in text:
+    quiet_markers = (
+        "确认执行",
+        "取消：",
+        "状态：",
+        "抠图：",
+        "后处理：",
+        "已抽帧：",
+        "正在发送 zip",
+    )
+    if any(marker in text for marker in quiet_markers):
         return False
     return True
+
+
+def _is_in_cooldown(chat_id: str) -> bool:
+    from assetclaw_matting.config import settings
+
+    cooldown = max(0, int(getattr(settings, "bot_sticker_cooldown_seconds", 0) or 0))
+    if cooldown <= 0:
+        return False
+    last_sent_at = _LAST_SENT_AT_BY_CHAT.get(chat_id)
+    return bool(last_sent_at and time.time() - last_sent_at < cooldown)
 
 
 def _prefer_animated(message_text: str, reply_text: str, items: list[Path]) -> list[Path]:

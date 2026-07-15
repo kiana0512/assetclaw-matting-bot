@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PIL import Image
+
 from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
 from assetclaw_matting.brain.result_formatter import format_skill_results
 from assetclaw_matting.brain.schemas import BrainMessage
@@ -33,6 +35,7 @@ def test_sticker_status_and_choose(monkeypatch, tmp_path: Path) -> None:
     assert status["count"] == 2
     assert sticker_service.choose_sticker(reply_text="完成了") is not None
     assert sticker_service.choose_sticker(reply_text="收到，处理中。") is None
+    assert sticker_service.choose_sticker(reply_text="动画处理进度：VID_TEST\n状态：RUNNING / matting") is None
 
 
 def test_sticker_registry_router_and_formatter(monkeypatch, tmp_path: Path) -> None:
@@ -74,3 +77,85 @@ def test_sticker_send_random_uses_feishu_context(monkeypatch, tmp_path: Path) ->
     assert result["ok"] is True
     assert result["result"]["sent"] is True
     assert sent == [("chat-test", path)]
+
+
+def test_auto_sticker_respects_chat_cooldown(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "a.png"
+    path.write_bytes(b"png")
+    sent: list[tuple[str, Path]] = []
+
+    monkeypatch.setattr(settings, "bot_sticker_dir", tmp_path)
+    monkeypatch.setattr(settings, "bot_sticker_extensions", ".png")
+    monkeypatch.setattr(settings, "bot_sticker_probability", 1.0)
+    monkeypatch.setattr(settings, "bot_sticker_cooldown_seconds", 600)
+    sticker_service._LAST_SENT_AT_BY_CHAT.clear()
+
+    from assetclaw_matting.feishu.client import feishu_client
+
+    monkeypatch.setattr(feishu_client, "send_image_to_chat", lambda chat_id, target: sent.append((chat_id, target)))
+
+    first = sticker_service.send_sticker_to_chat("chat-test", reply_text="任务完成了")
+    second = sticker_service.send_sticker_to_chat("chat-test", reply_text="又完成了")
+
+    assert first["sent"] is True
+    assert second["sent"] is False
+    assert second["reason"] == "cooldown"
+    assert sent == [("chat-test", path)]
+
+
+def test_sticker_send_random_resizes_large_png(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "large.png"
+    Image.new("RGBA", (900, 600), (0, 255, 255, 255)).save(path)
+    sent: list[tuple[str, Path]] = []
+
+    monkeypatch.setattr(settings, "bot_sticker_dir", tmp_path)
+    monkeypatch.setattr(settings, "bot_sticker_extensions", ".png")
+    monkeypatch.setattr(settings, "bot_sticker_send_max_px", 160)
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+
+    from assetclaw_matting.feishu.client import feishu_client
+
+    monkeypatch.setattr(feishu_client, "send_image_to_chat", lambda chat_id, target: sent.append((chat_id, target)))
+    token = set_runtime_context(channel="feishu", chat_id="chat-test", conversation_id="conv")
+    try:
+        result = call_skill("sticker.send_random", {}, requested_by="test")
+    finally:
+        reset_runtime_context(token)
+
+    assert result["ok"] is True
+    assert sent and sent[0][1] != path
+    with Image.open(sent[0][1]) as img:
+        assert max(img.size) == 160
+        assert img.size == (160, 107)
+
+
+def test_sticker_send_random_resizes_large_gif_proportionally(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "large.gif"
+    frames = [
+        Image.new("RGBA", (600, 300), (255, 0, 0, 255)),
+        Image.new("RGBA", (600, 300), (0, 255, 0, 255)),
+    ]
+    frames[0].save(path, save_all=True, append_images=frames[1:], duration=[80, 90], loop=0)
+    sent: list[tuple[str, Path]] = []
+
+    monkeypatch.setattr(settings, "bot_sticker_dir", tmp_path)
+    monkeypatch.setattr(settings, "bot_sticker_extensions", ".gif")
+    monkeypatch.setattr(settings, "bot_sticker_send_max_px", 120)
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+
+    from assetclaw_matting.feishu.client import feishu_client
+
+    monkeypatch.setattr(feishu_client, "send_image_to_chat", lambda chat_id, target: sent.append((chat_id, target)))
+    token = set_runtime_context(channel="feishu", chat_id="chat-test", conversation_id="conv")
+    try:
+        result = call_skill("sticker.send_random", {}, requested_by="test")
+    finally:
+        reset_runtime_context(token)
+
+    assert result["ok"] is True
+    assert sent and sent[0][1] != path
+    assert sent[0][1].suffix == ".gif"
+    with Image.open(sent[0][1]) as img:
+        assert max(img.size) == 120
+        assert img.size == (120, 60)
+        assert getattr(img, "is_animated", False) is True

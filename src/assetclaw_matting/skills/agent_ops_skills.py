@@ -11,11 +11,39 @@ ACTIVE_STATUSES = {"RUNNING", "PAUSED", "QUEUED", "PENDING"}
 DONE_STATUSES = {"DONE", "DONE_WITH_ERRORS", "FAILED", "CANCELED"}
 
 
-def current_work(root: str | None = None, include_gpu: bool = True) -> dict[str, Any]:
+def current_work(
+    root: str | None = None,
+    include_gpu: bool = True,
+    date_start: str | None = None,
+    date_end: str | None = None,
+    query: str | None = None,
+    detail: bool = False,
+    media_type: str | None = None,
+    include_finished: bool = True,
+) -> dict[str, Any]:
     """Summarize the machine's current production context in one readonly call."""
+    video_runs = _direct_video_runs(limit=40)
+    image_runs = _direct_image_runs(limit=40)
+    video_runs = _filter_media_runs(video_runs, date_start=date_start, date_end=date_end, query=query, include_finished=include_finished)
+    image_runs = _filter_media_runs(image_runs, date_start=date_start, date_end=date_end, query=query, include_finished=include_finished)
+    media = str(media_type or "").lower()
+    if media in {"video", "videos", "动画", "视频"}:
+        image_runs = []
+    elif media in {"image", "images", "图片", "图"}:
+        video_runs = []
     payload = {
         "ok": True,
         "root": root or r"E:\animation_automation\2026-06-02",
+        "filters": {
+            "date_start": date_start or "",
+            "date_end": date_end or "",
+            "query": query or "",
+            "detail": bool(detail),
+            "media_type": media_type or "",
+            "include_finished": bool(include_finished),
+        },
+        "direct_videos": video_runs,
+        "direct_images": image_runs,
         "comfyui": _latest_comfyui(),
         "cherry": _latest_cherry(),
         "frame": _latest_frame(),
@@ -233,6 +261,237 @@ def _latest_pipeline() -> dict[str, Any]:
         "updated_at": row["updated_at"],
         "created_at": row["created_at"],
     }
+
+
+def _direct_video_runs(limit: int = 8) -> list[dict[str, Any]]:
+    from assetclaw_matting.config import settings
+
+    root = Path(settings.storage_dir) / "direct_video_runs"
+    items = []
+    count_cache: dict[str, int] = {}
+    for path in _status_files(root, "VID_*", limit=limit * 2):
+        run = _load_status_file(path)
+        if not run:
+            continue
+        videos = [_video_item_summary(run, item, count_cache) for item in run.get("videos") or []]
+        items.append(
+            {
+                "kind": "video",
+                "run_id": run.get("id"),
+                "status": run.get("status"),
+                "stage": run.get("stage"),
+                "run_label": run.get("run_label"),
+                "created_at": run.get("created_at"),
+                "updated_at": run.get("updated_at"),
+                "items": videos,
+            }
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _direct_image_runs(limit: int = 8) -> list[dict[str, Any]]:
+    from assetclaw_matting.config import settings
+
+    root = Path(settings.storage_dir) / "direct_image_runs"
+    items = []
+    count_cache: dict[str, int] = {}
+    for path in _status_files(root, "IMG_*", limit=limit * 2):
+        run = _load_status_file(path)
+        if not run:
+            continue
+        images = [_image_item_summary(run, item, count_cache) for item in run.get("images") or []]
+        items.append(
+            {
+                "kind": "image",
+                "run_id": run.get("id"),
+                "status": run.get("status"),
+                "stage": run.get("stage"),
+                "run_label": run.get("run_label"),
+                "created_at": run.get("created_at"),
+                "updated_at": run.get("updated_at"),
+                "items": images,
+            }
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _status_files(root: Path, pattern: str, limit: int) -> list[Path]:
+    if not root.exists():
+        return []
+    return sorted(root.glob(f"{pattern}/status.json"), key=lambda item: item.stat().st_mtime, reverse=True)[:limit]
+
+
+def _filter_media_runs(
+    runs: list[dict[str, Any]],
+    date_start: str | None,
+    date_end: str | None,
+    query: str | None,
+    include_finished: bool,
+) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    query_text = str(query or "").strip().lower()
+    for run in runs:
+        if not include_finished and str(run.get("status") or "") in DONE_STATUSES:
+            continue
+        if not _run_in_date_range(run, date_start, date_end):
+            continue
+        items = run.get("items") or []
+        if query_text:
+            if _matches_run(run, query_text):
+                matched_items = items
+            else:
+                matched_items = [item for item in items if _matches_item(item, query_text)]
+            if not matched_items:
+                continue
+            run = dict(run)
+            run["items"] = matched_items
+        filtered.append(run)
+    return filtered
+
+
+def _run_in_date_range(run: dict[str, Any], date_start: str | None, date_end: str | None) -> bool:
+    if not date_start and not date_end:
+        return True
+    dates = [_date_text(run.get("created_at")), _date_text(run.get("updated_at"))]
+    dates.extend(_date_text(item.get("updated_at")) for item in run.get("items") or [])
+    dates = [item for item in dates if item]
+    if not dates:
+        return False
+    start = str(date_start or "0000-00-00")
+    end = str(date_end or "9999-99-99")
+    return any(start <= item <= end for item in dates)
+
+
+def _date_text(value: Any) -> str:
+    text = str(value or "").strip()
+    return text[:10] if len(text) >= 10 else ""
+
+
+def _matches_run(run: dict[str, Any], query: str) -> bool:
+    haystack = " ".join(str(run.get(key) or "") for key in ("run_id", "run_label", "status", "stage")).lower()
+    return query in haystack
+
+
+def _matches_item(item: dict[str, Any], query: str) -> bool:
+    haystack = " ".join(str(item.get(key) or "") for key in ("name", "run_id", "run_label", "status", "output_size", "comfyui_run_id", "cherry_run_id")).lower()
+    return query in haystack
+
+
+def _load_status_file(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _video_item_summary(run: dict[str, Any], item: dict[str, Any], count_cache: dict[str, int] | None = None) -> dict[str, Any]:
+    frame_total = int(item.get("frame_count") or _count_pngs(Path(str(item.get("frame_dir") or "")), count_cache))
+    matte_done = _count_pngs(Path(str(item.get("matte_dir") or "")), count_cache)
+    smooth_done = _count_pngs(Path(str(item.get("smooth_dir") or "")), count_cache)
+    children = run.get("children") if isinstance(run.get("children"), dict) else {}
+    return {
+        "run_id": run.get("id"),
+        "run_status": run.get("status"),
+        "run_stage": run.get("stage"),
+        "run_label": run.get("run_label"),
+        "updated_at": run.get("updated_at"),
+        "name": _display_name(item),
+        "status": _media_item_status(str(run.get("status") or ""), str(run.get("stage") or ""), frame_total, matte_done, smooth_done),
+        "frame_done": frame_total,
+        "matte_done": matte_done,
+        "smooth_done": smooth_done,
+        "total": frame_total,
+        "aspect": item.get("aspect") or "",
+        "output_size": item.get("cherry_output_size") or "",
+        "comfyui_run_id": children.get("comfyui_run_id") or "",
+        "cherry_run_id": children.get("cherry_run_id") or "",
+        "last_log": (run.get("log") or [{}])[-1].get("message", ""),
+    }
+
+
+def _image_item_summary(run: dict[str, Any], item: dict[str, Any], count_cache: dict[str, int] | None = None) -> dict[str, Any]:
+    matte_done = _count_pngs(Path(str(item.get("matte_dir") or "")), count_cache)
+    smooth_done = _count_pngs(Path(str(item.get("smooth_dir") or "")), count_cache)
+    total = 1
+    children = run.get("children") if isinstance(run.get("children"), dict) else {}
+    return {
+        "run_id": run.get("id"),
+        "run_status": run.get("status"),
+        "run_stage": run.get("stage"),
+        "run_label": run.get("run_label"),
+        "updated_at": run.get("updated_at"),
+        "name": _display_name(item),
+        "status": _media_item_status(str(run.get("status") or ""), str(run.get("stage") or ""), total, matte_done, smooth_done),
+        "frame_done": total,
+        "matte_done": matte_done,
+        "smooth_done": smooth_done,
+        "total": total,
+        "aspect": item.get("aspect") or "",
+        "output_size": item.get("cherry_output_size") or "",
+        "comfyui_run_id": children.get("comfyui_run_id") or "",
+        "cherry_run_id": children.get("cherry_run_id") or "",
+        "last_log": (run.get("log") or [{}])[-1].get("message", ""),
+    }
+
+
+def _display_name(item: dict[str, Any]) -> str:
+    for key in ("name", "source_name"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    for key in ("source_path", "original_path"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return Path(value).name
+    return "未命名素材"
+
+
+def _media_item_status(run_status: str, stage: str, total: int, matte_done: int, smooth_done: int) -> str:
+    if run_status == "DONE":
+        return "完成"
+    if run_status in {"FAILED", "CANCELED", "DONE_WITH_ERRORS"}:
+        return {"FAILED": "失败", "CANCELED": "已取消", "DONE_WITH_ERRORS": "部分完成"}.get(run_status, run_status)
+    if stage in {"queued", "pending"}:
+        return "排队中"
+    if stage == "extract_frames":
+        return "抽帧中" if total else "等待抽帧"
+    if stage == "matting":
+        if total and matte_done >= total:
+            return "等待后处理"
+        if matte_done == 0:
+            return "排队抠图" if total else "等待抠图"
+        return "抠图中"
+    if stage == "postprocess":
+        if total and smooth_done >= total:
+            return "等待打包"
+        if smooth_done == 0:
+            return "排队后处理"
+        return "后处理中"
+    if stage == "zip":
+        return "打包中"
+    return stage or run_status or "处理中"
+
+
+def _count_pngs(path: Path, cache: dict[str, int] | None = None) -> int:
+    key = str(path)
+    if cache is not None and key in cache:
+        return cache[key]
+    if not path.exists():
+        if cache is not None:
+            cache[key] = 0
+        return 0
+    try:
+        count = sum(1 for item in path.rglob("*.png") if item.is_file())
+    except OSError:
+        count = 0
+    if cache is not None:
+        cache[key] = count
+    return count
 
 
 def _pending_confirmations(limit: int = 5) -> list[dict[str, Any]]:

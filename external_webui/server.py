@@ -228,7 +228,7 @@ class Handler(BaseHTTPRequestHandler):
         root_raw = (qs.get("root") or [""])[0]
         root = Path(root_raw.replace("/", "\\")) if root_raw else Path("E:/animation_automation")
         def routed(stage: str) -> list[Path]:
-            return [root / "scene" / stage, root / "emoji" / stage]
+            return [root / kind / stage for kind in ("scene", "emoji", "story")]
 
         specs = [
             ("videos", "视频", routed("videos"), {".mp4", ".mov", ".avi", ".mkv", ".webm"}),

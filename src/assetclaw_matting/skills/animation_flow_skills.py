@@ -11,7 +11,9 @@ from typing import Any
 from assetclaw_matting.config import settings
 from assetclaw_matting.runtime_context import get_runtime_context, reset_runtime_context, set_runtime_context
 from assetclaw_matting.skills.frame_skills import default_automation_paths
+from assetclaw_matting.skills import matting_pipeline_skills
 from assetclaw_matting.skills.security import validate_path
+from tools.animation_automation.core import ASSET_KINDS
 from tools.animation_automation.core import build_unity_ready
 
 
@@ -54,8 +56,8 @@ def run_preview(
         "package": package,
         "unity_import_mode": selected_mode,
         "feishu_progress_policy": {
-            "skip": ["已完成", "不处理"],
-            "rerun_other_statuses": True,
+            "include": ["待抽帧"],
+            "download_extract_only": True,
         },
         "priority_characters": list(priority_characters or ["casualheather"]),
         "stages": _stage_payload(),
@@ -81,6 +83,13 @@ def run_start(
     **_: Any,
 ) -> dict[str, Any]:
     selected_mode = _normalize_unity_import_mode(import_mode or unity_import_mode)
+    pipeline_notice = ""
+    if not workflow_path and Path(settings.comfyui_workflow_path).name == settings.matting_pipeline_workflow_name:
+        pipeline = matting_pipeline_skills.ensure_latest_for_task()
+        if not pipeline.get("ok"):
+            raise RuntimeError(str(pipeline.get("error") or "matting pipeline preflight failed"))
+        workflow_path = str(pipeline.get("workflow_path") or "")
+        pipeline_notice = str(pipeline.get("message") or "")
     workflow = _production_workflow_path(workflow_path)
     preview = run_preview(
         date_root=date_root,
@@ -108,6 +117,7 @@ def run_start(
         "unity_import_mode": selected_mode,
         "workflow_path": str(workflow),
         "workflow_name": workflow.name,
+        "pipeline_notice": pipeline_notice,
         "fps": int(fps),
         "notify_interval_seconds": max(30, min(int(notify_interval_seconds), 3600)),
         "allow_p4_writes": bool(allow_p4_writes),
@@ -120,7 +130,8 @@ def run_start(
         "error": "",
     }
     _save(run)
-    _notify(run, "完整动画自动化流程已启动：1-7 步会按顺序推进，P4 submit 永远禁用。")
+    notice = f"\n{pipeline_notice}" if pipeline_notice else ""
+    _notify(run, f"完整动画自动化流程已启动：1-7 步会按顺序推进，P4 submit 永远禁用。{notice}")
     _start_worker(run_id)
     return {"ok": True, "run_id": run_id, **_public(run)}
 
@@ -222,7 +233,7 @@ def preview_run_start_confirmation(arguments: dict[str, Any], confirmation_id: s
             f"工作流路径：{preview['workflow_path']}",
             f"Unity Project：{preview['unity_project']}",
             f"Unity 模式：{'资源迭代/替换' if preview.get('unity_import_mode') == 'iteration' else '新导入'}",
-            "飞书状态：仅跳过“已完成/不处理”，其他状态都会重新下载并抽帧。",
+            "飞书状态：仅处理“待抽帧”，其他状态全部跳过。",
             f"后段优先角色：{', '.join(preview.get('priority_characters') or ['无'])}",
             "P4：第 7 步会执行 create CL / reconcile / shelve / report；submit disabled。",
             f"回复：确认执行 {confirmation_id}",
@@ -277,8 +288,8 @@ def _worker(run_id: str) -> None:
             smooth_output_dir=str(root / "smooth"),
             workflow_path=run.get("workflow_path") or str(settings.comfyui_workflow_path),
             fps=int(run.get("fps") or 24),
-            progress_include=[],
-            progress_exclude=["已完成", "不处理"],
+            progress_include=["待抽帧"],
+            progress_exclude=[],
             notify_interval_seconds=int(run.get("notify_interval_seconds") or 60),
             run_cherry=False,
             fake_matting_from_frames=bool(run.get("fake_matting_from_frames")),
@@ -500,7 +511,7 @@ def _run_cherry_smooth_stage(run_id: str, root: Path) -> bool:
 
 def _cherry_routes(root: Path) -> list[tuple[str, Path, Path]]:
     routes: list[tuple[str, Path, Path]] = []
-    for asset_kind in ("scene", "emoji"):
+    for asset_kind in ASSET_KINDS:
         matte_dir = root / asset_kind / "matte"
         if matte_dir.is_dir() and any(matte_dir.rglob("*.png")):
             routes.append((asset_kind, matte_dir, root / asset_kind / "smooth"))
@@ -553,31 +564,35 @@ def _p4_plan(workflow: str | None, workspace: str | None, root: Path, stream: st
 
 def _unity_ready_p4_paths(unity_ready: Path, mode: str = "import") -> list[str]:
     paths: set[str] = set()
-    scene_manifest = unity_ready / "scene" / "animation_resource_manifest.json"
-    emoji_manifest = unity_ready / "emoji" / "animation_resource_manifest.json"
-    for task in _manifest_tasks(scene_manifest):
+    for task in _manifest_tasks(unity_ready / "scene" / "animation_resource_manifest.json"):
         character = _title_name(str(task.get("character") or task.get("name") or ""))
         if character:
             if mode == "iteration":
                 paths.add(f"Assets/Art/UI/SpritesAnim/CharacterAnim/{character}/Common/...")
             else:
                 paths.add(f"Assets/Art/UI/SpritesAnim/CharacterAnim/{character}/charImproting/...")
-    for task in _manifest_tasks(emoji_manifest):
-        character = _title_name(str(task.get("character") or task.get("name") or ""))
-        animation = str(task.get("animation") or task.get("anim") or "idle").lower()
-        types = [str(item).lower() for item in (task.get("unityCategories") or task.get("types") or [])]
-        is_story = any("剧情" in item or "story" in item or "chat" in item for item in types)
-        if character:
-            if mode == "iteration":
-                paths.add(f"Assets/Art/UI/SpritesAnim/Emoji/{character}/{'Chat' if is_story else 'Common'}/...")
-            else:
-                paths.add(f"Assets/Art/UI/SpritesAnim/Emoji/{character}/importing_{animation}/...")
-                lower = character.lower()
-                paths.add(f"Assets/Art/UI/Animation/Emoji/{character}/anui_emoji_{lower}_{animation}.anim")
-                paths.add(f"Assets/Art/UI/Animation/Emoji/{character}/anui_emoji_{lower}_{animation}.anim.meta")
-                paths.add(f"Assets/Res/UI/Animator/EmojiOverride/coui_chatemoji_{lower}.overrideController")
-                paths.add(f"Assets/Res/UI/Animator/EmojiOverride/coui_chatemoji_{lower}.overrideController.meta")
+    for package_name, force_story in (("emoji", False), ("story", True)):
+        manifest = unity_ready / package_name / "animation_resource_manifest.json"
+        for task in _manifest_tasks(manifest):
+            _add_emoji_p4_paths(paths, task, mode, force_story=force_story)
     return sorted(paths)
+
+
+def _add_emoji_p4_paths(paths: set[str], task: dict[str, Any], mode: str, *, force_story: bool = False) -> None:
+    character = _title_name(str(task.get("character") or task.get("name") or ""))
+    animation = str(task.get("animation") or task.get("anim") or "idle").lower()
+    types = [str(item).lower() for item in (task.get("unityCategories") or task.get("types") or [])]
+    is_story = force_story or any("剧情" in item or "story" in item or "chat" in item for item in types)
+    if character:
+        if mode == "iteration":
+            paths.add(f"Assets/Art/UI/SpritesAnim/Emoji/{character}/{'Chat' if is_story else 'Common'}/...")
+        else:
+            paths.add(f"Assets/Art/UI/SpritesAnim/Emoji/{character}/importing_{animation}/...")
+            lower = character.lower()
+            paths.add(f"Assets/Art/UI/Animation/Emoji/{character}/anui_emoji_{lower}_{animation}.anim")
+            paths.add(f"Assets/Art/UI/Animation/Emoji/{character}/anui_emoji_{lower}_{animation}.anim.meta")
+            paths.add(f"Assets/Res/UI/Animator/EmojiOverride/coui_chatemoji_{lower}.overrideController")
+            paths.add(f"Assets/Res/UI/Animator/EmojiOverride/coui_chatemoji_{lower}.overrideController.meta")
 
 
 def _manifest_tasks(path: Path) -> list[dict[str, Any]]:
@@ -618,7 +633,7 @@ def _format_cherry_stage(status: dict[str, Any], label: str = "") -> str:
 
 def _format_unity_ready_stage(report: dict[str, Any], ready_root: Path) -> str:
     lines = ["步骤5 unity_ready 完成："]
-    for package_key, label in (("scene", "Scene"), ("emoji", "Emoji")):
+    for package_key, label in (("scene", "Scene"), ("emoji", "Emoji"), ("story", "Story")):
         package = (report.get("packages") or {}).get(package_key) or {}
         tasks = package.get("tasks") or []
         frames = sum(int(item.get("frameCount") or 0) for item in tasks)
@@ -787,6 +802,7 @@ def _public(run: dict[str, Any]) -> dict[str, Any]:
         "unity_ready": run.get("unity_ready"),
         "workflow_path": run.get("workflow_path") or "",
         "workflow_name": run.get("workflow_name") or (Path(run["workflow_path"]).name if run.get("workflow_path") else ""),
+        "pipeline_notice": run.get("pipeline_notice") or "",
         "unity_project": run.get("unity_project"),
         "unity_import_mode": run.get("unity_import_mode") or "import",
         "priority_characters": run.get("priority_characters") or [],

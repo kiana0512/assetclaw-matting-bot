@@ -477,7 +477,7 @@ h3 {
 
 .focus-detail {
   display: grid;
-  grid-template-columns: minmax(180px, 0.45fr) minmax(0, 1fr);
+  grid-template-columns: minmax(220px, 0.42fr) minmax(150px, 0.18fr) minmax(0, 1fr);
   gap: 14px;
   align-items: center;
 }
@@ -497,6 +497,10 @@ h3 {
 .focus-detail small {
   color: var(--muted);
   font-family: Consolas, "Cascadia Mono", monospace;
+}
+
+.focus-detail .focus-path {
+  color: var(--faint);
 }
 
 .status-pill,
@@ -840,6 +844,10 @@ h3 {
   white-space: nowrap;
 }
 
+.task-progress .task-eta {
+  color: color-mix(in srgb, var(--blue) 62%, var(--muted));
+}
+
 .task-actions {
   justify-content: flex-end;
   flex-wrap: nowrap;
@@ -1126,6 +1134,10 @@ pre {
   }
 
   .focus-progress {
+    grid-template-columns: 1fr;
+  }
+
+  .focus-detail {
     grid-template-columns: 1fr;
   }
 

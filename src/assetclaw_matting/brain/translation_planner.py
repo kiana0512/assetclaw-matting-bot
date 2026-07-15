@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 from assetclaw_matting.brain.schemas import BrainMessage, ToolCall
-from assetclaw_matting.skills.media_skills import IMAGE_EXTS
+from assetclaw_matting.skills.media_skills import IMAGE_EXTS, VIDEO_EXTS
 from assetclaw_matting.skills.speech_skills import AUDIO_EXTS
 
 
@@ -149,9 +149,14 @@ def _download_failed_text(attachments: list[dict]) -> str:
 
 def _is_audio_attachment(item: dict) -> bool:
     raw_type = str(item.get("type") or "").lower()
+    if raw_type in {"video", "media"}:
+        return False
     path = str(item.get("local_path") or "")
     name = str(item.get("file_name") or "")
-    return raw_type in {"audio", "voice"} or Path(path or name).suffix.lower() in AUDIO_EXTS
+    suffix = Path(path or name).suffix.lower()
+    if suffix in VIDEO_EXTS:
+        return False
+    return raw_type in {"audio", "voice"} or suffix in AUDIO_EXTS
 
 
 def _extract_target_language(text: str) -> str | None:

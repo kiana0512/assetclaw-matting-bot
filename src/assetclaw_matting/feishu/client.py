@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 from pathlib import Path
 import threading
 import time
@@ -72,24 +73,59 @@ class FeishuClient:
         )
         response.raise_for_status()
 
+    def add_message_reaction(self, message_id: str, emoji_type: str) -> bool:
+        if not message_id or not emoji_type:
+            return False
+        payload = {"reaction_type": {"emoji_type": emoji_type}}
+        response = requests.post(
+            f"{FEISHU_BASE}/im/v1/messages/{message_id}/reactions",
+            headers=self._headers(),
+            json=payload,
+            timeout=15,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("code") != 0:
+            log.warning(
+                "feishu add reaction failed code=%s msg=%s emoji=%s",
+                data.get("code"),
+                data.get("msg"),
+                emoji_type,
+            )
+            return False
+        return True
+
     def upload_file(self, path: Path, file_name: str | None = None) -> str:
         sent_name = file_name or path.name
         with path.open("rb") as f:
             response = requests.post(
                 f"{FEISHU_BASE}/im/v1/files",
                 headers=self._headers(),
-                data={"file_type": "stream", "file_name": sent_name},
-                files={"file": (sent_name, f)},
+                data={"file_type": _feishu_file_type(sent_name), "file_name": sent_name},
+                files={"file": (sent_name, f, _guess_mime_type(sent_name))},
                 timeout=60,
             )
-        response.raise_for_status()
+        self._raise_for_api_error(response, "upload_file")
         data = response.json()
         if data.get("code") != 0:
-            raise RuntimeError(f"upload_file failed: {data.get('msg')}")
+            raise RuntimeError(f"upload_file failed: code={data.get('code')} msg={data.get('msg')} error={data.get('error')}")
         return data["data"]["file_key"]
 
-    def send_file_to_chat(self, chat_id: str, path: Path, file_name: str | None = None) -> None:
-        file_key = self.upload_file(path, file_name)
+    def send_file_to_chat(self, chat_id: str, path: Path, file_name: str | None = None) -> dict[str, str] | None:
+        try:
+            file_key = self.upload_file(path, file_name)
+        except requests.HTTPError as exc:
+            if not _is_message_file_size_error(exc):
+                raise
+            drive_file = self.upload_drive_file(path, file_name)
+            file_token = str(drive_file.get("file_token") or "")
+            if file_token:
+                self.grant_drive_file_to_chat(file_token, chat_id, perm="full_access")
+            url = str(drive_file.get("url") or "")
+            if not url:
+                raise RuntimeError(f"drive upload succeeded but url is empty: {drive_file}") from exc
+            self.send_text_to_chat(chat_id, f"文件已生成：{file_name or path.name}\n{url}")
+            return drive_file
         payload = {
             "receive_id": chat_id,
             "msg_type": "file",
@@ -101,17 +137,133 @@ class FeishuClient:
             json=payload,
             timeout=15,
         )
-        response.raise_for_status()
+        self._raise_for_api_error(response, "send_file_to_chat")
         data = response.json()
         if data.get("code") != 0:
-            raise RuntimeError(f"send_file_to_chat failed: {data.get('msg')}")
+            raise RuntimeError(f"send_file_to_chat failed: code={data.get('code')} msg={data.get('msg')} error={data.get('error')}")
+        return None
+
+    def upload_drive_file(self, path: Path, file_name: str | None = None) -> dict[str, str]:
+        sent_name = file_name or path.name
+        size = path.stat().st_size
+        if size > 20 * 1024 * 1024:
+            return self.upload_drive_file_chunked(path, sent_name)
+        with path.open("rb") as f:
+            response = requests.post(
+                f"{FEISHU_BASE}/drive/v1/files/upload_all",
+                headers=self._headers(),
+                data={
+                    "file_name": sent_name,
+                    "parent_type": "explorer",
+                    "parent_node": "",
+                    "size": str(size),
+                },
+                files={"file": (sent_name, f, _guess_mime_type(sent_name))},
+                timeout=300,
+            )
+        self._raise_for_api_error(response, "upload_drive_file")
+        data = response.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"upload_drive_file failed: code={data.get('code')} msg={data.get('msg')} error={data.get('error')}")
+        payload = data.get("data") or {}
+        return {
+            "file_token": str(payload.get("file_token") or ""),
+            "url": str(payload.get("url") or ""),
+            "version": str(payload.get("version") or ""),
+        }
+
+    def upload_drive_file_chunked(self, path: Path, file_name: str | None = None) -> dict[str, str]:
+        sent_name = file_name or path.name
+        size = path.stat().st_size
+        prepare = requests.post(
+            f"{FEISHU_BASE}/drive/v1/files/upload_prepare",
+            headers=self._headers(),
+            data={
+                "file_name": sent_name,
+                "parent_type": "explorer",
+                "parent_node": "",
+                "size": str(size),
+            },
+            timeout=60,
+        )
+        self._raise_for_api_error(prepare, "upload_drive_file_prepare")
+        prepare_data = prepare.json()
+        if prepare_data.get("code") != 0:
+            raise RuntimeError(
+                f"upload_drive_file_prepare failed: code={prepare_data.get('code')} "
+                f"msg={prepare_data.get('msg')} error={prepare_data.get('error')}"
+            )
+        payload = prepare_data.get("data") or {}
+        upload_id = str(payload.get("upload_id") or "")
+        block_size = int(payload.get("block_size") or 4 * 1024 * 1024)
+        block_num = int(payload.get("block_num") or 0)
+        if not upload_id or block_size <= 0 or block_num <= 0:
+            raise RuntimeError(f"invalid drive upload_prepare response: {payload}")
+
+        with path.open("rb") as f:
+            for seq in range(block_num):
+                chunk = f.read(block_size)
+                if not chunk:
+                    break
+                part = requests.post(
+                    f"{FEISHU_BASE}/drive/v1/files/upload_part",
+                    headers=self._headers(),
+                    data={"upload_id": upload_id, "seq": str(seq), "size": str(len(chunk))},
+                    files={"file": (sent_name, chunk, _guess_mime_type(sent_name))},
+                    timeout=120,
+                )
+                self._raise_for_api_error(part, "upload_drive_file_part")
+                part_data = part.json()
+                if part_data.get("code") != 0:
+                    raise RuntimeError(
+                        f"upload_drive_file_part failed: seq={seq} code={part_data.get('code')} "
+                        f"msg={part_data.get('msg')} error={part_data.get('error')}"
+                    )
+
+        finish = requests.post(
+            f"{FEISHU_BASE}/drive/v1/files/upload_finish",
+            headers=self._headers(),
+            data={"upload_id": upload_id, "block_num": str(block_num)},
+            timeout=120,
+        )
+        self._raise_for_api_error(finish, "upload_drive_file_finish")
+        finish_data = finish.json()
+        if finish_data.get("code") != 0:
+            raise RuntimeError(
+                f"upload_drive_file_finish failed: code={finish_data.get('code')} "
+                f"msg={finish_data.get('msg')} error={finish_data.get('error')}"
+            )
+        result = finish_data.get("data") or {}
+        return {
+            "file_token": str(result.get("file_token") or ""),
+            "url": str(result.get("url") or ""),
+            "version": str(result.get("version") or ""),
+        }
+
+    def grant_drive_file_to_chat(self, file_token: str, chat_id: str, perm: str = "full_access") -> None:
+        if not file_token or not chat_id:
+            return
+        response = requests.post(
+            f"{FEISHU_BASE}/drive/v1/permissions/{file_token}/members",
+            headers={**self._headers(), "Content-Type": "application/json"},
+            params={"type": "file"},
+            json={"member_type": "openchat", "member_id": chat_id, "perm": perm},
+            timeout=60,
+        )
+        self._raise_for_api_error(response, "grant_drive_file_to_chat")
+        data = response.json()
+        if data.get("code") != 0:
+            raise RuntimeError(
+                f"grant_drive_file_to_chat failed: code={data.get('code')} "
+                f"msg={data.get('msg')} error={data.get('error')}"
+            )
 
     def download_message_resource(
         self,
         message_id: str,
         resource_key: str,
         target_path: Path,
-        resource_type: Literal["image", "file", "video", "audio", "media"] = "file",
+        resource_type: Literal["image", "file", "video", "audio", "media"] | str = "file",
     ) -> None:
         if not message_id or not resource_key:
             raise ValueError("message_id and resource_key are required")
@@ -158,6 +310,12 @@ class FeishuClient:
         message = f"{error_label} failed: {response.status_code} {detail}"
         raise requests.HTTPError(message, response=response)
 
+    def _raise_for_api_error(self, response: requests.Response, error_label: str) -> None:
+        if response.status_code < 400:
+            return
+        detail = response.text[:2000] if response.text else response.reason
+        raise requests.HTTPError(f"{error_label} failed: {response.status_code} {detail}", response=response)
+
     def upload_image(self, path: Path) -> str:
         with path.open("rb") as f:
             response = requests.post(
@@ -193,3 +351,38 @@ class FeishuClient:
 
 
 feishu_client = FeishuClient()
+
+
+def _feishu_file_type(file_name: str) -> str:
+    suffix = Path(file_name).suffix.lower()
+    if suffix == ".mp4":
+        return "mp4"
+    if suffix == ".opus":
+        return "opus"
+    if suffix in {".doc", ".docx"}:
+        return "doc"
+    if suffix in {".xls", ".xlsx"}:
+        return "xls"
+    if suffix in {".ppt", ".pptx"}:
+        return "ppt"
+    if suffix == ".pdf":
+        return "pdf"
+    return "stream"
+
+
+def _guess_mime_type(file_name: str) -> str:
+    suffix = Path(file_name).suffix.lower()
+    if suffix == ".zip":
+        return "application/zip"
+    return mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+
+
+def _is_message_file_size_error(exc: requests.HTTPError) -> bool:
+    response = exc.response
+    if response is None:
+        return False
+    try:
+        data = response.json()
+    except Exception:
+        return "234006" in str(exc)
+    return str(data.get("code") or "") == "234006"

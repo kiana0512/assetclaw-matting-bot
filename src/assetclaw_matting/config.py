@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     brain_memory_enabled: bool = True
     brain_memory_recent_messages: int = 8
     brain_memory_compact_enabled: bool = True
+    brain_memory_compact_notify_feishu: bool = True
     brain_memory_compact_after_messages: int = 20
     brain_memory_compact_keep_messages: int = 8
     brain_memory_compact_max_chars: int = 2400
@@ -70,12 +71,16 @@ class Settings(BaseSettings):
     feishu_admin_open_ids: str = ""
     feishu_allowed_open_ids: str = ""
     feishu_allowed_chat_ids: str = ""
+    feishu_progress_reaction_enabled: bool = True
+    feishu_progress_reaction_emoji_types: str = "敲键盘;keyboard;KEYBOARD;OK;THUMBSUP"
     bot_require_confirmation_for_write: bool = False
     bot_error_push_enabled: bool = True
     bot_emotional_replies_enabled: bool = True
     bot_sticker_dir: Path = Path("E:/assetclaw-matting-bot/miratsu_stickers")
-    bot_sticker_probability: float = 1.0
+    bot_sticker_probability: float = 0.28
+    bot_sticker_cooldown_seconds: int = 180
     bot_sticker_max_bytes: int = 8_000_000
+    bot_sticker_send_max_px: int = 240
     bot_sticker_extensions: str = ".png;.gif"
     user_default_location: str = "上海"
     user_food_preferences: str = ""
@@ -119,9 +124,19 @@ class Settings(BaseSettings):
     comfyui_dir: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3/ComfyUI")
     comfyui_python_dir: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3/python")
     comfyui_url: str = "http://127.0.0.1:8188"
-    comfyui_workflow_path: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3/ComfyUI/user/default/workflows/软边缘抠图-动画专属.json")
+    comfyui_workflow_path: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3/ComfyUI/user/default/workflows/ImageClip.json")
     comfyui_timeout_seconds: int = 600
     comfyui_poll_interval_seconds: int = 2
+    matting_pipeline_repo_url: str = "git@gitlab.lilithgame.com:rd_center/ai_art/imageclip.git"
+    matting_pipeline_repo_dir: Path = Path("E:/imageclip-pipeline/imageclip")
+    matting_pipeline_branch: str = "main"
+    matting_pipeline_workflow_name: str = "ImageClip.json"
+    matting_pipeline_lora_name: str = "Koutu_Flux2klein_v2_000007250.safetensors"
+    matting_pipeline_custom_node_name: str = "Cherry_lizi"
+    cherry_html_runner_enabled: bool = True
+    cherry_postprocess_html_path: Path = Path("E:/imageclip-pipeline/imageclip/cherry-postprocess.html")
+    cherry_browser_path: Path | None = None
+    cherry_html_timeout_seconds: int = 900
 
     default_batch_input_dir: Path = Path("E:/assetclaw-matting-bot/storage/batch_inputs")
     default_batch_output_dir: Path = Path("E:/assetclaw-matting-bot/storage/batch_outputs")
@@ -145,6 +160,7 @@ class Settings(BaseSettings):
     tts_voice: str = "zh-CN-XiaoxiaoNeural"
     tts_rate: str = "+0%"
     tts_max_chars: int = 800
+    bot_tts_enabled: bool = False
     voice_reply_on_audio: bool = True
     voice_reply_progress_enabled: bool = True
     indextts_repo_dir: Path = Path("E:/assetclaw-matting-bot/storage/models/index-tts/repo")
