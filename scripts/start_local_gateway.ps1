@@ -4,14 +4,15 @@ chcp 65001 | Out-Null
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 $OutputEncoding = [System.Text.UTF8Encoding]::new()
 
-Set-Location "E:\assetclaw-matting-bot"
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+Set-Location $ProjectRoot
 
 Write-Host "Gateway local debug only: http://127.0.0.1:7865"
 Write-Host "No public exposure."
 Write-Host "Cloudflare disabled."
 Write-Host ""
 
-$env:PYTHONPATH = "E:\assetclaw-matting-bot\src;E:\assetclaw-matting-bot"
+$env:PYTHONPATH = "$ProjectRoot\src;$ProjectRoot"
 $CondaExe = Join-Path $env:USERPROFILE "miniconda3\Scripts\conda.exe"
 if (-not (Test-Path $CondaExe)) {
   $cmd = Get-Command conda -ErrorAction SilentlyContinue

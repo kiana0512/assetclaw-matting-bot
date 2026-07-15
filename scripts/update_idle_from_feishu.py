@@ -226,7 +226,7 @@ def _run_patch_pipeline(root: Path, patch_frames: Path, patch_matte: Path, patch
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Replace only idle videos/frames/matte/smooth from the configured Feishu table.")
-    parser.add_argument("--root", default=r"E:\animation_automation\2026-06-02")
+    parser.add_argument("--root", default=str(ROOT.parent / "animation_auto" / datetime.now().strftime("%Y-%m-%d")))
     parser.add_argument("--config", default=str(TOOL_DIR / "config.json"))
     parser.add_argument("--poll-seconds", type=int, default=30)
     args = parser.parse_args()

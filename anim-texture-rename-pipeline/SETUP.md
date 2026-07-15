@@ -43,7 +43,7 @@ uv --version
 
 ## 2. 配置 MCP（`~/.cursor/mcp.json`）
 
-编辑 `C:\Users\<你的用户名>\.cursor\mcp.json`，加入这两个 server。
+编辑 `%USERPROFILE%\.cursor\mcp.json`，加入这两个 server。
 `lark-mcp` 的 `-a`（appId）/`-s`（appSecret）**向负责人索取**后填入：
 
 ```jsonc

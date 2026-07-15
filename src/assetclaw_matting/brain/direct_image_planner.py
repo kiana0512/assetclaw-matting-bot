@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+import zipfile
 from pathlib import Path
 from typing import Any
 
 from assetclaw_matting.brain.schemas import BrainMessage, ToolCall
+from assetclaw_matting.config import settings
 from assetclaw_matting.skills.media_skills import IMAGE_EXTS
+
+ARCHIVE_EXTS = {".zip"}
+MAX_IMAGE_SET_ITEMS = 1000
 
 
 STATUS_WORDS = (
@@ -27,14 +33,18 @@ def plan_direct_image_task(message: BrainMessage) -> tuple[list[ToolCall], str] 
         return [ToolCall(skill="direct_image.status", arguments={})], "direct image status route"
 
     images = _image_attachments(message.attachments)
+    if not images and _asks_image_matting(text):
+        images = _recent_image_set(message.conversation_id)
     if not images:
         return None
     missing = [item for item in images if not item.get("local_path")]
     if missing:
-        return None, "我收到了图片附件，但还没有拿到本地文件，等下载完成后再处理。"
+        return None, "我收到了图片/图片合集，但还没有拿到本地文件，等下载完成后再处理。"
 
     paths = [str(item["local_path"]) for item in images if item.get("local_path")]
     names = [str(item.get("file_name") or Path(path).name) for item, path in zip(images, paths)]
+    collections = [str(item.get("source_collection") or "").strip() for item in images if item.get("source_collection")]
+    run_label = collections[0] if len(set(collections)) == 1 and len(paths) > 1 else "、".join(names[:3])
     return (
         [
             ToolCall(
@@ -42,7 +52,7 @@ def plan_direct_image_task(message: BrainMessage) -> tuple[list[ToolCall], str] 
                 arguments={
                     "image_paths": paths,
                     "source_names": names,
-                    "run_label": "、".join(names[:3]),
+                    "run_label": run_label,
                 },
             )
         ],
@@ -66,4 +76,110 @@ def _image_attachments(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         suffix = Path(path).suffix.lower()
         if raw_type == "image" or suffix in IMAGE_EXTS:
             images.append(item)
+            continue
+        images.extend(_expand_image_set_attachment(item))
     return images
+
+
+def _expand_image_set_attachment(item: dict[str, Any]) -> list[dict[str, Any]]:
+    path_text = str(item.get("local_path") or "").strip()
+    if not path_text:
+        return []
+    path = Path(path_text)
+    image_paths = _image_paths_from_source(path)
+    if not image_paths:
+        return []
+    source_name = str(item.get("file_name") or path.name or "图片合集")
+    return [
+        {
+            **item,
+            "type": "image",
+            "local_path": str(image_path),
+            "file_name": image_path.name,
+            "source_collection": source_name,
+        }
+        for image_path in image_paths[:MAX_IMAGE_SET_ITEMS]
+    ]
+
+
+def _image_paths_from_source(path: Path) -> list[Path]:
+    if path.is_dir():
+        return _image_paths_in_dir(path)
+    if path.is_file() and path.suffix.lower() in IMAGE_EXTS:
+        return [path]
+    if path.is_file() and path.suffix.lower() in ARCHIVE_EXTS:
+        return _extract_archive_images(path)
+    return []
+
+
+def _image_paths_in_dir(path: Path) -> list[Path]:
+    try:
+        images = [item for item in path.rglob("*") if item.is_file() and item.suffix.lower() in IMAGE_EXTS]
+    except OSError:
+        return []
+    return sorted(images, key=lambda item: str(item).lower())[:MAX_IMAGE_SET_ITEMS]
+
+
+def _extract_archive_images(path: Path) -> list[Path]:
+    digest = hashlib.sha1(str(path.resolve()).encode("utf-8", errors="ignore")).hexdigest()[:10]
+    target_root = Path(settings.storage_dir) / "direct_image_imports" / f"{path.stem}_{digest}"
+    if _image_paths_in_dir(target_root):
+        return _image_paths_in_dir(target_root)
+    target_root.mkdir(parents=True, exist_ok=True)
+    extracted: list[Path] = []
+    try:
+        with zipfile.ZipFile(path) as archive:
+            for member in archive.infolist():
+                if member.is_dir():
+                    continue
+                member_path = Path(member.filename)
+                if member_path.suffix.lower() not in IMAGE_EXTS:
+                    continue
+                if any(part in {"", ".", ".."} for part in member_path.parts):
+                    continue
+                safe_parts = [part for part in member_path.parts if part not in {"", ".", ".."}]
+                if not safe_parts:
+                    continue
+                target = target_root.joinpath(*safe_parts)
+                if not _is_relative_to(target.resolve(), target_root.resolve()):
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member) as src, target.open("wb") as dst:
+                    dst.write(src.read())
+                extracted.append(target)
+                if len(extracted) >= MAX_IMAGE_SET_ITEMS:
+                    break
+    except (OSError, zipfile.BadZipFile):
+        return []
+    return sorted(extracted, key=lambda item: str(item).lower())
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _asks_image_matting(text: str) -> bool:
+    if not text:
+        return False
+    return any(word in text for word in ("抠图", "扣图", "去背景", "透明底", "处理图片", "图片处理", "序列帧"))
+
+
+def _recent_image_set(conversation_id: str) -> list[dict[str, Any]]:
+    if not conversation_id:
+        return []
+    from assetclaw_matting.db.repos import list_memory_notes
+
+    for note in list_memory_notes(conversation_id, limit=30):
+        if note.get("key") not in {"last_image_set_path", "last_image_path"}:
+            continue
+        path = Path(str(note.get("value") or ""))
+        image_paths = _image_paths_from_source(path)
+        if not image_paths:
+            continue
+        source_name = path.name or "图片合集"
+        return [{"type": "image", "local_path": str(item), "file_name": item.name, "source_collection": source_name} for item in image_paths]
+    return []

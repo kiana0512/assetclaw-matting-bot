@@ -4,7 +4,8 @@ chcp 65001 | Out-Null
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 $OutputEncoding = [System.Text.UTF8Encoding]::new()
 
-Set-Location "E:\assetclaw-matting-bot\external_webui"
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+Set-Location (Join-Path $ProjectRoot "external_webui")
 
 $env:ASSETCLAW_AGENT_URL = if ($env:ASSETCLAW_AGENT_URL) { $env:ASSETCLAW_AGENT_URL } else { "http://127.0.0.1:7865" }
 

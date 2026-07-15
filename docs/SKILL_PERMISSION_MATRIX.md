@@ -13,9 +13,9 @@
 
 ## 允许/禁止路径
 
-- **允许根路径**：`ALLOWED_ROOTS`（默认 `D:\`、`E:\`、`F:\`、`Z:\`、`\\audioshare.lilith.com\AIart\公共机共享\抠图`）
-- **禁止根路径**：`C:\`
-- **永久禁止关键词**：`.env`、`.ssh`、`AppData`、`Windows`、`Program Files`、`ProgramData`、`$Recycle.Bin`、`System Volume Information`
+- **允许根路径**：默认是项目所在盘的根目录；可通过 `ALLOWED_ROOTS` 追加共享盘或其他盘
+- **公共机默认值**：项目在 C 盘时自动允许 `C:\`
+- **永久禁止关键词**：`.env`、`.ssh`、`Windows`、`$Recycle.Bin`、`System Volume Information`
 
 ---
 
@@ -80,29 +80,29 @@
 | `file.delete` | file | danger_confirm | Yes | No | Yes | 删除文件/目录 |
 | `file.empty_dir` | file | danger_confirm | Yes | No | Yes | 清空目录 |
 
-**Allowed roots**：`ALLOWED_ROOTS=D:;E:;F:;Z:;\\audioshare.lilith.com\AIart\公共机共享\抠图`  
-**Denied patterns**：`.env`, `.ssh`, `AppData`, `Windows`, `Program Files`, `ProgramData`, `$Recycle.Bin`, `System Volume Information`
+**Allowed roots**：默认项目所在盘；额外路径由 `ALLOWED_ROOTS` 配置
+**Denied patterns**：`.env`, `.ssh`, `Windows`, `$Recycle.Bin`, `System Volume Information`
 
 **自然语言示例**：
 ```
 看看 E 盘有哪些文件
-列出 E:\assetclaw-matting-bot\storage 下的文件
-E:\assetclaw-matting-bot\README.md 是否存在
-查看 E:\assetclaw-matting-bot\README.md 的信息
+列出 <project-root>\storage 下的文件
+<project-root>\README.md 是否存在
+查看 <project-root>\README.md 的信息
 搜索文件名包含 batch 的文件
-显示 E:\assetclaw-matting-bot 目录树
+显示 <project-root> 目录树
 查看最近 24 小时内修改的文件
-列出 E:\ 下面的图片文件
-把 E:\a.png 复制一份并改名为 a_bak.png
-把 E:\a.png 在原路径复制一份，后缀加 _bak
-把 E:\assetclaw-matting-bot\README.md 复制到 E:\assetclaw-matting-bot\storage\README_bak.md
-把 E:\assetclaw-matting-bot\storage\README_bak.md 移动到 E:\assetclaw-matting-bot\storage\README_moved.md
-创建目录 E:\assetclaw-matting-bot\storage\feishu_test_folder
+列出 <allowed-root>\ 下面的图片文件
+把 <allowed-root>\a.png 复制一份并改名为 a_bak.png
+把 <allowed-root>\a.png 在原路径复制一份，后缀加 _bak
+把 <project-root>\README.md 复制到 <project-root>\storage\README_bak.md
+把 <project-root>\storage\README_bak.md 移动到 <project-root>\storage\README_moved.md
+创建目录 <project-root>\storage\feishu_test_folder
 查看 D E F 盘空间
-把 D:\assets 复制到 F:\backup\assets
+把 D:\assets 复制到 <secondary-root>\backup\assets
 把刚才列出的图片按顺序改名为 1 2 3 4 5
-计算 F:\package.zip 的 sha256
-删除 F:\temp\old.png
+计算 <secondary-root>\package.zip 的 sha256
+删除 <secondary-root>\temp\old.png
 ```
 
 ---
@@ -137,8 +137,8 @@ E:\assetclaw-matting-bot\README.md 是否存在
 **自然语言示例**：
 ```
 看看 E 盘有哪些图片
-查看 E:\a.png 的图片尺寸
-把 E:\assetclaw-matting-bot\README.md 通过飞书发给我
+查看 <allowed-root>\a.png 的图片尺寸
+把 <project-root>\README.md 通过飞书发给我
 把 E 盘里 img_v3_02125_53d2b164...608g.png 发给我
 把共享盘 input 文件夹压缩成 zip 并发送给我
 ```
@@ -180,7 +180,7 @@ E:\assetclaw-matting-bot\README.md 是否存在
 
 **自然语言示例**：
 ```
-用 E:\assetclaw-matting-bot\storage\batch_inputs 创建一个抠图批次
+用 <project-root>\storage\batch_inputs 创建一个抠图批次
 列出所有抠图批次
 查看批次 BATCH_XXXXXXXXXXXX 的状态
 启动批次 BATCH_XXXXXXXXXXXX
@@ -266,7 +266,7 @@ E:\assetclaw-matting-bot\README.md 是否存在
 |------|------|
 | shell exec | 安全红线，任意代码执行 |
 | format disk / partition / change drive letter | 极高危，永久禁止 |
-| C:\ access | 系统盘，不开放 |
+| Windows 系统目录访问 | 即使 C 盘已允许，`C:\Windows` 仍永久拒绝 |
 | unrestricted file.read_content | 防止密钥泄漏；只开放安全文本扩展名的 `file.read_text` |
 | 启动 cloudflared | 内网穿透，违规 |
 | 启动 ngrok/frp/Tailscale | 内网穿透，违规 |

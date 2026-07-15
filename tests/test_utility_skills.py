@@ -18,7 +18,7 @@ from assetclaw_matting.skills.utility_skills import (
 
 
 def test_utility_file_search_preview_count_manifest() -> None:
-    root = Path("E:/assetclaw-matting-bot/storage/debug/utility")
+    root = Path.cwd() / "storage/debug/utility"
     root.mkdir(parents=True, exist_ok=True)
     note = root / "note.txt"
     note.write_text("alpha\nComfyUI task\nomega", encoding="utf-8")
@@ -40,7 +40,7 @@ def test_utility_file_search_preview_count_manifest() -> None:
 
 
 def test_archive_json_csv_helpers_and_formatter() -> None:
-    root = Path("E:/assetclaw-matting-bot/storage/debug/utility_structured")
+    root = Path.cwd() / "storage/debug/utility_structured"
     root.mkdir(parents=True, exist_ok=True)
     data_path = root / "data.json"
     data_path.write_text(json.dumps({"nodes": [{"type": "LoadImage"}]}, ensure_ascii=False), encoding="utf-8")
@@ -60,7 +60,8 @@ def test_archive_json_csv_helpers_and_formatter() -> None:
 
 def test_local_router_utility_skills() -> None:
     brain = LocalCommandBrain()
+    debug_root = Path.cwd() / "storage" / "debug"
     assert brain._infer_tool_calls("统计 E:\\input 里有多少图片")[0].skill == "file.count"
-    assert brain._infer_tool_calls("看看这个 zip 里面有哪些文件 E:\\assetclaw-matting-bot\\storage\\debug\\a.zip")[0].skill == "archive.list"
-    assert brain._infer_tool_calls("查看这个 CSV 有哪些列 E:\\assetclaw-matting-bot\\storage\\debug\\a.csv")[0].skill == "csv.summary"
+    assert brain._infer_tool_calls(f"看看这个 zip 里面有哪些文件 {debug_root / 'a.zip'}")[0].skill == "archive.list"
+    assert brain._infer_tool_calls(f"查看这个 CSV 有哪些列 {debug_root / 'a.csv'}")[0].skill == "csv.summary"
     assert brain._infer_tool_calls("看看 E:\\input 有哪些文件")[0].skill == "file.list_allowed"

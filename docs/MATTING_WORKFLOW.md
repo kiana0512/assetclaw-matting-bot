@@ -5,9 +5,9 @@
 当前 ComfyUI 由秋叶启动器管理：
 
 ```text
-Aki 根目录：C:\Users\lilithgames\Downloads\ComfyUI-aki-v3
-ComfyUI：C:\Users\lilithgames\Downloads\ComfyUI-aki-v3\ComfyUI
-Python：C:\Users\lilithgames\Downloads\ComfyUI-aki-v3\python
+Aki 根目录：<comfyui-root>
+ComfyUI：<comfyui-root>\ComfyUI
+Python：<comfyui-root>\python
 后端：http://127.0.0.1:8188
 ```
 
@@ -17,8 +17,8 @@ Python：C:\Users\lilithgames\Downloads\ComfyUI-aki-v3\python
 
 ```text
 远程仓库：git@gitlab.lilithgame.com:rd_center/ai_art/imageclip.git
-本地仓库：E:\imageclip-pipeline\imageclip
-默认工作流：C:\Users\lilithgames\Downloads\ComfyUI-aki-v3\ComfyUI\user\default\workflows\ImageClip.json
+本地仓库：<pipeline-root>
+默认工作流：<comfyui-root>\ComfyUI\user\default\workflows\ImageClip.json
 ```
 
 机器人支持在飞书里直接询问或更新：
@@ -37,6 +37,8 @@ Python：C:\Users\lilithgames\Downloads\ComfyUI-aki-v3\python
 - `Cherry_lizi` -> `ComfyUI\custom_nodes\Cherry_lizi`
 
 同步优先创建软链接；如果当前 Windows 权限不允许创建软链接，会复制文件或目录作为兜底。更新后需要重启 ComfyUI 或用秋叶重新加载。机器人会在状态里返回 Git branch、commit、commit 时间、工作流路径、资源链接状态，并会检查 lora 是否疑似 Git LFS pointer。
+
+公共 C 盘机器的默认布局中，`<pipeline-root>` 会自动解析为 `C:\imageclip`。它与项目目录同级，源码中不固定盘符；项目整体迁到其他盘时也会跟随项目父目录推导。
 
 环境边界：
 
@@ -90,8 +92,8 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\run_comfyui.ps1
 ```text
 列出当前有哪些 ComfyUI 工作流
 查看当前工作流的节点信息
-选择 C:\Users\lilithgames\Downloads\ComfyUI-aki-v3\ComfyUI\user\default\workflows\软边缘测试-动画批量.json 作为抠图工作流
-预览 E:\input 到 E:\output 的抠图任务
+选择 <comfyui-root>\ComfyUI\user\default\workflows\软边缘测试-动画批量.json 作为抠图工作流
+预览 <allowed-root>\input 到 <allowed-root>\output 的抠图任务
 开始批量抠图
 ComfyUI 现在在跑什么管线
 现在跑到多少张了，大概还需要多久
@@ -109,8 +111,8 @@ ComfyUI 的 `SaveImage` 默认写到 ComfyUI 自己的 output 区域。机器人
 
 默认批量抠图约定：
 
-- 输入目录：`E:\input`
-- 输出目录：`E:\output`
+- 输入目录：`<allowed-root>\input`
+- 输出目录：`<allowed-root>\output`
 - 递归处理输入目录下所有图片。
 - 输出目录保留输入目录结构。
 - 默认使用安静进度推送，避免刷屏；完成和失败会立即通知。
@@ -121,15 +123,15 @@ ComfyUI 的 `SaveImage` 默认写到 ComfyUI 自己的 output 区域。机器人
 例如：
 
 ```text
-E:\input\Jessica-happy\a.png
-E:\input\Jessica-idle\b.jpg
+<allowed-root>\input\Jessica-happy\a.png
+<allowed-root>\input\Jessica-idle\b.jpg
 ```
 
 会输出到：
 
 ```text
-E:\output\Jessica-happy\a.png
-E:\output\Jessica-idle\b.png
+<allowed-root>\output\Jessica-happy\a.png
+<allowed-root>\output\Jessica-idle\b.png
 ```
 
 ## 共享盘抠图

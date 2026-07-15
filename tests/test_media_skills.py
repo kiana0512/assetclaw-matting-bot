@@ -29,10 +29,10 @@ def _make_test_image(path: Path) -> None:
 
 
 def test_image_list_and_info() -> None:
-    path = Path("E:/assetclaw-matting-bot/storage/debug/media_list_case/pytest_image.png")
+    path = Path.cwd() / "storage/debug/media_list_case/pytest_image.png"
     _make_test_image(path)
 
-    listed = image_list("E:\\assetclaw-matting-bot\\storage\\debug\\media_list_case", max_results=20)
+    listed = image_list(".\\storage\\debug\\media_list_case", max_results=20)
     assert listed["ok"] is True
     assert any(item["name"] == "pytest_image.png" for item in listed["items"])
 
@@ -43,7 +43,7 @@ def test_image_list_and_info() -> None:
 
 
 def test_file_copy_as_and_duplicate_same_dir() -> None:
-    src = Path("E:/assetclaw-matting-bot/storage/debug/pytest_copy_as_src.png")
+    src = Path.cwd() / "storage/debug/pytest_copy_as_src.png"
     _make_test_image(src)
 
     copied = file_copy_as(str(src), "pytest_copy_as_dst.png", overwrite=True)
@@ -56,21 +56,21 @@ def test_file_copy_as_and_duplicate_same_dir() -> None:
 
 
 def test_file_list_by_type_tables() -> None:
-    csv_path = Path("E:/assetclaw-matting-bot/storage/debug/pytest_table.csv")
+    csv_path = Path.cwd() / "storage/debug/pytest_table.csv"
     csv_path.write_text("a,b\n1,2\n", encoding="utf-8")
 
-    listed = file_list_by_type("E:\\assetclaw-matting-bot\\storage\\debug", kind="table")
+    listed = file_list_by_type(".\\storage\\debug", kind="table")
     assert listed["ok"] is True
     assert any(item["name"] == "pytest_table.csv" for item in listed["items"])
 
 
 def test_find_name_supports_ellipsis_pattern() -> None:
-    path = Path("E:/assetclaw-matting-bot/storage/debug/img_v3_02125_53d2b164_REAL_608g.png")
+    path = Path.cwd() / "storage/debug/img_v3_02125_53d2b164_REAL_608g.png"
     _make_test_image(path)
 
     result = file_find_name(
         "img_v3_02125_53d2b164...608g.png",
-        search_root="E:\\assetclaw-matting-bot\\storage\\debug",
+        search_root=".\\storage\\debug",
     )
     assert result["ok"] is True
     assert result["count"] == 1
@@ -78,7 +78,7 @@ def test_find_name_supports_ellipsis_pattern() -> None:
 
 
 def test_feishu_send_file_by_name_supports_ellipsis(monkeypatch) -> None:
-    path = Path("E:/assetclaw-matting-bot/storage/debug/img_v3_02125_82151f84_REAL_c77g.jpg")
+    path = Path.cwd() / "storage/debug/img_v3_02125_82151f84_REAL_c77g.jpg"
     _make_test_image(path)
     sent: dict[str, str] = {}
 
@@ -94,7 +94,7 @@ def test_feishu_send_file_by_name_supports_ellipsis(monkeypatch) -> None:
     try:
         result = feishu_send_file_by_name(
             "img_v3_02125_82151f84...c77g.jpg",
-            search_root="E:\\assetclaw-matting-bot\\storage\\debug",
+            search_root=".\\storage\\debug",
         )
     finally:
         reset_runtime_context(token)
@@ -105,7 +105,7 @@ def test_feishu_send_file_by_name_supports_ellipsis(monkeypatch) -> None:
 
 
 def test_feishu_send_image_sends_inline_image(monkeypatch) -> None:
-    path = Path("E:/assetclaw-matting-bot/storage/debug/inline_preview.png")
+    path = Path.cwd() / "storage/debug/inline_preview.png"
     _make_test_image(path)
     sent: dict[str, str] = {}
 
@@ -128,7 +128,7 @@ def test_feishu_send_image_sends_inline_image(monkeypatch) -> None:
 
 
 def test_feishu_send_image_by_name(monkeypatch) -> None:
-    path = Path("E:/assetclaw-matting-bot/storage/debug/inline_name_preview.png")
+    path = Path.cwd() / "storage/debug/inline_name_preview.png"
     _make_test_image(path)
     sent: dict[str, str] = {}
 
@@ -141,7 +141,7 @@ def test_feishu_send_image_by_name(monkeypatch) -> None:
     monkeypatch.setattr(feishu_client, "send_image_to_chat", fake_send_image_to_chat)
     token = set_runtime_context(chat_id="chat_test")
     try:
-        result = feishu_send_image_by_name("inline_name_preview.png", search_root="E:\\assetclaw-matting-bot\\storage\\debug")
+        result = feishu_send_image_by_name("inline_name_preview.png", search_root=".\\storage\\debug")
     finally:
         reset_runtime_context(token)
 
@@ -150,9 +150,9 @@ def test_feishu_send_image_by_name(monkeypatch) -> None:
 
 
 def test_image_batch_info_convert_and_resize() -> None:
-    src = Path("E:/assetclaw-matting-bot/storage/debug/media_ops_src.png")
-    jpg = Path("E:/assetclaw-matting-bot/storage/debug/media_ops_src.jpg")
-    resized = Path("E:/assetclaw-matting-bot/storage/debug/media_ops_small.png")
+    src = Path.cwd() / "storage/debug/media_ops_src.png"
+    jpg = Path.cwd() / "storage/debug/media_ops_src.jpg"
+    resized = Path.cwd() / "storage/debug/media_ops_small.png"
     _make_test_image(src)
     if jpg.exists():
         jpg.unlink()

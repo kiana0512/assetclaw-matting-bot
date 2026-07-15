@@ -17,7 +17,7 @@ from tools.animation_automation.core import ASSET_KINDS
 from tools.animation_automation.core import build_unity_ready
 
 
-RUN_DIR = Path("E:/assetclaw-matting-bot/storage/animation_flow_runs")
+RUN_DIR = Path(settings.storage_dir) / "animation_flow_runs"
 STAGES = [
     ("feishu_download", "1 飞书文档/表格下载视频"),
     ("frame_extract", "2 抽帧"),
@@ -32,7 +32,7 @@ _WORKERS: set[str] = set()
 
 def run_preview(
     date_root: str | None = None,
-    unity_project: str = "D:/Spark/Client",
+    unity_project: str | None = None,
     p4_workflow: str | None = None,
     p4_workspace: str | None = None,
     p4_stream: str = "//streams/rel_0.0.1",
@@ -52,7 +52,7 @@ def run_preview(
         "unity_ready": str(root / "unity_ready"),
         "workflow_path": str(workflow),
         "workflow_name": workflow.name,
-        "unity_project": str(validate_path(unity_project, must_exist=False)),
+        "unity_project": str(validate_path(unity_project or settings.unity_project_dir, must_exist=False)),
         "package": package,
         "unity_import_mode": selected_mode,
         "feishu_progress_policy": {
@@ -68,7 +68,7 @@ def run_preview(
 def run_start(
     date_root: str | None = None,
     workflow_path: str | None = None,
-    unity_project: str = "D:/Spark/Client",
+    unity_project: str | None = None,
     p4_workflow: str | None = None,
     p4_workspace: str | None = None,
     p4_stream: str = "//streams/rel_0.0.1",

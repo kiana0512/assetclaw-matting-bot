@@ -3,18 +3,55 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _discover_aki_root(parent: Path) -> Path:
+    """Find an Aki/ComfyUI bundle without relying on its machine-specific folder name."""
+    conventional = parent / "ComfyUI-aki-v3"
+    if (conventional / "ComfyUI").is_dir() and (conventional / "python").is_dir():
+        return conventional
+    try:
+        candidates = [
+            item
+            for item in parent.iterdir()
+            if item.is_dir() and (item / "ComfyUI").is_dir() and (item / "python").is_dir()
+        ]
+    except OSError:
+        candidates = []
+    return sorted(candidates, key=lambda item: item.name.lower())[0] if candidates else conventional
+
+
+def _discover_unity_project(parent: Path) -> Path:
+    """Find a sibling Unity project by structure, with a stable conventional fallback."""
+    conventional = parent / "UnityProject"
+    if (conventional / "Assets").is_dir() and (conventional / "ProjectSettings").is_dir():
+        return conventional
+    try:
+        candidates = [
+            item
+            for item in parent.iterdir()
+            if item.is_dir() and (item / "Assets").is_dir() and (item / "ProjectSettings").is_dir()
+        ]
+    except OSError:
+        candidates = []
+    return sorted(candidates, key=lambda item: item.name.lower())[0] if candidates else conventional
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=PROJECT_ROOT / ".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
     )
 
-    assetclaw_root: str = "E:\\assetclaw-matting-bot"
+    assetclaw_root: Path = PROJECT_ROOT
+    animation_root: Path = PROJECT_ROOT.parent / "animation_auto"
     app_env: str = "dev"
 
     gateway_host: str = "127.0.0.1"
@@ -76,7 +113,7 @@ class Settings(BaseSettings):
     bot_require_confirmation_for_write: bool = False
     bot_error_push_enabled: bool = True
     bot_emotional_replies_enabled: bool = True
-    bot_sticker_dir: Path = Path("E:/assetclaw-matting-bot/miratsu_stickers")
+    bot_sticker_dir: Path = PROJECT_ROOT / "miratsu_stickers"
     bot_sticker_probability: float = 0.28
     bot_sticker_cooldown_seconds: int = 180
     bot_sticker_max_bytes: int = 8_000_000
@@ -107,46 +144,46 @@ class Settings(BaseSettings):
     gpu_task_concurrency: int = 1
     agent_runs_on_gpu: bool = False
 
-    data_dir: Path = Path("E:/assetclaw-matting-bot/data")
-    storage_dir: Path = Path("E:/assetclaw-matting-bot/storage")
-    log_dir: Path = Path("E:/assetclaw-matting-bot/logs")
+    data_dir: Path = PROJECT_ROOT / "data"
+    storage_dir: Path = PROJECT_ROOT / "storage"
+    log_dir: Path = PROJECT_ROOT / "logs"
 
-    shared_matting_root: str = r"Z:\公共机共享\抠图"
-    shared_matting_unc_root: str = r"\\audioshare.lilith.com\AIart\公共机共享\抠图"
-    allowed_roots: str = r"D:;E:;F:;Z:;C:\Users\lilithgames\Downloads\ComfyUI-aki-v3;\\audioshare.lilith.com\AIart\公共机共享\抠图"
+    shared_matting_root: str = ""
+    shared_matting_unc_root: str = ""
+    allowed_roots: str = PROJECT_ROOT.anchor or str(PROJECT_ROOT)
     deny_path_patterns: str = (
-        ".env;.ssh;AppData;Windows;Program Files;ProgramData;"
-        "$Recycle.Bin;System Volume Information"
+        ".env;.ssh;Windows;$Recycle.Bin;System Volume Information"
     )
 
     comfyui_fake_mode: bool = False
-    comfyui_aki_root: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3")
-    comfyui_dir: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3/ComfyUI")
-    comfyui_python_dir: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3/python")
+    comfyui_aki_root: Path = PROJECT_ROOT.parent / "ComfyUI-aki-v3"
+    comfyui_dir: Path = PROJECT_ROOT.parent / "ComfyUI-aki-v3" / "ComfyUI"
+    comfyui_python_dir: Path = PROJECT_ROOT.parent / "ComfyUI-aki-v3" / "python"
     comfyui_url: str = "http://127.0.0.1:8188"
-    comfyui_workflow_path: Path = Path("C:/Users/lilithgames/Downloads/ComfyUI-aki-v3/ComfyUI/user/default/workflows/ImageClip.json")
+    comfyui_workflow_path: Path = PROJECT_ROOT.parent / "ComfyUI-aki-v3" / "ComfyUI" / "user" / "default" / "workflows" / "ImageClip.json"
     comfyui_timeout_seconds: int = 600
     comfyui_poll_interval_seconds: int = 2
     matting_pipeline_repo_url: str = "git@gitlab.lilithgame.com:rd_center/ai_art/imageclip.git"
-    matting_pipeline_repo_dir: Path = Path("E:/imageclip-pipeline/imageclip")
+    matting_pipeline_repo_dir: Path = PROJECT_ROOT.parent / "imageclip"
     matting_pipeline_branch: str = "main"
     matting_pipeline_workflow_name: str = "ImageClip.json"
     matting_pipeline_lora_name: str = "Koutu_Flux2klein_v2_000007250.safetensors"
     matting_pipeline_custom_node_name: str = "Cherry_lizi"
     cherry_html_runner_enabled: bool = True
-    cherry_postprocess_html_path: Path = Path("E:/imageclip-pipeline/imageclip/cherry-postprocess.html")
+    cherry_postprocess_html_path: Path = PROJECT_ROOT.parent / "imageclip" / "cherry-postprocess.html"
     cherry_browser_path: Path | None = None
     cherry_html_timeout_seconds: int = 900
 
-    default_batch_input_dir: Path = Path("E:/assetclaw-matting-bot/storage/batch_inputs")
-    default_batch_output_dir: Path = Path("E:/assetclaw-matting-bot/storage/batch_outputs")
+    default_batch_input_dir: Path = PROJECT_ROOT / "storage" / "batch_inputs"
+    default_batch_output_dir: Path = PROJECT_ROOT / "storage" / "batch_outputs"
 
     p4_workspace_root: str = ""
     p4_enabled: bool = False
+    unity_project_dir: Path = PROJECT_ROOT.parent / "UnityProject"
 
     speech_engine: str = "funasr"
     speech_model: str = "iic/SenseVoiceSmall"
-    speech_model_dir: Path = Path("E:/assetclaw-matting-bot/storage/models/asr/iic__SenseVoiceSmall")
+    speech_model_dir: Path = PROJECT_ROOT / "storage" / "models" / "asr" / "iic__SenseVoiceSmall"
     speech_fallback_model: str = "large-v3-turbo"
     speech_device: str = "cuda:0"
     speech_compute_type: str = "float16"
@@ -154,7 +191,7 @@ class Settings(BaseSettings):
     speech_vad_filter: bool = True
     speech_use_vad: bool = False
     speech_vad_model: str = "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch"
-    speech_vad_model_dir: Path = Path("E:/assetclaw-matting-bot/storage/models/asr/iic__speech_fsmn_vad_zh-cn-16k-common-pytorch")
+    speech_vad_model_dir: Path = PROJECT_ROOT / "storage" / "models" / "asr" / "iic__speech_fsmn_vad_zh-cn-16k-common-pytorch"
     speech_disable_update: bool = True
     tts_engine: str = "indextts"
     tts_voice: str = "zh-CN-XiaoxiaoNeural"
@@ -163,15 +200,57 @@ class Settings(BaseSettings):
     bot_tts_enabled: bool = False
     voice_reply_on_audio: bool = True
     voice_reply_progress_enabled: bool = True
-    indextts_repo_dir: Path = Path("E:/assetclaw-matting-bot/storage/models/index-tts/repo")
-    indextts_model_dir: Path = Path("E:/assetclaw-matting-bot/storage/models/index-tts/checkpoints")
-    indextts_cfg_path: Path = Path("E:/assetclaw-matting-bot/storage/models/index-tts/checkpoints/config.yaml")
-    indextts_prompt_audio: Path = Path("E:/assetclaw-matting-bot/storage/models/asr/iic__SenseVoiceSmall/example/zh.mp3")
+    indextts_repo_dir: Path = PROJECT_ROOT / "storage" / "models" / "index-tts" / "repo"
+    indextts_model_dir: Path = PROJECT_ROOT / "storage" / "models" / "index-tts" / "checkpoints"
+    indextts_cfg_path: Path = PROJECT_ROOT / "storage" / "models" / "index-tts" / "checkpoints" / "config.yaml"
+    indextts_prompt_audio: Path = PROJECT_ROOT / "storage" / "models" / "asr" / "iic__SenseVoiceSmall" / "example" / "zh.mp3"
     indextts_emo_audio: Path | None = None
     indextts_emo_alpha: float = 0.6
     indextts_use_fp16: bool = True
     indextts_use_cuda_kernel: bool = False
     indextts_use_deepspeed: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def derive_portable_paths(cls, values: object) -> object:
+        """Derive every local default from the checkout instead of a drive letter."""
+        data = dict(values) if isinstance(values, dict) else {}
+        root = Path(data.get("assetclaw_root") or PROJECT_ROOT).expanduser()
+        if not root.is_absolute():
+            root = PROJECT_ROOT / root
+        root = root.resolve()
+        parent = root.parent
+        animation_root = Path(data.get("animation_root") or parent / "animation_auto").expanduser()
+        comfy_root = Path(data.get("comfyui_aki_root") or _discover_aki_root(parent)).expanduser()
+        comfy_dir = Path(data.get("comfyui_dir") or comfy_root / "ComfyUI").expanduser()
+        pipeline_root = Path(data.get("matting_pipeline_repo_dir") or parent / "imageclip").expanduser()
+        defaults: dict[str, Path | str] = {
+            "assetclaw_root": root,
+            "animation_root": animation_root,
+            "bot_sticker_dir": root / "miratsu_stickers",
+            "data_dir": root / "data",
+            "storage_dir": root / "storage",
+            "log_dir": root / "logs",
+            "allowed_roots": root.anchor or str(root),
+            "unity_project_dir": _discover_unity_project(parent),
+            "comfyui_aki_root": comfy_root,
+            "comfyui_dir": comfy_dir,
+            "comfyui_python_dir": comfy_root / "python",
+            "comfyui_workflow_path": comfy_dir / "user" / "default" / "workflows" / "ImageClip.json",
+            "matting_pipeline_repo_dir": pipeline_root,
+            "cherry_postprocess_html_path": pipeline_root / "cherry-postprocess.html",
+            "default_batch_input_dir": root / "storage" / "batch_inputs",
+            "default_batch_output_dir": root / "storage" / "batch_outputs",
+            "speech_model_dir": root / "storage" / "models" / "asr" / "iic__SenseVoiceSmall",
+            "speech_vad_model_dir": root / "storage" / "models" / "asr" / "iic__speech_fsmn_vad_zh-cn-16k-common-pytorch",
+            "indextts_repo_dir": root / "storage" / "models" / "index-tts" / "repo",
+            "indextts_model_dir": root / "storage" / "models" / "index-tts" / "checkpoints",
+            "indextts_cfg_path": root / "storage" / "models" / "index-tts" / "checkpoints" / "config.yaml",
+            "indextts_prompt_audio": root / "storage" / "models" / "asr" / "iic__SenseVoiceSmall" / "example" / "zh.mp3",
+        }
+        for key, value in defaults.items():
+            data.setdefault(key, value)
+        return data
 
     @property
     def feishu_admin_open_ids_list(self) -> list[str]:

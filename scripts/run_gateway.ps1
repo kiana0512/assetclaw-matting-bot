@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
-Set-Location "E:\assetclaw-matting-bot"
-$env:PYTHONPATH = "E:\assetclaw-matting-bot\src;E:\assetclaw-matting-bot"
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+Set-Location $ProjectRoot
+$env:PYTHONPATH = "$ProjectRoot\src;$ProjectRoot"
 $CondaExe = Join-Path $env:USERPROFILE "miniconda3\Scripts\conda.exe"
 if (-not (Test-Path $CondaExe)) {
   $cmd = Get-Command conda -ErrorAction SilentlyContinue

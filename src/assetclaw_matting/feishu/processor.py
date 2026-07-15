@@ -609,10 +609,29 @@ def _remember_recent_attachments(conversation_id: str, attachments: list[dict[st
 
     for item in reversed(attachments):
         path = str(item.get("local_path") or "")
+        if path and _looks_like_image_set_path(Path(path)):
+            upsert_memory_note(conversation_id, "last_image_set_path", path, source="feishu_attachment")
+            upsert_memory_note(conversation_id, "last_image_set_name", str(item.get("file_name") or Path(path).name), source="feishu_attachment")
+            if Path(path).suffix.lower() not in IMAGE_EXTS:
+                return
         if path and Path(path).suffix.lower() in IMAGE_EXTS:
             upsert_memory_note(conversation_id, "last_image_path", path, source="feishu_attachment")
             upsert_memory_note(conversation_id, "last_image_name", str(item.get("file_name") or Path(path).name), source="feishu_attachment")
             return
+
+
+def _looks_like_image_set_path(path: Path) -> bool:
+    from assetclaw_matting.skills.media_skills import IMAGE_EXTS
+
+    suffix = path.suffix.lower()
+    if suffix == ".zip":
+        return True
+    if path.is_dir():
+        try:
+            return any(item.is_file() and item.suffix.lower() in IMAGE_EXTS for item in path.rglob("*"))
+        except OSError:
+            return False
+    return suffix in IMAGE_EXTS
 
 
 def _safe_attachment_name(name: str) -> str:

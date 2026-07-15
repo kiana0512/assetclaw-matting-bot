@@ -5,7 +5,7 @@
 Agent 只使用 conda env `assetclaw`。ComfyUI 后端单独用秋叶启动器环境，不要在 `assetclaw` 里安装或启动 ComfyUI。
 
 ```powershell
-cd E:\assetclaw-matting-bot
+cd <project-root>
 conda activate assetclaw
 pip install -r requirements.txt
 ```
@@ -55,7 +55,7 @@ conda run -n assetclaw python -m pytest
 ## 常用指令（无飞书闭环测试）
 
 - `看看 E 盘有哪些文件`
-- `把 E:\assetclaw-matting-bot\README.md 复制到 E:\assetclaw-matting-bot\storage\README_copy.md`
-- `用 E:\assetclaw-matting-bot\storage\batch_inputs 创建一个抠图批次`
+- `把 <project-root>\README.md 复制到 <project-root>\storage\README_copy.md`
+- `用 <project-root>\storage\batch_inputs 创建一个抠图批次`
 - `你会做什么`
 - `查看技能列表`

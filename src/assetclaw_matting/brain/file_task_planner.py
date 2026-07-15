@@ -6,7 +6,7 @@ from pathlib import Path
 from assetclaw_matting.brain.schemas import BrainMessage, ToolCall
 
 IMAGE_NAME_RE = re.compile(r"[\w.\-]+\.(?:png|jpg|jpeg|webp|bmp|gif|tif|tiff)", re.IGNORECASE)
-DRIVE_RE = re.compile(r"([D-Fd-f])\s*(?:盘|:|：|的目录|目录)")
+DRIVE_RE = re.compile(r"([A-Za-z])\s*(?:盘|:|：|的目录|目录)")
 
 
 def plan_file_task(message: BrainMessage) -> tuple[list[ToolCall], str] | tuple[None, str] | None:
@@ -99,7 +99,9 @@ def _looks_like_zip_and_send(text: str) -> bool:
 def _extract_named_recent_item(text: str, conversation_id: str) -> str | None:
     if not conversation_id:
         return None
-    name_match = re.search(r"(input[\w\-]*|output[\w\-]*)", text, re.IGNORECASE)
+    # Keep the suffix ASCII-only: Python's ``\w`` includes Chinese characters,
+    # which previously consumed the rest of phrases such as “input文件夹…”.
+    name_match = re.search(r"(input[A-Za-z0-9_-]*|output[A-Za-z0-9_-]*)", text, re.IGNORECASE)
     if not name_match:
         return None
     target_name = name_match.group(1).lower()
@@ -123,22 +125,29 @@ def _extract_named_recent_item(text: str, conversation_id: str) -> str | None:
 
 
 def _default_shared_input_path(text: str) -> str | None:
+    from assetclaw_matting.config import settings
+
     if "input" not in text.lower():
         return None
     if not any(word in text for word in ("共享盘", "公共盘", "Z盘", "z盘", "Z 盘", "z 盘", "这个input", "这个 input")):
         return None
-    return "Z:\\公共机共享\\抠图\\input"
+    return str(Path(settings.shared_matting_root) / "input") if settings.shared_matting_root else None
 
 
 def _zip_path_for(src: str) -> str:
+    from assetclaw_matting.config import settings
+
     name = Path(src).name or "archive"
-    return f"E:\\{name}_backup.zip"
+    return str(Path(settings.storage_dir) / f"{name}_backup.zip")
 
 
 def _copy_image_plan(image_name: str, folder_name: str) -> tuple[list[ToolCall], str]:
+    from assetclaw_matting.config import settings
+
     safe_folder = Path(folder_name.strip()).name
-    src = f"E:\\{image_name}"
-    dst_dir = f"E:\\{safe_folder}"
+    workspace = Path(settings.storage_dir)
+    src = str(workspace / image_name)
+    dst_dir = str(workspace / safe_folder)
     return (
         [
             ToolCall(skill="file.mkdir", arguments={"path": dst_dir}),
@@ -152,7 +161,7 @@ def _copy_image_plan(image_name: str, folder_name: str) -> tuple[list[ToolCall],
                 },
             ),
         ],
-        f"我会创建 E:\\{safe_folder}，然后把 {image_name} 复制进去。",
+        f"我会创建 {dst_dir}，然后把 {image_name} 复制进去。",
     )
 
 
@@ -182,7 +191,7 @@ def _looks_like_copy_recent_folder(text: str) -> bool:
         any(word in text for word in ("刚刚新增", "刚新增", "刚才新增", "刚刚创建", "刚才创建", "新增的文件夹", "创建的文件夹"))
         and "文件夹" in text
         and any(word in text for word in ("复制", "拷贝"))
-        and (_extract_destination_drive(text) is not None or re.search(r"[D-Fd-f]:\\", text))
+        and (_extract_destination_drive(text) is not None or re.search(r"[A-Za-z]:\\", text))
     )
 
 
@@ -222,7 +231,7 @@ def _last_listed_image_paths(conversation_id: str) -> list[str]:
     recent = get_recent_brain_messages(conversation_id, limit=10)
     for item in reversed(recent):
         response = item.get("response_text", "") or ""
-        root_match = re.search(r"([D-Fd-f]:\\)\s*找到\s*\d+\s*项", response)
+        root_match = re.search(r"([A-Za-z]:\\)\s*找到\s*\d+\s*项", response)
         if not root_match:
             continue
         root = root_match.group(1)[0].upper() + ":\\"
@@ -240,13 +249,15 @@ def _extract_sequence_start(text: str) -> int:
 
 
 def _last_created_folder_path(conversation_id: str) -> str | None:
+    from assetclaw_matting.config import settings
+
     if not conversation_id:
         return None
     from assetclaw_matting.db.repos import get_recent_brain_messages
 
     recent = get_recent_brain_messages(conversation_id, limit=12)
     path_patterns = (
-        r"已创建目录[:：]\s*([D-Fd-f]:\\[^\s。,\n，]+)",
+        r"已创建目录[:：]\s*([A-Za-z]:\\[^\s。,\n，]+)",
         r"新建了文件夹\s*([A-Za-z0-9_.\-\u4e00-\u9fff]+)",
         r"新增了文件夹\s*([A-Za-z0-9_.\-\u4e00-\u9fff]+)",
         r"文件夹\s*([A-Za-z0-9_.\-\u4e00-\u9fff]+)",
@@ -258,10 +269,10 @@ def _last_created_folder_path(conversation_id: str) -> str | None:
             if not match:
                 continue
             value = match.group(1).strip().strip("。,.，")
-            if re.match(r"^[D-Fd-f]:\\", value):
+            if re.match(r"^[A-Za-z]:\\", value):
                 return value[0].upper() + value[1:]
             if value.lower() not in {"这个", "刚刚", "刚才"}:
-                return f"E:\\{Path(value).name}"
+                return str(Path(settings.storage_dir) / Path(value).name)
     return None
 
 
@@ -270,14 +281,14 @@ def _extract_destination_drive(text: str) -> str | None:
     if not match:
         return None
     drive = match.group(1).upper()
-    return drive if drive in {"D", "E", "F"} else None
+    return drive
 
 
 def _extract_folder_name(text: str) -> str | None:
     patterns = (
         r"文件夹(?:就)?(?:叫|命名为|名字叫)\s*([A-Za-z0-9_.\-\u4e00-\u9fff]+)",
         r"(?:叫|命名为|名字叫)\s*([A-Za-z0-9_.\-\u4e00-\u9fff]+)",
-        r"到\s*E:\\([A-Za-z0-9_.\-\u4e00-\u9fff]+)",
+        r"到\s*[A-Za-z]:\\([A-Za-z0-9_.\-\u4e00-\u9fff]+)",
     )
     for pattern in patterns:
         match = re.search(pattern, text)

@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Stop"
-$ProjectRoot = "E:\assetclaw-matting-bot"
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $CondaBase = (conda info --base).Trim()
 $Python = "$CondaBase\envs\assetclaw\python.exe"
 if (-not (Test-Path $Python)) { throw "Run scripts\setup_unified_env.ps1 first." }

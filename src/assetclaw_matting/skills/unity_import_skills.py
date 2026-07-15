@@ -12,9 +12,10 @@ from typing import Any
 from assetclaw_matting.skills.frame_skills import default_automation_paths
 from assetclaw_matting.skills.security import validate_path
 from tools.animation_automation.core import ASSET_KINDS
+from assetclaw_matting.config import settings
 
 
-DEFAULT_UNITY_PROJECT = "D:/Spark/Client"
+DEFAULT_UNITY_PROJECT = str(settings.unity_project_dir)
 DEFAULT_MCP_URL = "http://127.0.0.1:8080/mcp"
 RUNNER_RELATIVE = "Assets/Editor/CodexAnimImportApiRunner.cs"
 REQUEST_DIR_RELATIVE = "Temp/CodexAnimImportApi"
@@ -32,7 +33,7 @@ def preview(
     **_: Any,
 ) -> dict[str, Any]:
     ready_root = validate_path(unity_ready, must_exist=True)
-    project_root = validate_path(unity_project or DEFAULT_UNITY_PROJECT, must_exist=True)
+    project_root = validate_path(unity_project or settings.unity_project_dir, must_exist=True)
     selected_mode = _normalize_mode(import_mode or mode)
     packages = [_package_summary(ready_root, item) for item in _selected_packages(package)]
     api = _probe_mcp(mcp_url)
@@ -298,7 +299,7 @@ def status(
             "ok": True,
             "mode": selected_mode,
             "unity_ready": ready,
-            "unity_project": str(validate_path(unity_project or DEFAULT_UNITY_PROJECT, must_exist=False)),
+            "unity_project": str(validate_path(unity_project or settings.unity_project_dir, must_exist=False)),
             "package": package,
             "can_import_now": False,
             "error": str(exc),

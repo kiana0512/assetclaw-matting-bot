@@ -11,12 +11,13 @@ from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
 from assetclaw_matting.brain.result_formatter import format_skill_results
 from assetclaw_matting.db.schema import create_tables
 from assetclaw_matting.db.sqlite import init_db
+from assetclaw_matting.config import settings
 from assetclaw_matting.skills.frame_skills import default_automation_paths, info as frame_info, run_preview as frame_preview
 from assetclaw_matting.skills.registry import get_skill_meta
 
 
 def setup_module() -> None:
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
 
 
@@ -47,14 +48,14 @@ def test_animation_flow_registry_and_router_replaces_legacy_pipeline() -> None:
     assert flow_call.arguments["fake_matting_from_frames"] is True
     simple_flow_call = brain._infer_tool_calls("启动动画流程 20260610 faker")[0]
     assert simple_flow_call.skill == "animation_flow.start"
-    assert simple_flow_call.arguments["date_root"] == "E:\\animation_automation\\2026-06-10"
+    assert Path(simple_flow_call.arguments["date_root"]) == settings.animation_root / "2026-06-10"
     assert simple_flow_call.arguments["fake_matting_from_frames"] is True
     assert brain._infer_tool_calls("执行旧三步流程 E:\\raw_videos E:\\output_frames E:\\output_matting E:\\output_smooth") == []
 
 
-def test_default_animation_workspace_paths_are_on_e_drive() -> None:
+def test_default_animation_workspace_paths_follow_config() -> None:
     defaults = default_automation_paths("2026-06-02")
-    assert defaults["workspace_root"] == "E:\\animation_automation\\2026-06-02"
+    assert Path(defaults["workspace_root"]) == settings.animation_root / "2026-06-02"
     assert defaults["video_dir"].endswith("\\videos")
     assert defaults["frame_dir"].endswith("\\frames")
     assert defaults["matte_dir"].endswith("\\matte")
@@ -62,7 +63,7 @@ def test_default_animation_workspace_paths_are_on_e_drive() -> None:
 
 
 def test_frame_workflow_builds_role_emotion_identity() -> None:
-    tool_dir = Path("E:/assetclaw-matting-bot/feishu_frame_tool")
+    tool_dir = Path.cwd() / "feishu_frame_tool"
     if str(tool_dir) not in sys.path:
         sys.path.insert(0, str(tool_dir))
     sys.modules.setdefault("extractor", types.SimpleNamespace(LocalFrameExtractor=object))
@@ -92,7 +93,7 @@ def test_frame_workflow_builds_role_emotion_identity() -> None:
 
 
 def test_frame_workflow_processes_only_to_extract_records(tmp_path) -> None:
-    tool_dir = Path("E:/assetclaw-matting-bot/feishu_frame_tool")
+    tool_dir = Path.cwd() / "feishu_frame_tool"
     if str(tool_dir) not in sys.path:
         sys.path.insert(0, str(tool_dir))
 
@@ -202,7 +203,7 @@ def test_frame_workflow_processes_only_to_extract_records(tmp_path) -> None:
 
 
 def test_frame_workflow_can_filter_scene_idle_records(tmp_path) -> None:
-    tool_dir = Path("E:/assetclaw-matting-bot/feishu_frame_tool")
+    tool_dir = Path.cwd() / "feishu_frame_tool"
     if str(tool_dir) not in sys.path:
         sys.path.insert(0, str(tool_dir))
 
@@ -294,7 +295,7 @@ def test_frame_workflow_can_filter_scene_idle_records(tmp_path) -> None:
 
 
 def test_frame_workflow_routes_story_root_to_story_package(tmp_path) -> None:
-    tool_dir = Path("E:/assetclaw-matting-bot/feishu_frame_tool")
+    tool_dir = Path.cwd() / "feishu_frame_tool"
     if str(tool_dir) not in sys.path:
         sys.path.insert(0, str(tool_dir))
 
@@ -371,7 +372,7 @@ def test_frame_workflow_routes_story_root_to_story_package(tmp_path) -> None:
 
 
 def test_frame_workflow_refuses_video_record_without_character_emotion() -> None:
-    tool_dir = Path("E:/assetclaw-matting-bot/feishu_frame_tool")
+    tool_dir = Path.cwd() / "feishu_frame_tool"
     if str(tool_dir) not in sys.path:
         sys.path.insert(0, str(tool_dir))
     sys.modules.setdefault("extractor", types.SimpleNamespace(LocalFrameExtractor=object))

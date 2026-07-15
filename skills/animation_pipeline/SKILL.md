@@ -40,9 +40,9 @@ Standalone stages:
 
 ## Defaults
 
-- Date root: `E:/animation_automation/YYYY-MM-DD`
+- Date root: `<animation-root>/YYYY-MM-DD`
 - Feishu progress policy: skip only `已完成` and `不处理`; all other statuses, including `待抽帧`, `抽帧中`, `K帧中`, `待整理`, `整理中`, and `待提交`, are downloaded and extracted again.
-- Unity project: `D:/Spark/Client`
+- Unity project: `<unity-project>`（从配置或目录结构自动发现）
 - Unity import mode: `import` by default; use `iteration` when the user says 迭代 / 替换 / 高清化.
 - P4 stream: `//streams/rel_0.0.1`
 - Unity package: `both`
@@ -68,7 +68,7 @@ During a full run, send progress logs back to the same Feishu conversation:
 ## Unity Ready Shape
 
 ```text
-E:/animation_automation/YYYY-MM-DD/unity_ready/
+<animation-root>/YYYY-MM-DD/unity_ready/
   manifest.json
   scene/animation_resource_manifest.json
   scene/frames/

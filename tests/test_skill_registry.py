@@ -8,7 +8,7 @@ from assetclaw_matting.skills.registry import call_skill
 
 
 def setup_module() -> None:
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
 
 
@@ -24,7 +24,7 @@ def test_unknown_skill() -> None:
 
 def test_new_file_skills_registered() -> None:
     for skill in ("file.exists", "file.mkdir"):
-        result = call_skill(skill, {"path": "E:\\assetclaw-matting-bot\\storage\\debug"}, requested_by="test")
+        result = call_skill(skill, {"path": ".\\storage\\debug"}, requested_by="test")
         assert result["ok"] is True
 
 

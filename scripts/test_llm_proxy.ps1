@@ -4,7 +4,8 @@ chcp 65001 | Out-Null
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 $OutputEncoding = [System.Text.UTF8Encoding]::new()
 
-Set-Location "E:\assetclaw-matting-bot"
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+Set-Location $ProjectRoot
 
 Write-Host "注意：当前生产推荐使用 scripts\test_deepseek_api.ps1；本脚本仅用于旧 LLM Proxy 兼容测试。"
 

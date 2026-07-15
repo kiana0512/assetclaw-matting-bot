@@ -3,7 +3,7 @@
 ## 一键重启本地机器人（推荐，公司内网标准方式）
 
 ```powershell
-cd E:\assetclaw-matting-bot
+cd <project-root>
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot_local.ps1
 ```
 
@@ -62,7 +62,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\clean_project.ps1
 - `data/assetclaw.db`
 - 非 Cloudflare 的运行日志
 - `src/`、`tests/`、`docs/`
-- Unity 工程真实资产与 `E:\animation_automation` 业务输出
+- Unity 工程真实资产与 `<animation-root>` 业务输出
 
 ## 健康检查
 

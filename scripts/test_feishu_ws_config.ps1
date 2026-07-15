@@ -4,7 +4,8 @@ chcp 65001 | Out-Null
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 $OutputEncoding = [System.Text.UTF8Encoding]::new()
 
-Set-Location "E:\assetclaw-matting-bot"
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+Set-Location $ProjectRoot
 
 Write-Host "==== test_feishu_ws_config.ps1 ===="
 Write-Host ""
@@ -34,11 +35,16 @@ if ([string]::IsNullOrWhiteSpace($appId)) { $errors += "FEISHU_APP_ID is empty" 
 if ([string]::IsNullOrWhiteSpace($appSecret)) { $errors += "FEISHU_APP_SECRET is empty" }
 if ($eventMode -ne "ws") { Write-Host "WARNING: FEISHU_EVENT_MODE=$eventMode (expected 'ws' for long connection)" }
 
+# Use this checkout's virtual environment, with PATH Python as a fallback.
+$PythonExe = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $PythonExe)) {
+  $PythonExe = (Get-Command python -ErrorAction Stop).Source
+}
+
 # Check lark_oapi installed
-$condaPath = "C:\Users\$env:USERNAME\miniconda3\Scripts\conda.exe"
 Write-Host "Checking lark_oapi installation..."
 try {
-  $result = & $condaPath run -n assetclaw python -c "import inspect; import lark_oapi; from lark_oapi.ws import Client; assert 'app_id' in str(inspect.signature(Client)); print('lark_oapi OK')" 2>&1
+  $result = & $PythonExe -c "import inspect; import lark_oapi; from lark_oapi.ws import Client; assert 'app_id' in str(inspect.signature(Client)); print('lark_oapi OK')" 2>&1
   if ($LASTEXITCODE -eq 0) {
     Write-Host $result
   } else {
@@ -46,16 +52,16 @@ try {
     Write-Host "lark_oapi: NOT installed"
   }
 } catch {
-  Write-Host "Could not check lark_oapi (conda not found or env issue)"
+  Write-Host "Could not check lark_oapi (project Python not found or env issue)"
 }
 
 # Check config module parses correctly
 Write-Host ""
 Write-Host "Checking config module..."
 try {
-  $env:PYTHONPATH = "E:\assetclaw-matting-bot\src;E:\assetclaw-matting-bot"
+  $env:PYTHONPATH = "$ProjectRoot\src;$ProjectRoot"
   $cfgCode = "import sys; sys.path.insert(0,'src'); from assetclaw_matting.config import settings; print('feishu_event_mode:', settings.feishu_event_mode); print('feishu_enable_websocket:', settings.feishu_enable_websocket); print('app_id_set:', bool(settings.feishu_app_id))"
-  $cfgResult = & $condaPath run -n assetclaw python -c $cfgCode 2>&1
+  $cfgResult = & $PythonExe -c $cfgCode 2>&1
   if ($LASTEXITCODE -eq 0) {
     Write-Host $cfgResult
     Write-Host "Config: OK"

@@ -77,10 +77,11 @@ models/
 *.pyc
 *.egg-info/
 .venv/
+.uv-cache/
+.pytest-tmp/
 .vscode/
 .pytest_cache/
 *.log
 public_url.txt
 logs/public_url.txt
 external_webui/node_modules/
-external_webui/dist/

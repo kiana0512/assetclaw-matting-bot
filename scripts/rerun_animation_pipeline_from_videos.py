@@ -128,7 +128,7 @@ def _run_comfy_and_cherry(root: Path, frame_count: int, workflow_path: str | Non
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Rebuild animation frames, matte, and smooth outputs from existing videos.")
-    parser.add_argument("--root", default=r"E:\animation_automation\2026-06-02")
+    parser.add_argument("--root", default=str(ROOT.parent / "animation_auto" / datetime.now().strftime("%Y-%m-%d")))
     parser.add_argument("--fps", type=int, default=24)
     parser.add_argument("--workflow-path", default="")
     parser.add_argument("--poll-seconds", type=int, default=30)

@@ -28,25 +28,25 @@ python -m assetclaw_matting.cli.main worker
 或通过现有飞书 skill/GUI 启动 frame/pipeline 流程。下载阶段应生成：
 
 ```text
-E:/animation_automation/YYYY-MM-DD/source_manifest.json
+<animation-root>/YYYY-MM-DD/source_manifest.json
 ```
 
 生成 Unity Ready：
 
 ```bash
-python -m tools.animation_automation.cli build-unity-ready --date-root "E:/animation_automation/YYYY-MM-DD"
+python -m tools.animation_automation.cli build-unity-ready --date-root "<animation-root>/YYYY-MM-DD"
 ```
 
 覆盖重建：
 
 ```bash
-python -m tools.animation_automation.cli build-unity-ready --date-root "E:/animation_automation/YYYY-MM-DD" --overwrite
+python -m tools.animation_automation.cli build-unity-ready --date-root "<animation-root>/YYYY-MM-DD" --overwrite
 ```
 
 P4 report 追加 Unity Ready 摘要：
 
 ```bash
-python -m tools.p4_assistant.cli report --cl 123456 --unity-ready-manifest "E:/animation_automation/YYYY-MM-DD/unity_ready/manifest.json"
+python -m tools.p4_assistant.cli report --cl 123456 --unity-ready-manifest "<animation-root>/YYYY-MM-DD/unity_ready/manifest.json"
 ```
 
 ## 回复模板
@@ -55,8 +55,8 @@ python -m tools.p4_assistant.cli report --cl 123456 --unity-ready-manifest "E:/a
 
 ```text
 飞书下载完成：
-Date Root: E:/animation_automation/YYYY-MM-DD
-Source Manifest: E:/animation_automation/YYYY-MM-DD/source_manifest.json
+Date Root: <animation-root>/YYYY-MM-DD
+Source Manifest: <animation-root>/YYYY-MM-DD/source_manifest.json
 已跳过：N 条（进度 = 已完成 / 不处理）
 已分流：scene、emoji
 ```
@@ -65,10 +65,10 @@ Unity Ready 生成完成：
 
 ```text
 Unity Ready 已生成：
-Scene JSON: E:/animation_automation/YYYY-MM-DD/unity_ready/scene/animation_resource_manifest.json
-Scene Frames: E:/animation_automation/YYYY-MM-DD/unity_ready/scene/frames
-Emoji JSON: E:/animation_automation/YYYY-MM-DD/unity_ready/emoji/animation_resource_manifest.json
-Emoji Frames: E:/animation_automation/YYYY-MM-DD/unity_ready/emoji/frames
+Scene JSON: <animation-root>/YYYY-MM-DD/unity_ready/scene/animation_resource_manifest.json
+Scene Frames: <animation-root>/YYYY-MM-DD/unity_ready/scene/frames
+Emoji JSON: <animation-root>/YYYY-MM-DD/unity_ready/emoji/animation_resource_manifest.json
+Emoji Frames: <animation-root>/YYYY-MM-DD/unity_ready/emoji/frames
 下一步：在 Unity 插件中分别选择对应 JSON 和 Frames 源根目录导入。
 ```
 

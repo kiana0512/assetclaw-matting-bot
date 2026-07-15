@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -227,7 +228,7 @@ def start_patch_pipeline(root: Path, patch_dir: Path, workflow_path: str | None,
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Repair dedup-removed animation frames and optionally run matting/smoothing.")
-    parser.add_argument("--root", default=r"E:\animation_automation\2026-06-02")
+    parser.add_argument("--root", default=str(ROOT.parent / "animation_auto" / datetime.now().strftime("%Y-%m-%d")))
     parser.add_argument("--fps", type=int, default=24)
     parser.add_argument("--max-frames", type=int, default=24)
     parser.add_argument("--patch-dir", default="")

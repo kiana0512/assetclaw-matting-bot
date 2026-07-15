@@ -29,7 +29,7 @@ Cherry 后处理仍作为独立工具保留，可以人工单步补跑锐化/缩
 完整动画流程进度
 ```
 
-`20260610` 会解析为 `E:/animation_automation/2026-06-10`。启动类指令仍然走确认码，不会无确认直接执行。
+`20260610` 会解析为 `<animation-root>/2026-06-10`。启动类指令仍然走确认码，不会无确认直接执行。
 
 ## 飞书运行日志
 
@@ -60,7 +60,7 @@ Cherry 后处理仍作为独立工具保留，可以人工单步补跑锐化/缩
 ## 目录结构
 
 ```text
-E:/animation_automation/2026-06-09/
+<animation-root>/2026-06-09/
   source_manifest.json
   scene/{videos,frames,matte}
   emoji/{videos,frames,matte}
@@ -76,7 +76,7 @@ E:/animation_automation/2026-06-09/
 
 ## P4 默认
 
-- Unity project: `D:/Spark/Client`
+- Unity project: `<unity-project>`（默认自动发现，也可用 `UNITY_PROJECT_DIR` 覆盖）
 - Unity mode: 默认 `import`；飞书里出现“迭代 / 替换 / 高清化 / 资源迭代”时用 `iteration`。
 - P4 stream: `//streams/rel_0.0.1`
 - P4 server/client 由本机配置读取。
@@ -97,11 +97,11 @@ E:/animation_automation/2026-06-09/
 单独生成 `unity_ready`：
 
 ```bash
-python -m tools.animation_automation.cli build-unity-ready --date-root "E:/animation_automation/2026-06-09" --overwrite
+python -m tools.animation_automation.cli build-unity-ready --date-root "<animation-root>/2026-06-09" --overwrite
 ```
 
 单独预览 Unity 导入：
 
 ```bash
-python -m tools.animation_automation.cli import-unity-ready --unity-ready "E:/animation_automation/2026-06-09/unity_ready" --package both
+python -m tools.animation_automation.cli import-unity-ready --unity-ready "<animation-root>/2026-06-09/unity_ready" --package both
 ```

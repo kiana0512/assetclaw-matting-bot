@@ -13,7 +13,7 @@ from assetclaw_matting.skills.shared_matting_skills import shared_matting_start,
 
 
 def setup_module() -> None:
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
 
 
@@ -34,9 +34,9 @@ def test_shared_matting_stages_local_and_syncs_back(monkeypatch) -> None:
     from assetclaw_matting.config import settings
 
     monkeypatch.setattr(settings, "comfyui_fake_mode", True)
-    workflow = Path("E:/assetclaw-matting-bot/storage/debug/shared_matting_workflow.json")
-    shared_input = Path("E:/assetclaw-matting-bot/storage/debug/shared_input")
-    shared_output = Path("E:/assetclaw-matting-bot/storage/debug/shared_output")
+    workflow = Path.cwd() / "storage/debug/shared_matting_workflow.json"
+    shared_input = Path.cwd() / "storage/debug/shared_input"
+    shared_output = Path.cwd() / "storage/debug/shared_output"
     _make_workflow(workflow)
     shared_input.mkdir(parents=True, exist_ok=True)
     shared_output.mkdir(parents=True, exist_ok=True)

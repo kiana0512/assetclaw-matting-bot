@@ -24,7 +24,7 @@ def test_plan_text_translation() -> None:
 
 
 def test_plan_image_translation() -> None:
-    path = Path("E:/assetclaw-matting-bot/storage/debug/translate_image.png")
+    path = Path.cwd() / "storage/debug/translate_image.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (4, 4), (255, 255, 255, 255)).save(path)
 
@@ -43,7 +43,7 @@ def test_plan_image_translation() -> None:
 
 
 def test_image_mime_uses_file_signature_not_extension() -> None:
-    path = Path("E:/assetclaw-matting-bot/storage/debug/jpeg_named_png.png")
+    path = Path.cwd() / "storage/debug/jpeg_named_png.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (4, 4), (255, 255, 255)).save(path, format="JPEG")
 
@@ -51,7 +51,7 @@ def test_image_mime_uses_file_signature_not_extension() -> None:
 
 
 def test_plan_mixed_image_translation_text() -> None:
-    path = Path("E:/assetclaw-matting-bot/storage/debug/mixed_translate_image.png")
+    path = Path.cwd() / "storage/debug/mixed_translate_image.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (4, 4), (255, 255, 255, 255)).save(path)
 
@@ -105,7 +105,7 @@ def test_plan_image_reference_without_download_asks_for_image() -> None:
 
 
 def test_plan_image_ocr_from_attachment() -> None:
-    path = Path("E:/assetclaw-matting-bot/storage/debug/ocr_image.png")
+    path = Path.cwd() / "storage/debug/ocr_image.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (4, 4), (255, 255, 255, 255)).save(path)
 
@@ -127,7 +127,7 @@ def test_plan_image_only_attachment_continues_recent_ocr_request() -> None:
     from assetclaw_matting.db.schema import create_tables
     from assetclaw_matting.db.sqlite import init_db
 
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
     conversation_id = "image-only-after-ocr-request"
     insert_brain_message(
@@ -140,7 +140,7 @@ def test_plan_image_only_attachment_continues_recent_ocr_request() -> None:
         tool_calls_json="[]",
         raw_json="{}",
     )
-    path = Path("E:/assetclaw-matting-bot/storage/debug/image_only_ocr.png")
+    path = Path.cwd() / "storage/debug/image_only_ocr.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (4, 4), (255, 255, 255, 255)).save(path)
 
@@ -163,9 +163,9 @@ def test_plan_image_ocr_from_recent_memory() -> None:
     from assetclaw_matting.db.schema import create_tables
     from assetclaw_matting.db.sqlite import init_db
 
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
-    path = Path("E:/assetclaw-matting-bot/storage/debug/recent_ocr_image.png")
+    path = Path.cwd() / "storage/debug/recent_ocr_image.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (4, 4), (255, 255, 255, 255)).save(path)
     upsert_memory_note("translation-recent-image", "last_image_path", str(path), source="test")
@@ -183,9 +183,9 @@ def test_recent_image_does_not_hijack_plain_text_translation() -> None:
     from assetclaw_matting.db.schema import create_tables
     from assetclaw_matting.db.sqlite import init_db
 
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
-    path = Path("E:/assetclaw-matting-bot/storage/debug/recent_plain_translate.png")
+    path = Path.cwd() / "storage/debug/recent_plain_translate.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (4, 4), (255, 255, 255, 255)).save(path)
     upsert_memory_note("plain-text-translation", "last_image_path", str(path), source="test")
@@ -203,9 +203,9 @@ def test_answer_recent_image_question() -> None:
     from assetclaw_matting.db.schema import create_tables
     from assetclaw_matting.db.sqlite import init_db
 
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
-    path = Path("E:/assetclaw-matting-bot/storage/debug/recent_answer_image.png")
+    path = Path.cwd() / "storage/debug/recent_answer_image.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (4, 4), (255, 255, 255, 255)).save(path)
     upsert_memory_note("recent-image-answer", "last_image_path", str(path), source="test")
@@ -221,9 +221,9 @@ def test_answer_previous_image_question() -> None:
     from assetclaw_matting.db.schema import create_tables
     from assetclaw_matting.db.sqlite import init_db
 
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
-    path = Path("E:/assetclaw-matting-bot/storage/debug/previous_answer_image.png")
+    path = Path.cwd() / "storage/debug/previous_answer_image.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (4, 4), (255, 255, 255, 255)).save(path)
     upsert_memory_note("previous-image-answer", "last_image_path", str(path), source="test")
@@ -294,7 +294,7 @@ def test_plan_text_task_routes_explicit_text_only() -> None:
     assert tool_calls[0].arguments["text"] == "今天大家搞得挺累但有进度"
     assert "润色" in tool_calls[0].arguments["instruction"]
 
-    assert plan_text_task(BrainMessage(text="整理 E:\\assetclaw-matting-bot\\docs 里的文件")) is None
+    assert plan_text_task(BrainMessage(text="整理 .\\docs 里的文件")) is None
 
 
 def test_ocr_formatter_is_plain_text() -> None:
@@ -318,7 +318,7 @@ def test_image_ocr_falls_back_to_local_ocr_when_llm_proxy_is_unconfigured(monkey
         lambda path: {"available": True, "engine": "fake_local_ocr", "text": "HELLO 123"},
         raising=False,
     )
-    path = Path("E:/assetclaw-matting-bot/storage/debug/ocr_unconfigured.png")
+    path = Path.cwd() / "storage/debug/ocr_unconfigured.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (8, 6), (255, 255, 255, 255)).save(path)
 
@@ -347,7 +347,7 @@ def test_translate_image_text_falls_back_to_local_ocr_and_text_translation(monke
         return "This screenshot lists several desktop automation skills, including browser control, file management, screenshots, OCR, and office automation."
 
     monkeypatch.setattr(translation_skills, "_complete_deepseek_text", fake_deepseek)
-    path = Path("E:/assetclaw-matting-bot/storage/debug/translate_ocr_fallback.png")
+    path = Path.cwd() / "storage/debug/translate_ocr_fallback.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (8, 6), (255, 255, 255, 255)).save(path)
 
@@ -389,7 +389,7 @@ def test_image_describe_fallback_runs_local_ocr(monkeypatch) -> None:
         lambda path: {"available": True, "engine": "fake_local_ocr", "text": "WOW"},
     )
     monkeypatch.setattr(translation_skills, "_complete_deepseek_text", lambda prompt: "这是一个带 WOW 文字的表情包，情绪偏惊喜。")
-    path = Path("E:/assetclaw-matting-bot/storage/debug/describe_unconfigured.png")
+    path = Path.cwd() / "storage/debug/describe_unconfigured.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (8, 6), (255, 255, 255, 255)).save(path)
 
@@ -413,7 +413,7 @@ def test_image_describe_fallback_reports_empty_local_ocr(monkeypatch) -> None:
         "local_ocr_image",
         lambda path: {"available": True, "engine": "fake_local_ocr", "text": ""},
     )
-    path = Path("E:/assetclaw-matting-bot/storage/debug/describe_empty_ocr.png")
+    path = Path.cwd() / "storage/debug/describe_empty_ocr.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (8, 6), (255, 255, 255, 255)).save(path)
 

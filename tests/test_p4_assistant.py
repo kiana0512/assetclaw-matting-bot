@@ -17,7 +17,7 @@ from assetclaw_matting.skills.registry import get_skill_meta
 
 def test_workspace_registry_uses_example_and_env_override(monkeypatch) -> None:
     monkeypatch.setenv("P4CLIENT", "override_client")
-    registry = WorkspaceRegistry(config_path=Path("E:/assetclaw-matting-bot/tools/p4_assistant/missing.yaml"))
+    registry = WorkspaceRegistry(config_path=Path.cwd() / "tools/p4_assistant/missing.yaml")
     workspace = registry.resolve("ai_art_comfyui")
     assert registry.loaded_from_example is True
     assert workspace.p4port == "rd-center-p4.lilith.com:1666"
@@ -50,7 +50,7 @@ def test_runner_uses_p4_exe_env(monkeypatch) -> None:
 
 
 def test_runner_requires_cwd_under_workspace(tmp_path: Path) -> None:
-    registry = WorkspaceRegistry(config_path=Path("E:/assetclaw-matting-bot/tools/p4_assistant/missing.yaml"))
+    registry = WorkspaceRegistry(config_path=Path.cwd() / "tools/p4_assistant/missing.yaml")
     workspace = registry.resolve("ai_art_comfyui")
     runner = P4Runner(p4_exe="p4.exe")
     with pytest.raises(PermissionError):
@@ -58,7 +58,7 @@ def test_runner_requires_cwd_under_workspace(tmp_path: Path) -> None:
 
 
 def test_nl_intent_parses_common_requests() -> None:
-    registry = WorkspaceRegistry(config_path=Path("E:/assetclaw-matting-bot/tools/p4_assistant/missing.yaml"))
+    registry = WorkspaceRegistry(config_path=Path.cwd() / "tools/p4_assistant/missing.yaml")
     status = parse_intent("看看 ai_art_comfyui 这个工作区现在改了什么", registry)
     assert status.intent == "status"
     assert status.workflow == "ai_art_comfyui"
@@ -97,7 +97,7 @@ def test_operations_status_uses_safe_preview_commands() -> None:
                 stdout = ""
             return P4CommandResult(args, "F:/P4Workspace/kianaren/ai_art_comfyui_trunk", 0, stdout, "", 0.01, f"p4 {args[0]} ok")
 
-    registry = WorkspaceRegistry(config_path=Path("E:/assetclaw-matting-bot/tools/p4_assistant/missing.yaml"))
+    registry = WorkspaceRegistry(config_path=Path.cwd() / "tools/p4_assistant/missing.yaml")
     fake = FakeRunner()
     ops = P4Operations(registry=registry, runner=fake)  # type: ignore[arg-type]
     payload = ops.get_status("ai_art_comfyui")
@@ -138,7 +138,7 @@ def test_operations_inventory_summarizes_depots_clients_and_mapping() -> None:
                 stdout = ""
             return P4CommandResult(args, "F:/P4Workspace/kianaren/ai_art_comfyui_trunk", 0, stdout, "", 0.01, f"p4 {args[0]} ok")
 
-    registry = WorkspaceRegistry(config_path=Path("E:/assetclaw-matting-bot/tools/p4_assistant/missing.yaml"))
+    registry = WorkspaceRegistry(config_path=Path.cwd() / "tools/p4_assistant/missing.yaml")
     fake = FakeRunner()
     payload = P4Operations(registry=registry, runner=fake).inventory("ai_art_comfyui")  # type: ignore[arg-type]
     assert payload["ok"] is True
@@ -174,7 +174,7 @@ def test_operations_compare_depot_summarizes_head_vs_have() -> None:
                 stdout = ""
             return P4CommandResult(args, "F:/P4Workspace/kianaren/ai_art_comfyui_trunk", 0, stdout, "", 0.01, f"p4 {args[0]} ok")
 
-    registry = WorkspaceRegistry(config_path=Path("E:/assetclaw-matting-bot/tools/p4_assistant/missing.yaml"))
+    registry = WorkspaceRegistry(config_path=Path.cwd() / "tools/p4_assistant/missing.yaml")
     fake = FakeRunner()
     payload = P4Operations(registry=registry, runner=fake).compare_depot("ai_art_comfyui")  # type: ignore[arg-type]
     assert payload["ok"] is True
@@ -206,7 +206,7 @@ def test_operations_workspace_details_reads_each_client_spec() -> None:
                 stdout = ""
             return P4CommandResult(args, "F:/P4Workspace/kianaren/ai_art_comfyui_trunk", 0, stdout, "", 0.01, f"p4 {args[0]} ok")
 
-    registry = WorkspaceRegistry(config_path=Path("E:/assetclaw-matting-bot/tools/p4_assistant/missing.yaml"))
+    registry = WorkspaceRegistry(config_path=Path.cwd() / "tools/p4_assistant/missing.yaml")
     payload = P4Operations(registry=registry, runner=FakeRunner()).workspace_details("ai_art_comfyui")  # type: ignore[arg-type]
     assert payload["summary"]["count"] == 2
     current = [item for item in payload["summary"]["items"] if item["is_current"]][0]
@@ -215,7 +215,7 @@ def test_operations_workspace_details_reads_each_client_spec() -> None:
 
 
 def test_operations_preview_setup_workspace_builds_stream_spec() -> None:
-    registry = WorkspaceRegistry(config_path=Path("E:/assetclaw-matting-bot/tools/p4_assistant/missing.yaml"))
+    registry = WorkspaceRegistry(config_path=Path.cwd() / "tools/p4_assistant/missing.yaml")
     ops = P4Operations(registry=registry)
     payload = ops.preview_setup_workspace("ai_art_comfyui")
     assert payload["ok"] is True
@@ -238,7 +238,7 @@ def test_operations_inspect_treats_internal_server_address_as_reachable() -> Non
             )
             return P4CommandResult(args, "F:/P4Workspace/kianaren/ai_art_comfyui_trunk", 0, stdout, "", 0.01, "p4 info ok")
 
-    registry = WorkspaceRegistry(config_path=Path("E:/assetclaw-matting-bot/tools/p4_assistant/missing.yaml"))
+    registry = WorkspaceRegistry(config_path=Path.cwd() / "tools/p4_assistant/missing.yaml")
     payload = P4Operations(registry=registry, runner=FakeRunner()).inspect_workspace("ai_art_comfyui")  # type: ignore[arg-type]
     assert payload["checks"]["server_reachable"] is True
     assert "server_matches" not in payload["checks"]
@@ -254,7 +254,7 @@ def test_operations_list_workflows_reads_synced_workspace(tmp_path: Path) -> Non
         '{"1":{"class_type":"LoadImage"},"2":{"class_type":"SaveImage"}}',
         encoding="utf-8",
     )
-    registry = WorkspaceRegistry(config_path=Path("E:/assetclaw-matting-bot/tools/p4_assistant/missing.yaml"))
+    registry = WorkspaceRegistry(config_path=Path.cwd() / "tools/p4_assistant/missing.yaml")
     workspace = registry.resolve("ai_art_comfyui")
     local_workspace = workspace.__class__(**{**workspace.__dict__, "root": root})
 
@@ -273,7 +273,7 @@ def test_operations_list_workflows_reads_synced_workspace(tmp_path: Path) -> Non
 
 
 def test_workspace_warning_for_risky_root() -> None:
-    registry = WorkspaceRegistry(config_path=Path("E:/assetclaw-matting-bot/tools/p4_assistant/missing.yaml"))
+    registry = WorkspaceRegistry(config_path=Path.cwd() / "tools/p4_assistant/missing.yaml")
     workspace = registry.resolve("ai_art_comfyui")
     risky = workspace.__class__(**{**workspace.__dict__, "root": Path("C:/Users/kianaren/Downloads/ws")})
     warnings = workspace_warnings(risky)

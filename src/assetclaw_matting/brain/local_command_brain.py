@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
+from pathlib import Path
+
+from assetclaw_matting.config import settings
 
 from assetclaw_matting.brain.base import BrainProvider
 from assetclaw_matting.brain.emotion_planner import plan_emotional_reply
@@ -149,13 +153,13 @@ class LocalCommandBrain(BrainProvider):
         if any(kw in text for kw in ("共享盘", "公共盘", "公共机共享")) and any(
             kw in text for kw in ("能访问", "可以访问", "能查看", "可以查看", "权限", "哪些文件", "有什么", "有哪些", "列", "查看", "看看")
         ):
-            from assetclaw_matting.config import settings
-
             if any(kw in text for kw in ("权限", "能访问", "可以访问")) and not any(
                 kw in text for kw in ("哪些文件", "有什么", "有哪些", "列")
             ):
                 return [ToolCall(skill="workspace.roots", arguments={})]
-            return [ToolCall(skill="file.list_allowed", arguments={"path": settings.shared_matting_root})]
+            if settings.shared_matting_root:
+                return [ToolCall(skill="file.list_allowed", arguments={"path": settings.shared_matting_root})]
+            return [ToolCall(skill="workspace.roots", arguments={})]
         if any(kw in lowered for kw in ("nvidia-smi", "gpu")) or any(kw in text for kw in ("显卡", "显存", "gpu", "GPU")):
             return [ToolCall(skill="system.gpu_status", arguments={})]
         if (
@@ -338,7 +342,7 @@ class LocalCommandBrain(BrainProvider):
                         skill="cherry.run_preview",
                         arguments={
                             "input_dir": paths[0],
-                            "output_dir": paths[1] if len(paths) >= 2 else "E:\\cherry_output",
+                            "output_dir": paths[1] if len(paths) >= 2 else str(settings.storage_dir / "cherry_output"),
                             "recursive": True,
                         },
                     )
@@ -352,7 +356,7 @@ class LocalCommandBrain(BrainProvider):
                         skill="cherry.run_start",
                         arguments={
                             "input_dir": paths[0],
-                            "output_dir": paths[1] if len(paths) >= 2 else "E:\\cherry_output",
+                            "output_dir": paths[1] if len(paths) >= 2 else str(settings.storage_dir / "cherry_output"),
                             "recursive": True,
                             "skip_existing": skip_existing,
                             "notify_interval_seconds": 60,
@@ -436,8 +440,8 @@ class LocalCommandBrain(BrainProvider):
                     skill="comfyui.run_preview",
                     arguments={
                         "workflow_path": workflow,
-                        "input_dir": dirs[0] if dirs else "E:\\input",
-                        "output_dir": dirs[1] if len(dirs) >= 2 else "E:\\output",
+                        "input_dir": dirs[0] if dirs else str(settings.default_batch_input_dir),
+                        "output_dir": dirs[1] if len(dirs) >= 2 else str(settings.default_batch_output_dir),
                         "recursive": True,
                         "preserve_structure": True,
                     },
@@ -535,7 +539,7 @@ class LocalCommandBrain(BrainProvider):
                     )
                 ]
         if ("图片" in text or "image" in lowered) and any(kw in text for kw in ("列", "查看", "看看", "找")):
-            path = "E:\\"
+            path = settings.allowed_roots_list[0]
             match = re.search(r"([A-Za-z]:\\[^\s，。]*)", text)
             if match:
                 path = match.group(1)
@@ -547,7 +551,7 @@ class LocalCommandBrain(BrainProvider):
                 return [ToolCall(skill=skill, arguments={"path": match.group(1)})]
             name_match = re.search(r"([\w.\-]+(?:\.\.\.|…)[\w.\-]+|[\w.\-]+\.(?:png|jpg|jpeg|webp|bmp|gif|zip|txt|md|csv|xlsx|psd))", text, re.IGNORECASE)
             if name_match:
-                search_root = "E:\\" if "e盘" in text.lower() or "e 盘" in text.lower() else None
+                search_root = settings.allowed_roots_list[0] if any(item in text.lower() for item in ("本机", "工作盘", "项目盘")) else None
                 skill = "feishu.send_image_by_name" if any(kw in text for kw in ("图片形式", "预览", "展示", "直接显示")) else "feishu.send_file_by_name"
                 return [
                     ToolCall(
@@ -630,7 +634,7 @@ class LocalCommandBrain(BrainProvider):
             if match:
                 return [ToolCall(skill="file.exists", arguments={"path": match.group(1)})]
         if "看看" in text or "列" in text or "list" in lowered:
-            path = "E:\\"
+            path = settings.allowed_roots_list[0]
             match = re.search(r"((?:[A-Za-z]:|\\\\)[^\s，。]*)", text)
             if match:
                 path = match.group(1)
@@ -736,8 +740,10 @@ def _animation_flow_date_from_text(text: str) -> str | None:
 
 
 def _animation_flow_date_root_from_text(text: str) -> str | None:
+    from assetclaw_matting.config import settings
+
     day = _animation_flow_date_from_text(text)
-    return f"E:\\animation_automation\\{day}" if day else None
+    return str(Path(settings.animation_root) / day) if day else None
 
 
 def _web_query_from_text(text: str) -> str | None:
@@ -761,7 +767,8 @@ def _wants_web_research(text: str) -> bool:
 
 def _p4_tool_calls_from_text(text: str) -> list[ToolCall]:
     lowered = text.lower()
-    if not any(kw in lowered or kw in text for kw in ("p4", "perforce", "depot", "changelist", "cl", "reconcile", "workspace", "工作区", "服务器", "差异", "拉最新", "改了什么", "shelve", "搁置", "飞书报告", "变更")):
+    has_cl_token = re.search(r"(?<![A-Za-z0-9_])cl(?![A-Za-z0-9_])", lowered) is not None
+    if not has_cl_token and not any(kw in lowered or kw in text for kw in ("p4", "perforce", "depot", "changelist", "reconcile", "workspace", "工作区", "服务器", "差异", "拉最新", "改了什么", "shelve", "搁置", "飞书报告", "变更")):
         return []
     if any(kw in lowered or kw in text for kw in ("submit", "提交", "merge", "合流", "copy up", "stream 创建", "创建 stream", "sync", "拉最新", "同步")):
         return [ToolCall(skill="p4.help", arguments={})]
@@ -771,7 +778,7 @@ def _p4_tool_calls_from_text(text: str) -> list[ToolCall]:
     if any(kw in lowered or kw in text for kw in ("删除", "清理", "取消", "删掉", "删了", "作废", "不要了", "delete", "cleanup", "remove")) and changelist:
         return [ToolCall(skill="p4.cleanup_cl", arguments={"cl": changelist.group(1) or changelist.group(2)})]
     if any(kw in lowered or kw in text for kw in ("哪些 cl", "哪些cl", "有哪些 cl", "有哪些cl", "cl 的id", "cl id", "cl 列表", "cl列表", "changelist 列表", "pending cl", "shelved cl", "当前 cl", "当前cl")) or (
-        "cl" in lowered and any(kw in text for kw in ("有哪些", "哪些", "列一下", "查看", "看看"))
+        has_cl_token and any(kw in text for kw in ("有哪些", "哪些", "列一下", "查看", "看看"))
     ):
         return [ToolCall(skill="p4.list_cls", arguments={})]
     if ("p4" in lowered or "perforce" in lowered) and any(kw in lowered or kw in text for kw in ("info", "connection", "verify", "status", "opened", "changes", "changed", "状态")):
@@ -809,18 +816,22 @@ def _p4_tool_calls_from_text(text: str) -> list[ToolCall]:
 
 
 def _animation_root_from_text(text: str) -> str:
+    from assetclaw_matting.config import settings
+
     paths = re.findall(r"([A-Za-z]:\\[^\s，。]*)", text)
     for raw in paths:
         normalized = raw.rstrip("\\/")
         parts = re.split(r"[\\/]+", normalized)
         lowered_parts = [part.lower() for part in parts]
-        if "animation_automation" in lowered_parts:
-            idx = lowered_parts.index("animation_automation")
+        workspace_names = {"animation_auto", "animation_automation"}
+        workspace_name = next((item for item in lowered_parts if item in workspace_names), None)
+        if workspace_name:
+            idx = lowered_parts.index(workspace_name)
             if len(parts) > idx + 1:
                 return "\\".join(parts[: idx + 2])
         if parts and parts[-1].lower() in {"videos", "frames", "frames_missing_patch", "matte", "smooth"}:
             return "\\".join(parts[:-1])
-    return r"E:\animation_automation\2026-06-02"
+    return str(Path(settings.animation_root) / datetime.now().strftime("%Y-%m-%d"))
 
 
 def _fps_from_text(text: str) -> int | None:

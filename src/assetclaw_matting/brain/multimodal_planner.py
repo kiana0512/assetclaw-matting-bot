@@ -60,7 +60,7 @@ def plan_multimodal_task(message: BrainMessage) -> tuple[list[ToolCall], str] | 
         return [], (
             f"收到{kind}：{Path(path).name}\n"
             f"已保存到：{path}\n"
-            "你想让我怎么处理？可以说：保存到 E:\\images、查看信息、预览发回、或者分析内容。"
+            "你想让我怎么处理？可以说：保存到指定目录、查看信息、预览发回、或者分析内容。"
         )
 
     return None

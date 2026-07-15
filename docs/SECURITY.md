@@ -26,7 +26,8 @@ Win3090 -> 出向 wss://open.feishu.cn -> 接收消息 -> 处理 -> 回复
 
 ### 允许路径
 
-- `ALLOWED_ROOTS=D:;E:;F:;Z:;\\audioshare.lilith.com\AIart\公共机共享\抠图` 默认允许 D/E/F 工作盘、Z 盘共享盘和指定 UNC 共享路径下的受控操作，C 盘不开放
+- 未设置 `ALLOWED_ROOTS` 时，程序自动允许项目所在盘的根目录。本次部署在 `C:\assetclaw-matting-bot`，因此默认允许 `C:\`。
+- 如需共享盘或额外盘符，使用分号追加到 `ALLOWED_ROOTS`；不要把路径写回源码。
 
 ### 永久禁止访问
 
@@ -36,10 +37,7 @@ Win3090 -> 出向 wss://open.feishu.cn -> 接收消息 -> 处理 -> 回复
 |---------|------|
 | `.env` | 配置密钥文件 |
 | `.ssh` | SSH 密钥目录 |
-| `AppData` | Windows 用户数据 |
 | `Windows` | 系统目录 |
-| `Program Files` | 系统程序目录 |
-| `ProgramData` | 系统配置目录 |
 | `$Recycle.Bin` | 回收站 |
 | `System Volume Information` | 系统卷信息 |
 

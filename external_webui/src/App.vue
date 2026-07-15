@@ -38,6 +38,7 @@ const state = reactive({
   frameRuns: [],
   cherryRuns: [],
   jobs: [],
+  runtimeConfig: { animation_root: "", unity_project: "" },
   detail: null,
   toasts: [],
   form: {
@@ -45,7 +46,7 @@ const state = reactive({
     mode: "iteration",
     priority: "",
     workflowPath: "",
-    unityProject: "D:/Spark/Client",
+    unityProject: "",
     package: "both",
     p4Stream: "//streams/rel_0.0.1",
     allowP4Writes: true,
@@ -104,12 +105,23 @@ const launchCommand = computed(() => {
   return `动画自动化${compactDate} ${modeText}${priority}`;
 });
 
-onMounted(() => {
+onMounted(async () => {
+  await loadRuntimeConfig();
   refreshAll();
   timer = window.setInterval(() => {
     if (state.auto) refreshAll(true);
   }, POLL_MS);
 });
+
+async function loadRuntimeConfig() {
+  try {
+    const payload = await jsonFetch("/api/local/runtime-config", { timeoutMs: 7000 });
+    state.runtimeConfig = payload || state.runtimeConfig;
+    if (!state.form.unityProject) state.form.unityProject = payload?.unity_project || "";
+  } catch {
+    // The normal refresh error state handles a missing local API.
+  }
+}
 
 onBeforeUnmount(() => {
   if (timer) window.clearInterval(timer);
@@ -346,7 +358,8 @@ function flowArgs() {
 
 function workspaceRoot() {
   const day = (state.form.date || todayLabel()).trim();
-  return `E:/animation_automation/${day}`;
+  const root = String(state.runtimeConfig.animation_root || "animation_auto").replace(/[\\/]+$/, "");
+  return `${root}/${day}`;
 }
 
 function currentWorkspaceRoot() {

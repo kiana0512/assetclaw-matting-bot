@@ -10,12 +10,13 @@ from assetclaw_matting.brain.deepseek_brain import DeepSeekBrain
 from assetclaw_matting.brain.pre_llm_router import handle_pre_llm_message
 from assetclaw_matting.brain.router import get_provider, handle_message
 from assetclaw_matting.brain.schemas import BrainMessage, BrainResponse, ToolCall
+from assetclaw_matting.config import settings
 from assetclaw_matting.db.schema import create_tables
 from assetclaw_matting.db.sqlite import init_db
 
 
 def setup_module() -> None:
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
 
 
@@ -222,7 +223,7 @@ def test_animation_flow_command_is_routed_before_deepseek_llm() -> None:
 
     assert response is not None
     assert provider.calls[0].skill == "animation_flow.start"
-    assert provider.calls[0].arguments["date_root"] == "E:\\animation_automation\\2026-06-10"
+    assert Path(provider.calls[0].arguments["date_root"]) == settings.animation_root / "2026-06-10"
     assert provider.calls[0].arguments["unity_import_mode"] == "iteration"
     assert provider.calls[0].arguments["fake_matting_from_frames"] is True
     assert response.raw["deterministic_plan"] == "deterministic animation_flow route before LLM"

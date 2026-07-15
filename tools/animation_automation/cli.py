@@ -59,7 +59,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command")
 
     ready = sub.add_parser("build-unity-ready", help="Build Unity plugin readable scene/emoji/story packages.")
-    ready.add_argument("--date-root", required=True, help="Date root, e.g. E:/animation_automation/2026-06-09")
+    ready.add_argument("--date-root", required=True, help="Date root under the configured animation workspace, e.g. <animation-root>/2026-06-09")
     ready.add_argument("--overwrite", action="store_true", help="Remove existing unity_ready and rebuild.")
     ready.add_argument("--copy-mode", choices=("copy", "hardlink"), default="copy")
     ready.add_argument("--include-empty-types", action="store_true")

@@ -2,85 +2,54 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
-import sys
-from datetime import datetime
+from collections import defaultdict
 from pathlib import Path
 
+from assetclaw_matting.config import settings
+from assetclaw_matting.services.cherry_html_runner import run_cherry_html, validate_cherry_html_runtime
 
-ROOT = Path(__file__).resolve().parents[1]
+
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
-def _run_label() -> str:
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
-
-
-def _collect_images(root: Path) -> list[Path]:
-    return sorted(
-        (path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_EXTS),
-        key=lambda path: str(path.relative_to(root)).lower(),
-    )
-
-
-def _cherry_source() -> Path:
-    candidates = [
-        ROOT / "Cherry_帧序列处理工具_2" / "web_temporal_smooth.py",
-        ROOT / "Cherry_帧序列处理工具_1" / "web_temporal_smooth.py",
-        ROOT / "Cherry_帧序列处理工具" / "web_temporal_smooth.py",
-    ]
-    for source in candidates:
-        if source.exists():
-            return source
-    return candidates[0]
+def _collect_groups(root: Path) -> list[list[Path]]:
+    groups: dict[Path, list[Path]] = defaultdict(list)
+    for path in root.rglob("*"):
+        if path.is_file() and path.suffix.lower() in IMAGE_EXTS:
+            groups[path.parent].append(path)
+    return [sorted(files, key=lambda item: item.name.lower()) for _, files in sorted(groups.items(), key=lambda item: str(item[0]).lower())]
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run Cherry smoothing once for the current matte files.")
+    parser = argparse.ArgumentParser(description="Run the authoritative Cherry HTML processor once.")
     parser.add_argument("--input-dir", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--run-label", default="")
     args = parser.parse_args()
 
     src = Path(args.input_dir).resolve()
     dst = Path(args.output_dir).resolve()
     if not src.is_dir():
         raise NotADirectoryError(src)
-    files = _collect_images(src)
-    if not files:
+    groups = _collect_groups(src)
+    if not groups:
         raise RuntimeError(f"input dir has no images: {src}")
-    dst.mkdir(parents=True, exist_ok=True)
 
-    run_dir = ROOT / "storage" / "manual_cherry_runs" / (args.run_label or _run_label())
-    run_dir.mkdir(parents=True, exist_ok=True)
-    config_path = run_dir / "config.json"
-    config = {
-        "source_path": str(_cherry_source()),
-        "input_dir": str(src),
-        "output_dir": str(dst),
-        "files": [str(path) for path in files],
-        "options": {
-            "use_smooth": True,
-            "smooth_window": 5,
-            "smooth_sigma": 1.0,
-            "min_alpha": 0.05,
-            "sync_rgb": True,
-            "ring_width": 25,
-            "use_resize": True,
-            "resize_width": 256,
-            "resize_height": 256,
-            "use_sharpen": True,
-            "sharpen_amount": 2.0,
-            "sharpen_radius": 2,
-            "sharpen_threshold": 0.02,
-            "sharpen_shrink": 4,
-        },
-    }
-    config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"event": "started", "config_path": str(config_path), "total": len(files), "source_path": config["source_path"]}, ensure_ascii=False), flush=True)
-    worker = ROOT / "scripts" / "cherry_batch_worker.py"
-    proc = subprocess.run([sys.executable, str(worker), str(config_path)], cwd=str(ROOT))
-    return int(proc.returncode)
+    browser = Path(settings.cherry_browser_path) if settings.cherry_browser_path else None
+    runtime = validate_cherry_html_runtime(Path(settings.cherry_postprocess_html_path), browser)
+    results = []
+    for files in groups:
+        result = run_cherry_html(
+            Path(settings.cherry_postprocess_html_path),
+            src,
+            dst,
+            files,
+            chrome_path=browser,
+            timeout_seconds=int(settings.cherry_html_timeout_seconds),
+            storage_dir=Path(settings.storage_dir),
+        )
+        results.append({"count": result.total, "profile": result.profile, "resize": result.resize, "steps": result.steps})
+    print(json.dumps({"ok": True, "runtime": runtime, "output_dir": str(dst), "groups": results}, ensure_ascii=False, indent=2))
+    return 0
 
 
 if __name__ == "__main__":
