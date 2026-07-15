@@ -415,6 +415,93 @@ def test_direct_image_attachment_routes_without_confirmation(tmp_path: Path) -> 
     assert tool_calls[0].arguments["image_paths"] == [str(image)]
 
 
+def test_direct_image_folder_attachment_routes_as_image_set(tmp_path: Path) -> None:
+    folder = tmp_path / "海瑟序列帧"
+    folder.mkdir()
+    first = folder / "0001.png"
+    second = folder / "0002.png"
+    Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(first)
+    Image.new("RGBA", (8, 12), (0, 255, 0, 255)).save(second)
+
+    planned = plan_direct_image_task(
+        BrainMessage(
+            text="需要进行抠图",
+            conversation_id="feishu:chat_image_set:user_image",
+            user_id="user_image",
+            attachments=[{"type": "file", "file_name": folder.name, "downloaded": True, "local_path": str(folder)}],
+        )
+    )
+
+    assert planned is not None
+    tool_calls, reason = planned
+    assert reason == "direct Feishu image attachment route"
+    assert tool_calls[0].skill == "direct_image.start"
+    assert tool_calls[0].arguments["image_paths"] == [str(first), str(second)]
+    assert tool_calls[0].arguments["run_label"] == "海瑟序列帧"
+
+
+def test_direct_image_zip_attachment_routes_as_image_set(tmp_path: Path) -> None:
+    import zipfile
+
+    source = tmp_path / "src"
+    source.mkdir()
+    first = source / "0001.png"
+    second = source / "nested" / "0002.png"
+    second.parent.mkdir()
+    Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(first)
+    Image.new("RGBA", (8, 12), (0, 255, 0, 255)).save(second)
+    archive = tmp_path / "海瑟序列帧.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.write(first, "0001.png")
+        zf.write(second, "nested/0002.png")
+        zf.writestr("../skip.png", b"bad")
+
+    planned = plan_direct_image_task(
+        BrainMessage(
+            text="需要进行抠图",
+            conversation_id="feishu:chat_image_zip:user_image",
+            user_id="user_image",
+            attachments=[{"type": "file", "file_name": archive.name, "downloaded": True, "local_path": str(archive)}],
+        )
+    )
+
+    assert planned is not None
+    tool_calls, _reason = planned
+    paths = tool_calls[0].arguments["image_paths"]
+    assert len(paths) == 2
+    assert paths[0].endswith("0001.png")
+    assert paths[1].endswith("0002.png")
+
+
+def test_direct_image_followup_uses_recent_image_set(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.db.repos import upsert_memory_note
+    from assetclaw_matting.db.schema import create_tables
+    from assetclaw_matting.db.sqlite import init_db
+
+    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    create_tables()
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    folder = tmp_path / "海瑟序列帧"
+    folder.mkdir()
+    image = folder / "0001.png"
+    Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(image)
+    upsert_memory_note("feishu:chat_recent_set:user_image", "last_image_set_path", str(folder), source="test")
+
+    planned = plan_direct_image_task(
+        BrainMessage(
+            text="需要进行抠图",
+            conversation_id="feishu:chat_recent_set:user_image",
+            user_id="user_image",
+        )
+    )
+
+    assert planned is not None
+    tool_calls, _reason = planned
+    assert tool_calls[0].skill == "direct_image.start"
+    assert tool_calls[0].arguments["image_paths"] == [str(image)]
+
+
 def test_direct_image_status_question_routes_without_attachment() -> None:
     planned = plan_direct_image_task(
         BrainMessage(
