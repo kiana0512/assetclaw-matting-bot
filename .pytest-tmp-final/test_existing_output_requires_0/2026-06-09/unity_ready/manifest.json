@@ -1,0 +1,37 @@
+{
+  "generatedAt": "2026-07-15T14:33:59+08:00",
+  "dateRoot": "E:\\assetclaw-matting-bot\\.pytest-tmp-final\\test_existing_output_requires_0\\2026-06-09",
+  "sourceManifest": "../source_manifest.json",
+  "packages": {
+    "scene": {
+      "json": "scene/animation_resource_manifest.json",
+      "framesRoot": "scene/frames",
+      "tasks": []
+    },
+    "emoji": {
+      "json": "emoji/animation_resource_manifest.json",
+      "framesRoot": "emoji/frames",
+      "tasks": [
+        {
+          "character": "Jessica",
+          "animation": "idle",
+          "displayName": "待机",
+          "unityCategories": [
+            "剧情"
+          ],
+          "processVariant": "default",
+          "sourceImageDir": "../emoji/smooth/Jessica-idle",
+          "sourceSmoothDir": "../emoji/smooth/Jessica-idle",
+          "readyDir": "emoji/frames/Jessica-idle",
+          "frameCount": 1
+        }
+      ]
+    },
+    "story": {
+      "json": "story/animation_resource_manifest.json",
+      "framesRoot": "story/frames",
+      "tasks": []
+    }
+  },
+  "warnings": []
+}

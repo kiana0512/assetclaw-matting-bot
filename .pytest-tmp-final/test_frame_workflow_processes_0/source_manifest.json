@@ -1,0 +1,75 @@
+{
+  "date": "test_frame_workflow_processes_0",
+  "feishu": {
+    "baseUrl": "",
+    "tableId": "",
+    "viewId": ""
+  },
+  "records": [
+    {
+      "recordId": "rec_idle",
+      "character": "gary",
+      "animation": "idle",
+      "displayName": "",
+      "assetKind": "emoji",
+      "unityCategory": "",
+      "progress": "待抽帧",
+      "processOption": "",
+      "processVariant": "default",
+      "types": [],
+      "attachments": [
+        {
+          "name": "source.mp4",
+          "localPath": "emoji/videos/gary-idle/source.mp4"
+        }
+      ],
+      "taskKey": "gary-idle",
+      "skipped": false,
+      "skipReason": ""
+    },
+    {
+      "recordId": "rec_sorting",
+      "character": "gary",
+      "animation": "sorting",
+      "reason": "progress is 整理中; required 待抽帧",
+      "skipped": true,
+      "skipReason": "progress is 整理中; required 待抽帧"
+    },
+    {
+      "recordId": "rec_done",
+      "character": "gary",
+      "animation": "done",
+      "reason": "progress is 已完成; required 待抽帧",
+      "skipped": true,
+      "skipReason": "progress is 已完成; required 待抽帧"
+    },
+    {
+      "recordId": "rec_ignore",
+      "character": "gary",
+      "animation": "ignore",
+      "reason": "progress is 不处理; required 待抽帧",
+      "skipped": true,
+      "skipReason": "progress is 不处理; required 待抽帧"
+    }
+  ],
+  "skipped": [
+    {
+      "recordId": "rec_sorting",
+      "character": "gary",
+      "animation": "sorting",
+      "reason": "progress is 整理中; required 待抽帧"
+    },
+    {
+      "recordId": "rec_done",
+      "character": "gary",
+      "animation": "done",
+      "reason": "progress is 已完成; required 待抽帧"
+    },
+    {
+      "recordId": "rec_ignore",
+      "character": "gary",
+      "animation": "ignore",
+      "reason": "progress is 不处理; required 待抽帧"
+    }
+  ]
+}

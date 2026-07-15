@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "record_id": "rec_scene_idle",
+      "role": "gary",
+      "emotion": "idle",
+      "animation_name": "",
+      "root": "场景动画",
+      "hierarchy": [
+        "场景动画",
+        "gary",
+        "idle"
+      ],
+      "rel_dir": "gary\\idle",
+      "label": "gary/idle",
+      "asset_kind": "scene",
+      "process_variant": "default",
+      "task_key": "gary-idle",
+      "video_path": "E:\\assetclaw-matting-bot\\.pytest-tmp-final\\test_frame_workflow_can_filter0\\scene\\videos\\gary-idle\\source.mp4",
+      "frame_dir": "E:\\assetclaw-matting-bot\\.pytest-tmp-final\\test_frame_workflow_can_filter0\\scene\\frames\\gary-idle",
+      "frame_rel_dir": "gary-idle",
+      "frame_count": 1,
+      "frames": [
+        "0000.png"
+      ]
+    }
+  ]
+}
