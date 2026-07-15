@@ -66,7 +66,7 @@ FEISHU_ALLOWED_CHAT_IDS=
 ## 步骤三：安装依赖
 
 ```powershell
-cd E:\assetclaw-matting-bot
+cd <project-root>
 conda activate assetclaw
 pip install -r requirements.txt
 ```
@@ -82,7 +82,7 @@ python -c "import lark_oapi; print('lark_oapi OK')"
 ## 步骤四：启动本地机器人
 
 ```powershell
-cd E:\assetclaw-matting-bot
+cd <project-root>
 conda activate assetclaw
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot_local.ps1
 ```
@@ -109,7 +109,7 @@ Event mode: ws
 查看权限说明
 查看当前系统状态
 看看 E 盘有哪些文件
-这个路径是否存在？E:\assetclaw-matting-bot\README.md
+这个路径是否存在？<project-root>\README.md
 ```
 
 预期：机器人正常回复，无需 Cloudflare，无需公网域名。

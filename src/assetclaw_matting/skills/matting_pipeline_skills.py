@@ -21,6 +21,7 @@ def status(**_: Any) -> dict[str, Any]:
     remote = _git_remote_state(repo) if (repo / ".git").exists() else {}
     assets = _asset_plan()
     links = [_link_status(item) for item in assets]
+    cherry_html = Path(settings.cherry_postprocess_html_path)
     return {
         "ok": True,
         "repo_url": settings.matting_pipeline_repo_url,
@@ -37,8 +38,10 @@ def status(**_: Any) -> dict[str, Any]:
         "dirty": commit.get("dirty", False),
         "workflow_path": str(_workflow_target()),
         "workflow_exists": _workflow_target().exists(),
+        "cherry_html_path": str(cherry_html),
+        "cherry_html_exists": cherry_html.is_file(),
         "assets": links,
-        "all_ready": all(item["source_exists"] and item["target_exists"] for item in links) and _workflow_target().exists(),
+        "all_ready": all(item["source_exists"] and item["target_exists"] for item in links) and _workflow_target().exists() and cherry_html.is_file(),
     }
 
 
@@ -62,6 +65,9 @@ def verify(**_: Any) -> dict[str, Any]:
             errors.append(f"工作流 JSON 无法解析：{exc}")
     else:
         errors.append(f"默认工作流缺失：{workflow}")
+    cherry_html = Path(settings.cherry_postprocess_html_path)
+    if not cherry_html.is_file():
+        errors.append(f"Cherry 唯一算法 HTML 缺失：{cherry_html}")
     for item in payload["assets"]:
         if item["kind"] == "lora" and item["source_exists"]:
             source = Path(item["source"])

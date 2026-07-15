@@ -384,8 +384,8 @@ def run_preview(
     from assetclaw_matting.config import settings
 
     workflow_file = _resolve_workflow_path(workflow_path or _selected_workflow_path() or str(settings.comfyui_workflow_path))
-    src = validate_path(input_dir or "E:\\input", must_exist=True)
-    dst = validate_path(output_dir or "E:\\output", must_exist=False)
+    src = validate_path(input_dir or settings.default_batch_input_dir, must_exist=True)
+    dst = validate_path(output_dir or settings.default_batch_output_dir, must_exist=False)
     workflow = json.loads(workflow_file.read_text(encoding="utf-8"))
     info = inspect_workflow(workflow)
     files = _collect_images(src, recursive=recursive, max_images=max_images)
@@ -529,8 +529,8 @@ def preview_run_start_confirmation(arguments: dict[str, Any], confirmation_id: s
     try:
         preview = run_preview(
             workflow_path=arguments.get("workflow_path"),
-            input_dir=arguments.get("input_dir") or "E:\\input",
-            output_dir=arguments.get("output_dir") or "E:\\output",
+            input_dir=arguments.get("input_dir") or str(settings.default_batch_input_dir),
+            output_dir=arguments.get("output_dir") or str(settings.default_batch_output_dir),
             recursive=bool(arguments.get("recursive", True)),
             preserve_structure=bool(arguments.get("preserve_structure", True)),
             max_images=int(arguments.get("max_images") or 10000),

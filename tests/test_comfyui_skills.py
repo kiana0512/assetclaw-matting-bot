@@ -31,7 +31,7 @@ from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
 
 
 def setup_module() -> None:
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
 
 
@@ -86,7 +86,7 @@ def _wait_done(run_id: str) -> dict:
 
 
 def test_workflow_info_reads_api_workflow() -> None:
-    workflow = Path("E:/assetclaw-matting-bot/storage/debug/comfy_test_workflow.json")
+    workflow = Path.cwd() / "storage/debug/comfy_test_workflow.json"
     _make_workflow(workflow)
 
     result = workflow_info(str(workflow))
@@ -232,9 +232,9 @@ def test_resolve_best_output_rejects_bad_primary_save_even_if_preview_mask_is_tr
 def test_download_output_prefers_local_comfyui_file_and_preserves_alpha(monkeypatch) -> None:
     from assetclaw_matting.config import settings
 
-    comfy_root = Path("E:/assetclaw-matting-bot/storage/debug/comfy_local_copy_root")
+    comfy_root = Path.cwd() / "storage/debug/comfy_local_copy_root"
     source = comfy_root / "output" / "matte" / "1_00001_.png"
-    target = Path("E:/assetclaw-matting-bot/storage/debug/comfy_local_copy_outputs/0001.png")
+    target = Path.cwd() / "storage/debug/comfy_local_copy_outputs/0001.png"
     source.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (4, 4), (255, 0, 0, 0)).save(source)
     monkeypatch.setattr(settings, "comfyui_dir", comfy_root)
@@ -311,7 +311,7 @@ def test_resolve_best_output_rejects_black_preview_and_mask(tmp_path) -> None:
 
 
 def test_workflows_list() -> None:
-    root = Path("E:/assetclaw-matting-bot/storage/debug/workflows")
+    root = Path.cwd() / "storage/debug/workflows"
     _make_workflow(root / "matting_api.json")
 
     result = workflows_list(str(root))
@@ -324,9 +324,9 @@ def test_fake_run_start_and_status(monkeypatch) -> None:
     from assetclaw_matting.config import settings
 
     monkeypatch.setattr(settings, "comfyui_fake_mode", True)
-    workflow = Path("E:/assetclaw-matting-bot/storage/debug/comfy_fake_workflow.json")
-    input_dir = Path("E:/assetclaw-matting-bot/storage/debug/comfy_inputs")
-    output_dir = Path("E:/assetclaw-matting-bot/storage/debug/comfy_outputs")
+    workflow = Path.cwd() / "storage/debug/comfy_fake_workflow.json"
+    input_dir = Path.cwd() / "storage/debug/comfy_inputs"
+    output_dir = Path.cwd() / "storage/debug/comfy_outputs"
     _make_workflow(workflow)
     input_dir.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (4, 4), (255, 0, 0, 255)).save(input_dir / "a.png")
@@ -349,9 +349,9 @@ def test_run_delete_hides_finished_task(monkeypatch) -> None:
     from assetclaw_matting.config import settings
 
     monkeypatch.setattr(settings, "comfyui_fake_mode", True)
-    workflow = Path("E:/assetclaw-matting-bot/storage/debug/comfy_delete_workflow.json")
-    input_dir = Path("E:/assetclaw-matting-bot/storage/debug/comfy_delete_inputs")
-    output_dir = Path("E:/assetclaw-matting-bot/storage/debug/comfy_delete_outputs")
+    workflow = Path.cwd() / "storage/debug/comfy_delete_workflow.json"
+    input_dir = Path.cwd() / "storage/debug/comfy_delete_inputs"
+    output_dir = Path.cwd() / "storage/debug/comfy_delete_outputs"
     _make_workflow(workflow)
     input_dir.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (4, 4), (255, 255, 0, 255)).save(input_dir / "a.png")
@@ -406,9 +406,9 @@ def test_workflow_select_and_recursive_same_structure_output(monkeypatch) -> Non
     from assetclaw_matting.config import settings
 
     monkeypatch.setattr(settings, "comfyui_fake_mode", True)
-    workflow = Path("E:/assetclaw-matting-bot/storage/debug/comfy_selected_workflow.json")
-    input_dir = Path("E:/assetclaw-matting-bot/storage/debug/comfy_nested_inputs")
-    output_dir = Path("E:/assetclaw-matting-bot/storage/debug/comfy_nested_outputs")
+    workflow = Path.cwd() / "storage/debug/comfy_selected_workflow.json"
+    input_dir = Path.cwd() / "storage/debug/comfy_nested_inputs"
+    output_dir = Path.cwd() / "storage/debug/comfy_nested_outputs"
     _make_workflow(workflow)
     (input_dir / "Jessica-happy").mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (4, 4), (0, 255, 0)).save(input_dir / "Jessica-happy" / "pose.jpg")
@@ -431,9 +431,9 @@ def test_run_preview_and_pause_resume(monkeypatch) -> None:
     from assetclaw_matting.config import settings
 
     monkeypatch.setattr(settings, "comfyui_fake_mode", True)
-    workflow = Path("E:/assetclaw-matting-bot/storage/debug/comfy_preview_workflow.json")
-    input_dir = Path("E:/assetclaw-matting-bot/storage/debug/comfy_preview_inputs")
-    output_dir = Path("E:/assetclaw-matting-bot/storage/debug/comfy_preview_outputs")
+    workflow = Path.cwd() / "storage/debug/comfy_preview_workflow.json"
+    input_dir = Path.cwd() / "storage/debug/comfy_preview_inputs"
+    output_dir = Path.cwd() / "storage/debug/comfy_preview_outputs"
     _make_workflow(workflow)
     input_dir.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (4, 4), (0, 0, 255, 255)).save(input_dir / "a.png")

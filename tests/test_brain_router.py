@@ -9,7 +9,7 @@ from assetclaw_matting.db.sqlite import init_db
 
 
 def setup_module() -> None:
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
 
 
@@ -65,8 +65,8 @@ def test_local_command_completes_folder_and_copy_followup(monkeypatch) -> None:
     from assetclaw_matting.db.repos import insert_brain_message
 
     monkeypatch.setattr(settings, "brain_provider", "local_command")
-    src = Path("E:/pytest_compound_image.png")
-    dst_dir = Path("E:/pytest_images")
+    src = settings.storage_dir / "pytest_compound_image.png"
+    dst_dir = settings.storage_dir / "pytest_images"
     dst = dst_dir / src.name
     Image.new("RGBA", (4, 4), (255, 0, 0, 255)).save(src)
     if dst.exists():
@@ -87,7 +87,7 @@ def test_local_command_completes_folder_and_copy_followup(monkeypatch) -> None:
         BrainMessage(
             conversation_id=conversation_id,
             user_id="user",
-            text="你可以在e盘新增一个文件夹并且把我刚刚提到的这个图片文件复制进去吗",
+            text="你可以在项目盘新增一个文件夹并且把我刚刚提到的这个图片文件复制进去吗",
         )
     )
     assert "新文件夹叫什么名字" in ask.text
@@ -99,8 +99,8 @@ def test_local_command_completes_folder_and_copy_followup(monkeypatch) -> None:
             text="对 就是这个意思 新文件夹就叫pytest_images",
         )
     )
-    assert "已创建目录：E:\\pytest_images" in done.text
-    assert f"已复制：E:\\pytest_images\\{src.name}" in done.text
+    assert f"已创建目录：{dst_dir}" in done.text
+    assert f"已复制：{dst}" in done.text
     assert dst.exists()
 
 
@@ -242,6 +242,7 @@ def test_local_command_shared_drive_list(monkeypatch) -> None:
     from assetclaw_matting.brain.local_command_brain import LocalCommandBrain
 
     monkeypatch.setattr(settings, "brain_provider", "local_command")
+    monkeypatch.setattr(settings, "shared_matting_root", str(settings.storage_dir))
     tool_calls = LocalCommandBrain()._infer_tool_calls("列出共享盘有哪些文件")
 
     assert tool_calls[0].skill == "file.list_allowed"

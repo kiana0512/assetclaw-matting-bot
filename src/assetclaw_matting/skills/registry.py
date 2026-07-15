@@ -42,18 +42,29 @@ from assetclaw_matting.skills import (
     unity_tools_skills,
 )
 from assetclaw_matting.skills.security import redact_secrets
+from assetclaw_matting.config import settings
 
 log = logging.getLogger(__name__)
 
-_ALLOWED_ROOTS = [
-    "D:\\",
-    "E:\\",
-    "F:\\",
-    "Z:\\",
-    "C:\\Users\\lilithgames\\Downloads\\ComfyUI-aki-v3",
-    r"\\audioshare.lilith.com\AIart\公共机共享\抠图",
-]
-_DENY_PATTERNS = [".env", ".ssh", "AppData", "Windows", "Program Files", "ProgramData", "$Recycle.Bin", "System Volume Information"]
+_ALLOWED_ROOTS = settings.allowed_roots_list
+_DENY_PATTERNS = settings.deny_path_patterns_list
+
+
+def _render_example(value: Any) -> Any:
+    replacements = {
+        "{project_root}": str(settings.assetclaw_root),
+        "{animation_root}": str(settings.animation_root),
+        "{allowed_root}": settings.allowed_roots_list[0] if settings.allowed_roots_list else str(settings.assetclaw_root),
+    }
+    if isinstance(value, str):
+        for marker, path in replacements.items():
+            value = value.replace(marker, path)
+        return value
+    if isinstance(value, list):
+        return [_render_example(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _render_example(item) for key, item in value.items()}
+    return value
 
 
 def _skill(
@@ -80,8 +91,8 @@ def _skill(
         "parameters": parameters or {},
         "allowed_roots": _ALLOWED_ROOTS,
         "deny_patterns": _DENY_PATTERNS,
-        "examples": examples or [],
-        "natural_language_examples": natural_language_examples or [],
+        "examples": _render_example(examples or []),
+        "natural_language_examples": _render_example(natural_language_examples or []),
         "fn": fn,
     }
 
@@ -614,8 +625,8 @@ SKILLS: list[dict[str, Any]] = [
         {"path": "string", "max_items": "integer optional"},
         domain="file",
         risk_level="readonly",
-        examples=[{"skill": "file.list_allowed", "arguments": {"path": "E:\\", "max_items": 20}}],
-        natural_language_examples=["看看 E 盘有哪些文件", "列出 E:\\assetclaw-matting-bot 下的文件"],
+        examples=[{"skill": "file.list_allowed", "arguments": {"path": "{allowed_root}", "max_items": 20}}],
+        natural_language_examples=["看看 授权盘有哪些文件", "列出 {project_root} 下的文件"],
     ),
     _skill(
         "file.copy",
@@ -628,13 +639,13 @@ SKILLS: list[dict[str, Any]] = [
         examples=[{
             "skill": "file.copy",
             "arguments": {
-                "src_path": "E:\\assetclaw-matting-bot\\README.md",
-                "dst_path": "E:\\assetclaw-matting-bot\\storage\\README_copy.md",
+                "src_path": "{project_root}\\README.md",
+                "dst_path": "{project_root}\\storage\\README_copy.md",
                 "overwrite": False,
             },
         }],
         natural_language_examples=[
-            "把 E:\\assetclaw-matting-bot\\README.md 复制到 E:\\assetclaw-matting-bot\\storage\\README_copy.md",
+            "把 {project_root}\\README.md 复制到 {project_root}\\storage\\README_copy.md",
         ],
     ),
     _skill(
@@ -649,13 +660,13 @@ SKILLS: list[dict[str, Any]] = [
         examples=[{
             "skill": "file.move",
             "arguments": {
-                "src_path": "E:\\assetclaw-matting-bot\\storage\\README_copy.md",
-                "dst_path": "E:\\assetclaw-matting-bot\\storage\\README_moved.md",
+                "src_path": "{project_root}\\storage\\README_copy.md",
+                "dst_path": "{project_root}\\storage\\README_moved.md",
                 "overwrite": False,
             },
         }],
         natural_language_examples=[
-            "把 E:\\assetclaw-matting-bot\\storage\\README_copy.md 移动到 E:\\assetclaw-matting-bot\\storage\\README_moved.md",
+            "把 {project_root}\\storage\\README_copy.md 移动到 {project_root}\\storage\\README_moved.md",
         ],
     ),
     _skill(
@@ -666,8 +677,8 @@ SKILLS: list[dict[str, Any]] = [
         {"path": "string", "parents": "boolean", "exist_ok": "boolean"},
         domain="file",
         risk_level="write_safe",
-        examples=[{"skill": "file.mkdir", "arguments": {"path": "E:\\assetclaw-matting-bot\\storage\\new_folder"}}],
-        natural_language_examples=["创建目录 E:\\assetclaw-matting-bot\\storage\\feishu_test"],
+        examples=[{"skill": "file.mkdir", "arguments": {"path": "{project_root}\\storage\\new_folder"}}],
+        natural_language_examples=["创建目录 {project_root}\\storage\\feishu_test"],
     ),
     _skill(
         "file.exists",
@@ -677,8 +688,8 @@ SKILLS: list[dict[str, Any]] = [
         {"path": "string"},
         domain="file",
         risk_level="readonly",
-        examples=[{"skill": "file.exists", "arguments": {"path": "E:\\assetclaw-matting-bot\\README.md"}}],
-        natural_language_examples=["E:\\assetclaw-matting-bot\\README.md 是否存在"],
+        examples=[{"skill": "file.exists", "arguments": {"path": "{project_root}\\README.md"}}],
+        natural_language_examples=["{project_root}\\README.md 是否存在"],
     ),
     _skill(
         "file.info",
@@ -688,8 +699,8 @@ SKILLS: list[dict[str, Any]] = [
         {"path": "string"},
         domain="file",
         risk_level="readonly",
-        examples=[{"skill": "file.info", "arguments": {"path": "E:\\assetclaw-matting-bot\\README.md"}}],
-        natural_language_examples=["查看 E:\\assetclaw-matting-bot\\README.md 的信息"],
+        examples=[{"skill": "file.info", "arguments": {"path": "{project_root}\\README.md"}}],
+        natural_language_examples=["查看 {project_root}\\README.md 的信息"],
     ),
     _skill(
         "file.find_name",
@@ -710,8 +721,8 @@ SKILLS: list[dict[str, Any]] = [
         {"path": "string", "max_depth": "integer optional", "max_items": "integer optional"},
         domain="file",
         risk_level="readonly",
-        examples=[{"skill": "file.tree", "arguments": {"path": "E:\\assetclaw-matting-bot\\scripts", "max_depth": 2}}],
-        natural_language_examples=["显示 E:\\assetclaw-matting-bot 目录树"],
+        examples=[{"skill": "file.tree", "arguments": {"path": "{project_root}\\scripts", "max_depth": 2}}],
+        natural_language_examples=["显示 {project_root} 目录树"],
     ),
     _skill(
         "file.recent",
@@ -732,7 +743,7 @@ SKILLS: list[dict[str, Any]] = [
         {"path": "string", "kind": "string optional", "extensions": "list optional", "recursive": "boolean optional", "max_results": "integer optional"},
         domain="file",
         risk_level="readonly",
-        natural_language_examples=["列出 E:\\ 下面的图片文件", "找出 E:\\assetclaw-matting-bot 里的表格文件"],
+        natural_language_examples=["列出 {allowed_root} 下面的图片文件", "找出 {project_root} 里的表格文件"],
     ),
     _skill(
         "file.copy_as",
@@ -742,7 +753,7 @@ SKILLS: list[dict[str, Any]] = [
         {"src_path": "string", "new_name": "string", "dst_dir": "string optional", "overwrite": "boolean optional"},
         domain="file",
         risk_level="write_safe",
-        natural_language_examples=["把 E:\\a.png 复制一份到原目录并改名为 a_backup.png"],
+        natural_language_examples=["把 {allowed_root}a.png 复制一份到原目录并改名为 a_backup.png"],
     ),
     _skill(
         "file.duplicate_same_dir",
@@ -752,7 +763,7 @@ SKILLS: list[dict[str, Any]] = [
         {"src_path": "string", "suffix": "string optional", "overwrite": "boolean optional"},
         domain="file",
         risk_level="write_safe",
-        natural_language_examples=["把 E:\\a.png 在原路径复制一份，后缀加 _bak"],
+        natural_language_examples=["把 {allowed_root}a.png 在原路径复制一份，后缀加 _bak"],
     ),
     _skill(
         "file.zip_paths",
@@ -762,7 +773,7 @@ SKILLS: list[dict[str, Any]] = [
         {"paths": "list[string]", "zip_path": "string", "overwrite": "boolean optional"},
         domain="file",
         risk_level="write_caution",
-        natural_language_examples=["把 E:\\assetclaw-matting-bot\\storage\\batch_outputs 打包成 zip"],
+        natural_language_examples=["把 {project_root}\\storage\\batch_outputs 打包成 zip"],
     ),
     _skill(
         "feishu.zip_and_send",
@@ -822,7 +833,7 @@ SKILLS: list[dict[str, Any]] = [
         {"path": "string", "content": "string", "encoding": "string optional", "create": "boolean optional"},
         domain="file",
         risk_level="write_safe",
-        natural_language_examples=["往 E:\\log.txt 追加一行"],
+        natural_language_examples=["往 {allowed_root}log.txt 追加一行"],
     ),
     _skill(
         "file.hash",
@@ -926,7 +937,7 @@ SKILLS: list[dict[str, Any]] = [
         {"path": "string", "query": "string", "extensions": "list optional", "max_results": "integer optional", "max_depth": "integer optional"},
         domain="file",
         risk_level="readonly",
-        natural_language_examples=["在 E:\\project 里搜索 TODO", "搜索 README 里包含 ComfyUI 的地方"],
+        natural_language_examples=["在 {allowed_root}project 里搜索 TODO", "搜索 README 里包含 ComfyUI 的地方"],
     ),
     _skill(
         "file.preview",
@@ -936,7 +947,7 @@ SKILLS: list[dict[str, Any]] = [
         {"path": "string", "max_chars": "integer optional", "tail": "boolean optional"},
         domain="file",
         risk_level="readonly",
-        natural_language_examples=["预览 E:\\a.txt", "看一下这个日志最后几行"],
+        natural_language_examples=["预览 {allowed_root}a.txt", "看一下这个日志最后几行"],
     ),
     _skill(
         "file.count",
@@ -946,7 +957,7 @@ SKILLS: list[dict[str, Any]] = [
         {"path": "string", "recursive": "boolean optional", "max_depth": "integer optional"},
         domain="file",
         risk_level="readonly",
-        natural_language_examples=["统计 E:\\input 里有多少图片", "数一下这个目录里的文件类型"],
+        natural_language_examples=["统计 {allowed_root}input 里有多少图片", "数一下这个目录里的文件类型"],
     ),
     _skill(
         "file.manifest",
@@ -956,7 +967,7 @@ SKILLS: list[dict[str, Any]] = [
         {"path": "string", "output_path": "string", "recursive": "boolean optional", "max_items": "integer optional", "format": "json or csv optional"},
         domain="file",
         risk_level="write_safe",
-        natural_language_examples=["把 E:\\input 的文件清单导出成 E:\\input_manifest.csv"],
+        natural_language_examples=["把 {allowed_root}input 的文件清单导出成 {allowed_root}input_manifest.csv"],
     ),
     _skill(
         "archive.list",
@@ -1019,7 +1030,7 @@ SKILLS: list[dict[str, Any]] = [
         {"path": "string", "recursive": "boolean optional", "max_results": "integer optional", "max_depth": "integer optional"},
         domain="image",
         risk_level="readonly",
-        natural_language_examples=["列出 E 盘的图片文件", "递归查看 E:\\assetclaw-matting-bot 里的图片"],
+        natural_language_examples=["列出 授权盘的图片文件", "递归查看 {project_root} 里的图片"],
     ),
     _skill(
         "image.info",
@@ -1029,7 +1040,7 @@ SKILLS: list[dict[str, Any]] = [
         {"path": "string"},
         domain="image",
         risk_level="readonly",
-        natural_language_examples=["查看 E:\\a.png 的图片尺寸"],
+        natural_language_examples=["查看 {allowed_root}a.png 的图片尺寸"],
     ),
     _skill(
         "image.batch_info",
@@ -1049,7 +1060,7 @@ SKILLS: list[dict[str, Any]] = [
         {"src_path": "string", "dst_path": "string", "format": "string optional", "overwrite": "boolean optional"},
         domain="image",
         risk_level="write_safe",
-        natural_language_examples=["把 E:\\a.png 转成 E:\\a.jpg"],
+        natural_language_examples=["把 {allowed_root}a.png 转成 {allowed_root}a.jpg"],
     ),
     _skill(
         "image.resize",
@@ -1059,7 +1070,7 @@ SKILLS: list[dict[str, Any]] = [
         {"src_path": "string", "dst_path": "string", "width": "integer", "height": "integer", "overwrite": "boolean optional"},
         domain="image",
         risk_level="write_safe",
-        natural_language_examples=["把 E:\\a.png 缩放成 1024x1024"],
+        natural_language_examples=["把 {allowed_root}a.png 缩放成 1024x1024"],
     ),
     # ---- feishu delivery skills -------------------------------------------
     _skill(
@@ -1070,7 +1081,7 @@ SKILLS: list[dict[str, Any]] = [
         {"path": "string", "file_name": "string optional"},
         domain="feishu",
         risk_level="egress_caution",
-        natural_language_examples=["把 E:\\assetclaw-matting-bot\\README.md 通过飞书发给我"],
+        natural_language_examples=["把 {project_root}\\README.md 通过飞书发给我"],
     ),
     _skill(
         "feishu.send_file_by_name",
@@ -1080,7 +1091,7 @@ SKILLS: list[dict[str, Any]] = [
         {"name_pattern": "string", "search_root": "string optional", "file_name": "string optional", "max_depth": "integer optional"},
         domain="feishu",
         risk_level="egress_caution",
-        natural_language_examples=["把 E 盘里 img_v3_02125_53d2b164...608g.png 这个文件发给我"],
+        natural_language_examples=["把 授权盘里 img_v3_02125_53d2b164...608g.png 这个文件发给我"],
     ),
     _skill(
         "feishu.send_image",
@@ -1090,7 +1101,7 @@ SKILLS: list[dict[str, Any]] = [
         {"path": "string"},
         domain="feishu",
         risk_level="egress_caution",
-        natural_language_examples=["把 E:\\1.png 用图片形式发给我", "预览一下刚刚那张图"],
+        natural_language_examples=["把 {allowed_root}1.png 用图片形式发给我", "预览一下刚刚那张图"],
     ),
     _skill(
         "feishu.send_image_by_name",
@@ -1100,7 +1111,7 @@ SKILLS: list[dict[str, Any]] = [
         {"name_pattern": "string", "search_root": "string optional", "max_depth": "integer optional"},
         domain="feishu",
         risk_level="egress_caution",
-        natural_language_examples=["把 E 盘里 1.png 用图片形式发给我"],
+        natural_language_examples=["把 授权盘里 1.png 用图片形式发给我"],
     ),
     # ---- translation skills -------------------------------------------------
     _skill(
@@ -1246,9 +1257,9 @@ SKILLS: list[dict[str, Any]] = [
         risk_level="write_safe",
         examples=[{
             "skill": "matting.batch_create",
-            "arguments": {"input_dir": "E:\\assetclaw-matting-bot\\storage\\batch_inputs"},
+            "arguments": {"input_dir": "{project_root}\\storage\\batch_inputs"},
         }],
-        natural_language_examples=["用 E:\\assetclaw-matting-bot\\storage\\batch_inputs 创建一个抠图批次"],
+        natural_language_examples=["用 {project_root}\\storage\\batch_inputs 创建一个抠图批次"],
     ),
     _skill(
         "matting.batch_start",
@@ -1448,7 +1459,7 @@ SKILLS: list[dict[str, Any]] = [
         },
         domain="comfyui",
         risk_level="readonly",
-        natural_language_examples=["预览 E:\\input 到 E:\\output 的抠图任务"],
+        natural_language_examples=["预览 {allowed_root}input 到 {allowed_root}output 的抠图任务"],
     ),
     _skill(
         "comfyui.workflow_select",
@@ -1491,7 +1502,7 @@ SKILLS: list[dict[str, Any]] = [
         domain="comfyui",
         risk_level="write_safe",
         requires_confirmation=True,
-        natural_language_examples=["开始批量抠图，输入 E:\\input，输出 E:\\output，保留目录结构"],
+        natural_language_examples=["开始批量抠图，输入 {allowed_root}input，输出 {allowed_root}output，保留目录结构"],
     ),
     _skill(
         "comfyui.run_pause",
@@ -1570,7 +1581,7 @@ SKILLS: list[dict[str, Any]] = [
         },
         domain="comfyui",
         risk_level="write_safe",
-        natural_language_examples=["把后面那个任务的输入路径改成 E:\\input2", "把这个任务改用另一个工作流"],
+        natural_language_examples=["把后面那个任务的输入路径改成 {allowed_root}input2", "把这个任务改用另一个工作流"],
     ),
     _skill(
         "comfyui.run_sync_outputs",
@@ -1601,7 +1612,7 @@ SKILLS: list[dict[str, Any]] = [
         {"input_dir": "string", "output_dir": "string", "recursive": "boolean optional", "max_images": "integer optional"},
         domain="cherry",
         risk_level="readonly",
-        natural_language_examples=["预览 E:\\output 到 E:\\smooth_output 的 Cherry 平滑任务"],
+        natural_language_examples=["预览 {allowed_root}output 到 {allowed_root}smooth_output 的 Cherry 平滑任务"],
     ),
     _skill(
         "cherry.run_start",
@@ -1658,7 +1669,7 @@ SKILLS: list[dict[str, Any]] = [
         domain="cherry",
         risk_level="write_safe",
         requires_confirmation=True,
-        natural_language_examples=["对 E:\\output 做 Cherry 平滑处理，输出到 E:\\smooth_output"],
+        natural_language_examples=["对 {allowed_root}output 做 Cherry 平滑处理，输出到 {allowed_root}smooth_output"],
     ),
     _skill(
         "cherry.run_status",
@@ -1710,7 +1721,7 @@ SKILLS: list[dict[str, Any]] = [
         domain="animation",
         risk_level="readonly",
         natural_language_examples=[
-            "看一下 E:\\animation_automation\\2026-06-02 动画流程现在有多少帧",
+            "看一下 {animation_root}\\2026-06-02 动画流程现在有多少帧",
             "动画自动化目录当前状态",
             "matte 和 smooth 数量对不对",
         ],
@@ -1734,7 +1745,7 @@ SKILLS: list[dict[str, Any]] = [
         risk_level="write_safe",
         requires_confirmation=True,
         natural_language_examples=[
-            "基于 E:\\animation_automation\\2026-06-02\\matte 再做一次平滑，输出到 smooth",
+            "基于 {animation_root}\\2026-06-02\\matte 再做一次平滑，输出到 smooth",
             "对当前动画 matte 重新跑最新 Cherry 平滑",
         ],
     ),
@@ -1754,8 +1765,8 @@ SKILLS: list[dict[str, Any]] = [
         risk_level="write_caution",
         requires_confirmation=True,
         natural_language_examples=[
-            "E:\\animation_automation\\2026-06-02 从 videos 全部重抽帧重新抠图和平滑",
-            "动画流程全部重做，输入是 E:\\animation_automation\\2026-06-02",
+            "{animation_root}\\2026-06-02 从 videos 全部重抽帧重新抠图和平滑",
+            "动画流程全部重做，输入是 {animation_root}\\2026-06-02",
         ],
     ),
     _skill(
@@ -2160,7 +2171,7 @@ SKILLS: list[dict[str, Any]] = [
         },
         domain="frame",
         risk_level="readonly",
-        natural_language_examples=["预览飞书抽帧任务，输出到 E:\\output_frames"],
+        natural_language_examples=["预览飞书抽帧任务，输出到 {allowed_root}output_frames"],
     ),
     _skill(
         "frame.run_start",
@@ -2186,7 +2197,7 @@ SKILLS: list[dict[str, Any]] = [
         domain="frame",
         risk_level="write_safe",
         requires_confirmation=True,
-        natural_language_examples=["开始飞书抽帧，下载到 E:\\raw_videos，抽帧输出 E:\\output_frames"],
+        natural_language_examples=["开始飞书抽帧，下载到 {allowed_root}raw_videos，抽帧输出 {allowed_root}output_frames"],
     ),
     _skill(
         "frame.run_status",

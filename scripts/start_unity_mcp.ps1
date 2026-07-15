@@ -10,7 +10,8 @@ chcp 65001 | Out-Null
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 $OutputEncoding = [System.Text.UTF8Encoding]::new()
 
-Set-Location "E:\assetclaw-matting-bot"
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+Set-Location $ProjectRoot
 New-Item -ItemType Directory -Force -Path "logs" | Out-Null
 
 function Get-UvxExe {

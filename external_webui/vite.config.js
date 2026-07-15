@@ -30,6 +30,22 @@ function readParentEnv(name) {
   return "";
 }
 
+function runtimeConfig() {
+  const projectRoot = path.resolve(process.cwd(), "..");
+  const parent = path.dirname(projectRoot);
+  const animationRoot = process.env.ANIMATION_ROOT || readParentEnv("ANIMATION_ROOT") || path.join(parent, "animation_auto");
+  const explicitUnity = process.env.UNITY_PROJECT_DIR || readParentEnv("UNITY_PROJECT_DIR");
+  let unityProject = explicitUnity || path.join(parent, "UnityProject");
+  if (!explicitUnity && fs.existsSync(parent)) {
+    const discovered = fs.readdirSync(parent, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(parent, entry.name))
+      .find((candidate) => fs.existsSync(path.join(candidate, "Assets")) && fs.existsSync(path.join(candidate, "ProjectSettings")));
+    if (discovered) unityProject = discovered;
+  }
+  return { ok: true, animation_root: animationRoot, unity_project: unityProject };
+}
+
 function windowsPathDialog(mode = "dir", current = "") {
   const initial = String(current || "").replaceAll("/", "\\").replace(/'/g, "''");
   const isFile = mode === "file";
@@ -99,7 +115,7 @@ function animationFlowSnapshot(limit = 20, includeFinished = true) {
 }
 
 function workspaceSummary(rootRaw = "") {
-  const root = path.resolve(String(rootRaw || "E:/animation_automation").replaceAll("\\", "/"));
+  const root = path.resolve(String(rootRaw || runtimeConfig().animation_root).replaceAll("\\", "/"));
   const routed = (stage) => ["scene", "emoji", "story"].map((kind) => path.join(root, kind, stage));
   const specs = [
     ["videos", "视频", routed("videos"), new Set([".mp4", ".mov", ".avi", ".mkv", ".webm"])],
@@ -287,13 +303,17 @@ function localAnimationFlowApiPlugin() {
     name: "assetclaw-local-animation-flow-api",
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
-        if (!req.url?.startsWith("/api/local/animation-flow-runs") && !req.url?.startsWith("/api/local/workspace-summary")) {
+        if (!req.url?.startsWith("/api/local/animation-flow-runs") && !req.url?.startsWith("/api/local/workspace-summary") && !req.url?.startsWith("/api/local/runtime-config")) {
           next();
           return;
         }
         res.setHeader("Content-Type", "application/json; charset=utf-8");
         try {
           const url = new URL(req.url || "/", "http://127.0.0.1");
+          if (url.pathname === "/api/local/runtime-config") {
+            res.end(JSON.stringify(runtimeConfig()));
+            return;
+          }
           if (url.pathname === "/api/local/workspace-summary") {
             res.end(JSON.stringify(workspaceSummary(url.searchParams.get("root") || "")));
             return;
@@ -325,13 +345,17 @@ export default defineConfig(({ mode }) => {
       allowedHosts: [".trycloudflare.com"],
       configureServer(server) {
         server.middlewares.use((req, res, next) => {
-          if (!req.url?.startsWith("/api/local/animation-flow-runs") && !req.url?.startsWith("/api/local/workspace-summary")) {
+          if (!req.url?.startsWith("/api/local/animation-flow-runs") && !req.url?.startsWith("/api/local/workspace-summary") && !req.url?.startsWith("/api/local/runtime-config")) {
             next();
             return;
           }
           res.setHeader("Content-Type", "application/json; charset=utf-8");
           try {
             const url = new URL(req.url || "/", "http://127.0.0.1");
+            if (url.pathname === "/api/local/runtime-config") {
+              res.end(JSON.stringify(runtimeConfig()));
+              return;
+            }
             if (url.pathname === "/api/local/workspace-summary") {
               res.end(JSON.stringify(workspaceSummary(url.searchParams.get("root") || "")));
               return;

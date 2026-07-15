@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -25,6 +26,18 @@ class CherryHtmlResult:
     feather_enabled: bool
     steps: list[str]
     downloaded_zip: Path
+
+
+def validate_cherry_html_runtime(html_path: Path, chrome_path: Path | None = None) -> dict[str, str]:
+    source = Path(html_path)
+    if not source.is_file():
+        raise FileNotFoundError(f"Cherry algorithm HTML not found: {source}")
+    html = source.read_text(encoding="utf-8", errors="ignore")
+    missing = [marker for marker in ("file-input", "btn-process", "btn-download") if marker not in html]
+    if missing:
+        raise ValueError(f"Cherry algorithm HTML is missing required controls: {', '.join(missing)}")
+    browser = _resolve_chrome(chrome_path)
+    return {"html_path": str(source), "browser_path": str(browser)}
 
 
 class CdpClient:
@@ -284,14 +297,16 @@ def _resolve_chrome(chrome_path: Path | None) -> Path:
     candidates = []
     if chrome_path:
         candidates.append(Path(chrome_path))
-    candidates.extend(
-        [
-            Path("C:/Program Files/Google/Chrome/Application/chrome.exe"),
-            Path("C:/Program Files (x86)/Google/Chrome/Application/chrome.exe"),
-            Path("C:/Program Files/Microsoft/Edge/Application/msedge.exe"),
-            Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"),
-        ]
-    )
+    for env_name in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        base = os.environ.get(env_name)
+        if not base:
+            continue
+        candidates.extend(
+            [
+                Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe",
+                Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+            ]
+        )
     for candidate in candidates:
         if candidate.exists():
             return candidate

@@ -15,7 +15,7 @@ from assetclaw_matting.skills.unity_import_skills import preview as unity_previe
 
 
 def _unity_ready_fixture() -> Path:
-    root = Path("E:/assetclaw-matting-bot/storage/debug/test_unity_ready")
+    root = Path.cwd() / "storage/debug/test_unity_ready"
     shutil.rmtree(root, ignore_errors=True)
     scene = root / "scene"
     frames = scene / "frames" / "heather-idle"
@@ -46,12 +46,12 @@ def test_animation_flow_registry_and_router() -> None:
 
     compact = LocalCommandBrain()._infer_tool_calls("动画自动化20260610 迭代")
     assert compact[0].skill == "animation_flow.start"
-    assert compact[0].arguments["date_root"] == r"E:\animation_automation\2026-06-10"
+    assert Path(compact[0].arguments["date_root"]) == settings.animation_root / "2026-06-10"
     assert compact[0].arguments["unity_import_mode"] == "iteration"
 
     priority = LocalCommandBrain()._infer_tool_calls("动画自动化20260612 替换 优先 casualheather")
     assert priority[0].skill == "animation_flow.start"
-    assert priority[0].arguments["date_root"] == r"E:\animation_automation\2026-06-12"
+    assert Path(priority[0].arguments["date_root"]) == settings.animation_root / "2026-06-12"
     assert priority[0].arguments["unity_import_mode"] == "iteration"
     assert priority[0].arguments["priority_characters"] == ["casualheather"]
 
@@ -65,7 +65,14 @@ def test_animation_flow_registry_and_router() -> None:
 
 
 def test_animation_flow_preview_formats_seven_steps() -> None:
-    payload = run_preview(date_root="E:/animation_automation/2026-06-09", unity_import_mode="iteration")
+    workflow = Path.cwd() / "storage" / "debug" / "animation_preview_workflow.json"
+    workflow.parent.mkdir(parents=True, exist_ok=True)
+    workflow.write_text('{"1":{"class_type":"LoadImage","inputs":{"image":""}}}', encoding="utf-8")
+    payload = run_preview(
+        date_root=str(settings.animation_root / "2026-06-09"),
+        unity_import_mode="iteration",
+        workflow_path=str(workflow),
+    )
     text = format_skill_results([{"ok": True, "skill": "animation_flow.preview", "result": payload}])
 
     assert len(payload["stages"]) == 7
@@ -94,14 +101,14 @@ def test_animation_flow_cherry_route_presets() -> None:
     assert emoji["resize_width"] == 256
     assert emoji["resize_height"] == 256
     assert emoji["use_shadow"] is False
-    assert emoji["use_resize2"] is False
+    assert emoji["use_resize2"] is True
     assert emoji["use_smooth"] is False
 
     assert story is not None
     assert story["resize_width"] == 256
     assert story["resize_height"] == 256
     assert story["use_shadow"] is False
-    assert story["use_resize2"] is False
+    assert story["use_resize2"] is True
     assert story["use_smooth"] is False
 
     assert temporal is not None
@@ -109,15 +116,16 @@ def test_animation_flow_cherry_route_presets() -> None:
 
 
 def test_animation_flow_locks_configured_comfyui_workflow(monkeypatch) -> None:
-    workflow = Path("E:/assetclaw-matting-bot/storage/debug/current_animation_workflow.json")
+    workflow = Path.cwd() / "storage/debug/current_animation_workflow.json"
     workflow.parent.mkdir(parents=True, exist_ok=True)
     workflow.write_text('{"1":{"class_type":"LoadImage","inputs":{"image":""}}}', encoding="utf-8")
 
     monkeypatch.setattr(settings, "comfyui_workflow_path", workflow)
     monkeypatch.setattr(animation_flow_skills, "_start_worker", lambda _run_id: None)
 
-    preview = animation_flow_skills.run_preview(date_root="E:/animation_automation/2026-06-11")
-    started = animation_flow_skills.run_start(date_root="E:/animation_automation/2026-06-11")
+    date_root = str(settings.animation_root / "2026-06-11")
+    preview = animation_flow_skills.run_preview(date_root=date_root)
+    started = animation_flow_skills.run_start(date_root=date_root)
 
     assert preview["workflow_path"] == str(workflow)
     assert started["workflow_path"] == str(workflow)
@@ -126,9 +134,11 @@ def test_animation_flow_locks_configured_comfyui_workflow(monkeypatch) -> None:
 
 def test_unity_import_preview_reads_unity_ready_and_refuses_when_mcp_off() -> None:
     ready = _unity_ready_fixture()
+    project = ready.parent / "UnityProject"
+    project.mkdir(parents=True, exist_ok=True)
 
-    payload = unity_preview(str(ready), unity_project="D:/Spark/Client", package="scene", mode="iteration", mcp_url="http://127.0.0.1:1/mcp")
-    result = run_import(str(ready), unity_project="D:/Spark/Client", package="scene", mode="iteration", mcp_url="http://127.0.0.1:1/mcp")
+    payload = unity_preview(str(ready), unity_project=str(project), package="scene", mode="iteration", mcp_url="http://127.0.0.1:1/mcp")
+    result = run_import(str(ready), unity_project=str(project), package="scene", mode="iteration", mcp_url="http://127.0.0.1:1/mcp")
 
     assert payload["mode"] == "iteration"
     assert payload["packages"][0]["task_count"] == 1
@@ -139,9 +149,11 @@ def test_unity_import_preview_reads_unity_ready_and_refuses_when_mcp_off() -> No
 
 def test_unity_import_preview_skips_empty_package_without_frames_root() -> None:
     ready = _unity_ready_fixture()
+    project = ready.parent / "UnityProject"
+    project.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(ready / "emoji" / "frames", ignore_errors=True)
 
-    payload = unity_preview(str(ready), unity_project="D:/Spark/Client", package="both", mode="iteration", mcp_url="http://127.0.0.1:1/mcp")
+    payload = unity_preview(str(ready), unity_project=str(project), package="both", mode="iteration", mcp_url="http://127.0.0.1:1/mcp")
 
     packages = {item["package"]: item for item in payload["packages"]}
     assert packages["scene"]["task_count"] == 1
@@ -154,7 +166,7 @@ def test_unity_import_preview_skips_empty_package_without_frames_root() -> None:
 
 
 def test_unity_import_timeout_keeps_runner_for_late_unity_completion(monkeypatch) -> None:
-    root = Path("E:/assetclaw-matting-bot/storage/debug/test_unity_import_timeout")
+    root = Path.cwd() / "storage/debug/test_unity_import_timeout"
     shutil.rmtree(root, ignore_errors=True)
     ready = root / "unity_ready"
     project = root / "UnityProject"
@@ -184,7 +196,7 @@ def test_unity_import_timeout_keeps_runner_for_late_unity_completion(monkeypatch
 
 
 def test_unity_import_skips_runner_when_all_packages_are_empty(monkeypatch) -> None:
-    root = Path("E:/assetclaw-matting-bot/storage/debug/test_unity_import_all_empty")
+    root = Path.cwd() / "storage/debug/test_unity_import_all_empty"
     shutil.rmtree(root, ignore_errors=True)
     ready = root / "unity_ready"
     project = root / "UnityProject"

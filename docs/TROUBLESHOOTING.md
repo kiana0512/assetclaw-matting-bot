@@ -77,8 +77,8 @@ storage\feishu_inbox\日期\会话\
 
 ## 路径被拒绝 (PermissionDenied)
 
-- 路径必须在 `ALLOWED_ROOTS`（默认 `D:`、`E:`、`F:`、`Z:`、指定共享盘 UNC）下，`C:` 不开放
-- 路径不能包含：`.env`、`.ssh`、`AppData`、`Windows`、`Program Files`、`ProgramData`
+- 路径必须在 `ALLOWED_ROOTS` 下；未配置时默认使用项目所在盘
+- 路径不能包含：`.env`、`.ssh`、`Windows`、`$Recycle.Bin`、`System Volume Information`
 - 发送"查看权限说明"可在飞书内查看完整安全边界
 
 ## Cherry 显示 RUNNING 但输出目录为空
@@ -103,7 +103,7 @@ python -c "from assetclaw_matting.skills.cherry_skills import run_start; run_sta
 2. 如果是手动补跑已有 Cherry 任务，用前台 worker：
 
 ```powershell
-C:\Users\lilithgames\miniconda3\envs\assetclaw\python.exe scripts\run_cherry_worker_once.py CHERRY_xxxxxxxxxxxx
+.\.venv\Scripts\python.exe scripts\run_cherry_worker_once.py CHERRY_xxxxxxxxxxxx
 ```
 
 3. 跑完必须确认 `status=DONE`、`completed=total`，再统计输出 PNG 数量和抽样尺寸。

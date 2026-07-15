@@ -178,13 +178,14 @@ def _find_p4_exe() -> str | None:
     found = shutil.which("p4")
     if found:
         return found
-    for candidate in (
-        Path(r"C:\Program Files\Perforce\p4.exe"),
-        Path(r"C:\Program Files (x86)\Perforce\p4.exe"),
-        Path(r"C:\Program Files\Perforce\P4VResources\bin\p4.exe"),
-    ):
-        if candidate.exists():
-            return str(candidate)
+    for env_name in ("PROGRAMFILES", "PROGRAMFILES(X86)"):
+        base = os.environ.get(env_name)
+        if not base:
+            continue
+        for relative in (Path("Perforce") / "p4.exe", Path("Perforce") / "P4VResources" / "bin" / "p4.exe"):
+            candidate = Path(base) / relative
+            if candidate.exists():
+                return str(candidate)
     return None
 
 

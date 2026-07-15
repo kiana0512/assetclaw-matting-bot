@@ -11,7 +11,7 @@ from assetclaw_matting.db.sqlite import init_db
 from assetclaw_matting.skills.comfyui_skills import run_start, run_status
 
 
-ROOT = Path("E:/assetclaw-matting-bot")
+ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "storage/real_pipeline_check/frames_two_for_alpha"
 DST = ROOT / "storage/real_pipeline_check/matte_two_frame_alpha"
 

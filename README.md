@@ -15,7 +15,7 @@ AssetClaw Win3090 Animation Butler 是一个运行在 Windows RTX 3090 服务器
 ## Quick Start
 
 ```powershell
-cd E:\assetclaw-matting-bot
+cd <project-root>
 conda activate assetclaw
 pip install -r requirements.txt
 ```
@@ -72,8 +72,8 @@ conda run -n assetclaw python -m pytest
 查看技能列表
 查看权限说明
 查看当前系统状态
-看看 E 盘有哪些文件
-E:\assetclaw-matting-bot\README.md 是否存在
+看看项目盘有哪些文件
+<project-root>\README.md 是否存在
 ```
 
 ## 当前已实现能力
@@ -92,7 +92,7 @@ E:\assetclaw-matting-bot\README.md 是否存在
 - 视频文件：飞书按“文件”发送 `.mp4/.mov` 后，确认执行再启动；流程为原视频 -> OpenCV 抽帧 -> ComfyUI 抠图 -> Cherry HTML 后处理 -> zip 文件回传。
 - 图片文件/图片消息：收到后无需确认，直接 ComfyUI 抠图 -> Cherry HTML 后处理 -> 处理结果按文件附件回传，避免飞书压缩。
 - 后处理预设：宽高完全相同走正方形 `256x256`，其他比例走长方形 `384x512`；状态回复会带当前预设。
-- 抠图管线：默认使用 `E:\imageclip-pipeline\imageclip` Git 管理的 `ImageClip.json`、LoRA 和 `Cherry_lizi`，启动任务前会快速确认本地管线是否最新。
+- 抠图管线：默认使用项目同级的 `<project-parent>\imageclip`（公共机为 `C:\imageclip`）管理 `ImageClip.json`、LoRA、`Cherry_lizi` 和 Cherry HTML；启动任务前会确认资源及软链接状态。
 
 ### 系统 / 帮助
 - `bot.help` / `bot.skills` / `bot.permissions` / `bot.status` / `bot.errors`
@@ -114,7 +114,8 @@ E:\assetclaw-matting-bot\README.md 是否存在
 ## 安全边界
 
 - 禁止：任意 shell、删除文件、读取 `.env`、访问系统目录
-- 允许路径：`ALLOWED_ROOTS=D:;E:;F:` 下受控操作，`C:` 不开放
+- 允许路径：默认自动使用项目所在盘的根目录；本次公共机部署即为 `C:\`。可用 `ALLOWED_ROOTS` 覆盖
+- 拒绝路径：`.env`、`.ssh`、`Windows`、`$Recycle.Bin`、`System Volume Information`
 - 禁用：Cloudflare Tunnel、ngrok、frp、任何内网穿透工具
 - 事件模式：飞书长连接（WebSocket），无公网暴露
 
@@ -132,4 +133,5 @@ E:\assetclaw-matting-bot\README.md 是否存在
 - [技能权限矩阵](docs/SKILL_PERMISSION_MATRIX.md)
 - [飞书机器人使用说明](docs/FEISHU_BOT_USAGE.md)
 - [动画自动化到 Unity Ready 流程](docs/ANIMATION_UNITY_READY.md)
+- [C 盘公共机迁移与验证](docs/C_DRIVE_MIGRATION.md)
 - [故障排查](docs/TROUBLESHOOTING.md)

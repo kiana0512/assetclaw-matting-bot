@@ -68,10 +68,35 @@ def _agent_url() -> str:
     return _validate_agent_url(_candidate_agent_urls()[0])
 
 
+def _runtime_config() -> dict[str, str]:
+    project_root = ROOT.parent
+    parent = project_root.parent
+    animation_root = Path(os.environ.get("ANIMATION_ROOT") or _read_env_value("ANIMATION_ROOT") or parent / "animation_auto")
+    unity_raw = os.environ.get("UNITY_PROJECT_DIR") or _read_env_value("UNITY_PROJECT_DIR")
+    unity_project = Path(unity_raw) if unity_raw else _discover_unity_project(parent)
+    return {"animation_root": str(animation_root), "unity_project": str(unity_project)}
+
+
+def _discover_unity_project(parent: Path) -> Path:
+    conventional = parent / "UnityProject"
+    try:
+        candidates = [
+            item
+            for item in parent.iterdir()
+            if item.is_dir() and (item / "Assets").is_dir() and (item / "ProjectSettings").is_dir()
+        ]
+    except OSError:
+        candidates = []
+    return sorted(candidates, key=lambda item: item.name.lower())[0] if candidates else conventional
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "AssetClawWebUI/0.1"
 
     def do_GET(self) -> None:
+        if self.path.startswith("/api/local/runtime-config"):
+            self._json({"ok": True, **_runtime_config()})
+            return
         if self.path.startswith("/api/local/animation-flow-runs"):
             self._local_animation_flow_runs()
             return
@@ -226,7 +251,7 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query, keep_blank_values=True)
         root_raw = (qs.get("root") or [""])[0]
-        root = Path(root_raw.replace("/", "\\")) if root_raw else Path("E:/animation_automation")
+        root = Path(root_raw.replace("/", "\\")) if root_raw else Path(_runtime_config()["animation_root"])
         def routed(stage: str) -> list[Path]:
             return [root / kind / stage for kind in ("scene", "emoji", "story")]
 

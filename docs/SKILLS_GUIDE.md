@@ -1,10 +1,10 @@
 # Skills Guide
 
-机器人只能通过 skills 操作本机和指定共享盘。默认允许路径来自 `ALLOWED_ROOTS`，当前默认是 `D:`、`E:`、`F:`、映射共享盘 `Z:`，以及 `\\audioshare.lilith.com\AIart\公共机共享\抠图`。`C:` 不开放。`.env`、`.ssh`、`Windows`、`AppData`、`Program Files`、`ProgramData`、`$Recycle.Bin`、`System Volume Information` 永久拒绝访问。
+机器人只能通过 skills 操作本机和配置的共享盘。未设置 `ALLOWED_ROOTS` 时默认允许项目所在盘；公共机项目位于 C 盘，因此允许 `C:\`。`.env`、`.ssh`、`Windows`、`$Recycle.Bin`、`System Volume Information` 始终拒绝访问。
 
 共享盘可以列目录、复制、同步文件；只是抠图任务不直接在共享盘上计算，会先同步到本地工作区，跑完再同步回共享盘。
 
-当前共享盘映射：
+共享盘只有在 `.env` 配置后才启用，例如：
 
 ```text
 Z:\ = \\audioshare.lilith.com\AIart
@@ -91,7 +91,7 @@ storage\feishu_inbox\日期\会话\
 保存后可以继续引用“刚刚那张图/视频/文件”做处理：
 
 ```text
-保存到 E:\images
+保存到 <allowed-root>\images
 查看这张图的尺寸
 预览发回给我
 分析这张图里有什么
@@ -105,7 +105,7 @@ storage\feishu_inbox\日期\会话\
 
 ```text
 查看 GPU 状态和当前任务
-开始飞书抽帧，下载到 E:\raw_videos，抽帧输出 E:\output_frames
+开始飞书抽帧，下载到 <allowed-root>\raw_videos，抽帧输出 <allowed-root>\output_frames
 把刚刚那张图里的文字翻译成中文
 ```
 
@@ -137,7 +137,7 @@ storage\feishu_inbox\日期\会话\
 确认流程：
 
 ```text
-用户：开始批量抠图 E:\input 到 E:\output
+用户：开始批量抠图 <allowed-root>\input 到 <allowed-root>\output
 机器人：需要确认：comfyui.run_start
 回复：确认执行 CONFIRM_xxxxx
 用户：确认执行 CONFIRM_xxxxx
@@ -212,55 +212,55 @@ storage\feishu_inbox\日期\会话\
 ```text
 看看 E 盘有哪些文件
 看看 E 盘有哪些图片
-递归查看 E:\assetclaw-matting-bot 里的图片
-找出 E:\assetclaw-matting-bot 里的表格文件
+递归查看 <project-root> 里的图片
+找出 <project-root> 里的表格文件
 搜索文件名包含 batch 的文件
 列出 Z 盘有哪些文件
-复制 Z:\公共机共享\抠图\input\a.png 到 E:\assetclaw-matting-bot\storage\debug\a.png
+复制 Z:\公共机共享\抠图\input\a.png 到 <project-root>\storage\debug\a.png
 把 Z:\公共机共享\抠图\input\a.png 通过飞书发给我
 把共享盘 input 文件夹压缩成 zip 并发送给我
 把这句话翻译成英文：今天辛苦了
 把刚刚发的图片里的文字翻译成中文
 提取刚刚那张图里的文字
-查看 E:\assetclaw-matting-bot\README.md 的信息
+查看 <project-root>\README.md 的信息
 查看 D E F 盘空间
-把 D:\assets 复制到 F:\backup\assets
-把这几个文件批量复制到 F:\backup
+把 D:\assets 复制到 <secondary-root>\backup\assets
+把这几个文件批量复制到 <secondary-root>\backup
 把刚才列出的图片按顺序改名为 1 2 3 4 5
-把 E:\a.png 转成 jpg
-把 E:\a.png 缩放成 1024x1024
-把 F:\assets.zip 解压到 F:\assets
+把 <allowed-root>\a.png 转成 jpg
+把 <allowed-root>\a.png 缩放成 1024x1024
+把 <secondary-root>\assets.zip 解压到 <secondary-root>\assets
 看看这个 zip 里面有哪些文件
-统计 E:\input 里有多少图片
-在 E:\assetclaw-matting-bot 里搜索 ComfyUI
-把 E:\input 的文件清单导出成 E:\input_manifest.csv
+统计 <allowed-root>\input 里有多少图片
+在 <project-root> 里搜索 ComfyUI
+把 <allowed-root>\input 的文件清单导出成 <allowed-root>\input_manifest.csv
 查看这个 CSV 有哪些列
-计算 F:\package.zip 的 sha256
+计算 <secondary-root>\package.zip 的 sha256
 读取 D:\project\README.md 前 2000 个字符
-把 E:\a.png 复制一份并改名为 a_bak.png
-把 E:\a.png 在原路径复制一份，后缀加 _bak
-把 E:\assetclaw-matting-bot\README.md 通过飞书发给我
+把 <allowed-root>\a.png 复制一份并改名为 a_bak.png
+把 <allowed-root>\a.png 在原路径复制一份，后缀加 _bak
+把 <project-root>\README.md 通过飞书发给我
 把 E 盘里 img_v3_02125_53d2b164...608g.png 发给我
-用 E:\assetclaw-matting-bot\storage\batch_inputs 创建一个抠图批次
+用 <project-root>\storage\batch_inputs 创建一个抠图批次
 选择 软边缘测试-动画批量.json 作为抠图工作流
-预览 E:\input 到 E:\output 的抠图任务
+预览 <allowed-root>\input 到 <allowed-root>\output 的抠图任务
 开始批量抠图
 现在 ComfyUI 跑到多少张了
 我们现在有哪些任务
-把这个任务的输入路径改成 E:\input2
+把这个任务的输入路径改成 <allowed-root>\input2
 暂停当前抠图任务
 继续当前抠图任务
 终止当前抠图任务
 删除这个失败的 ComfyUI 任务记录
 同步这个 ComfyUI 任务的输出结果 COMFY_XXXXXXXXXXXX
 查看 Cherry 帧序列工具状态
-预览 E:\output 到 E:\smooth_output 的 Cherry 平滑任务
-对 E:\output 做 Cherry 平滑处理，输出到 E:\smooth_output
+预览 <allowed-root>\output 到 <allowed-root>\smooth_output 的 Cherry 平滑任务
+对 <allowed-root>\output 做 Cherry 平滑处理，输出到 <allowed-root>\smooth_output
 现在 Cherry 任务跑到哪里了
 我们现在有哪些平滑任务
 终止当前 Cherry 任务
 查看飞书抽帧工具状态
-开始飞书抽帧，下载到 E:\raw_videos，抽帧输出 E:\output_frames
+开始飞书抽帧，下载到 <allowed-root>\raw_videos，抽帧输出 <allowed-root>\output_frames
 抽帧任务跑到哪里了
 开始动画自动化流程
 动画自动化20260610 迭代
@@ -276,26 +276,26 @@ storage\feishu_inbox\日期\会话\
 ComfyUI 状态
 ```
 
-默认本地批量抠图使用 `E:\input` 到 `E:\output`，递归处理图片，并保留输入目录结构。启动前会返回任务摘要并要求确认；运行中采用安静进度推送，状态变化/明显进度变化/完成/失败会主动通知，用户主动问进度会立即返回。
+默认本地批量抠图使用 `<allowed-root>\input` 到 `<allowed-root>\output`，递归处理图片，并保留输入目录结构。启动前会返回任务摘要并要求确认；运行中采用安静进度推送，状态变化/明显进度变化/完成/失败会主动通知，用户主动问进度会立即返回。
 
-Cherry 帧序列处理工具位于 `E:\assetclaw-matting-bot\Cherry_帧序列处理工具`。Agent 调用时会递归读取输入目录图片，按父文件夹分组做时序 Alpha 平滑、缩放、锐化，输出到目标目录并保留相同相对结构。实际处理使用秋叶环境 `C:\Users\lilithgames\Downloads\ComfyUI-aki-v3\python\python.exe`，不要求 bot 的 conda 环境安装 torch。启动前会给图片数、序列数、参数摘要并要求确认。
+Cherry 帧序列处理工具位于 `<project-root>\Cherry_帧序列处理工具`。Agent 调用时会递归读取输入目录图片，按父文件夹分组做时序 Alpha 平滑、缩放、锐化，输出到目标目录并保留相同相对结构。实际处理使用秋叶环境 `<comfyui-root>\python\python.exe`，不要求 bot 的 conda 环境安装 torch。启动前会给图片数、序列数、参数摘要并要求确认。
 
 Cherry / animation flow 这类长任务不能用短生命周期的 `python -c "run_start(...)"` 当作真实执行方式。`run_start` 会在当前进程里启动后台 worker/thread；如果 `python -c` 进程立刻退出，数据库可能显示 `RUNNING`，但输出目录会保持空、进度停在 `0/total`。手动补跑或测试时必须使用常驻 Gateway/Agent，或使用前台 worker，例如：
 
 ```powershell
-C:\Users\lilithgames\miniconda3\envs\assetclaw\python.exe scripts\run_cherry_worker_once.py CHERRY_xxxxxxxxxxxx
+.\.venv\Scripts\python.exe scripts\run_cherry_worker_once.py CHERRY_xxxxxxxxxxxx
 ```
 
 验收 Cherry 输出时必须检查 `cherry.run_status` 已到 `DONE`，并确认输出 PNG 数量和关键样本尺寸。
 
-飞书抽帧工具位于 `E:\assetclaw-matting-bot\feishu_frame_tool`。完整动画自动化流程现在固定为 6 步：飞书下载、抽帧、抠图、unity_ready、Unity 插件导入/迭代、P4 shelve-only。Cherry 仍可单独补跑，但不再属于主流程。飞书表格进度只跳过 `已完成` 和 `不处理`，其他状态都会重新下载并抽帧。总流程会保存每个子任务 run_id，方便单独查进度和返工。
+飞书抽帧工具位于 `<project-root>\feishu_frame_tool`。完整动画自动化流程现在固定为 6 步：飞书下载、抽帧、抠图、unity_ready、Unity 插件导入/迭代、P4 shelve-only。Cherry 仍可单独补跑，但不再属于主流程。飞书表格进度只跳过 `已完成` 和 `不处理`，其他状态都会重新下载并抽帧。总流程会保存每个子任务 run_id，方便单独查进度和返工。
 
 Unity 附加工具已独立 skills 化，但暂不并入 6 步主流程：
 
 - `unity_tools.atlas_status` / `unity_tools.atlas_report` 对应 `Assets/Modules/UepUtility/SpriteAtlasGen/Editor/SpriteAtlasGeneratorTool.cs`，用于生成和读取 `Assets/TATest/AtlasSizeReport.json` 图集体积统计。
-- `unity_tools.rename_preview` / `unity_tools.rename_run` 对应 `E:\assetclaw-matting-bot\anim-texture-rename-pipeline`，用于动画贴图重命名流程的预览和执行。
+- `unity_tools.rename_preview` / `unity_tools.rename_run` 对应 `<project-root>\anim-texture-rename-pipeline`，用于动画贴图重命名流程的预览和执行。
 - 写入类动作仍走二次确认；这些工具只作为单独能力调用，不影响动画自动化 6 步主线。
 
 ## 暂不实现
 
-任意 shell、格式化磁盘、分区、改盘符、访问 C 盘、访问密钥文件、内网穿透暂不接入。删除和清空目录已接入，但必须二次确认。真实 GPU / P4 后续接入时默认走二次确认。
+任意 shell、格式化磁盘、分区、改盘符、访问 Windows 系统目录、访问密钥文件、内网穿透暂不接入。删除和清空目录已接入，但必须二次确认。真实 GPU / P4 后续接入时默认走二次确认。

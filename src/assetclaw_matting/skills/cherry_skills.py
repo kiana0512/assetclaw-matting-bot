@@ -1,58 +1,19 @@
 from __future__ import annotations
 
-import importlib.util
-import inspect
 import json
-import subprocess
 import threading
 import time
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 
 from assetclaw_matting.skills.media_skills import IMAGE_EXTS
 from assetclaw_matting.skills.security import validate_path
 
 
-_MODULE: ModuleType | None = None
 _WORKER_RUNS: set[str] = set()
-_AUTO_PROFILE_TOLERANCE = 0.01
-_PROFILE_OVERRIDE_KEYS = {
-    "use_denoise",
-    "denoise_threshold",
-    "denoise_radius",
-    "use_shadow",
-    "use_blur",
-    "blur_radius",
-    "blur_sigma",
-    "use_resize1",
-    "resize1_width",
-    "resize1_height",
-    "use_sharp1",
-    "sharp1_amount",
-    "sharp1_radius",
-    "sharp1_threshold",
-    "sharp1_shrink",
-    "use_resize2",
-    "resize2_width",
-    "resize2_height",
-    "use_sharp2",
-    "sharp2_amount",
-    "sharp2_radius",
-    "sharp2_threshold",
-    "sharp2_shrink",
-    "use_resize",
-    "resize_width",
-    "resize_height",
-    "use_sharpen",
-    "sharpen_amount",
-    "sharpen_radius",
-    "sharpen_threshold",
-    "sharpen_shrink",
-}
 _MONITORING_RUNS: set[str] = set()
 
 
@@ -66,12 +27,21 @@ def _run_id() -> str:
 
 def info() -> dict[str, Any]:
     source = _tool_source_path()
+    runtime: dict[str, Any] = {}
+    runtime_error = ""
+    try:
+        runtime = _require_html_runtime()
+    except Exception as exc:
+        runtime_error = str(exc)
     return {
         "ok": True,
         "name": "Cherry HTML 帧序列处理工具",
         "source_path": str(source),
         "exists": source.exists(),
         "engine": "headless_chrome_html",
+        "runtime_ready": not runtime_error,
+        "runtime_error": runtime_error,
+        "browser_path": runtime.get("browser_path", ""),
         "steps": ["fringe", "hairinset", "feather(rect only)", "blur", "resize2"],
         "temporal_smooth": "controlled_by_html_default_off",
         "defaults": _default_options(),
@@ -117,6 +87,7 @@ def run_start(
     from assetclaw_matting.db.sqlite import get_connection
     from assetclaw_matting.runtime_context import get_runtime_context
 
+    _require_html_runtime()
     src = validate_path(input_dir, must_exist=True)
     dst = validate_path(output_dir, must_exist=False)
     if not src.is_dir():
@@ -287,10 +258,12 @@ def run_delete(run_id: str | None = None) -> dict[str, Any]:
 
 
 def preview_run_start_confirmation(arguments: dict[str, Any], confirmation_id: str) -> str:
+    from assetclaw_matting.config import settings
+
     try:
         preview = run_preview(
-            input_dir=arguments.get("input_dir") or "E:\\output",
-            output_dir=arguments.get("output_dir") or "E:\\cherry_output",
+            input_dir=arguments.get("input_dir") or str(settings.default_batch_output_dir),
+            output_dir=arguments.get("output_dir") or str(settings.storage_dir / "cherry_output"),
             recursive=bool(arguments.get("recursive", True)),
             max_images=int(arguments.get("max_images") or 10000),
             **{k: v for k, v in arguments.items() if k not in {"input_dir", "output_dir", "recursive", "max_images"}},
@@ -320,55 +293,11 @@ def _run_worker(run_id: str) -> None:
             return
         from assetclaw_matting.config import settings
 
-        if settings.cherry_html_runner_enabled:
-            _run_worker_html(run_id, row)
-            return
-        python = _cherry_python_path()
-        if python.exists():
-            _run_worker_subprocess(run_id, row, python)
-            return
-        src = Path(row["input_dir"])
-        dst = Path(row["output_dir"])
-        files = [Path(path) for path in json.loads(row["files_json"] or "[]")]
-        options = json.loads(row["options_json"] or "{}")
-        groups = _group_sequences(src, files)
-        module = _load_cherry_module()
-        processed = options.get("processed") or []
-        errors = options.get("errors") or []
-        done = {item.get("src_path") for item in processed}
-
-        for group_files in groups:
-            latest = _get_run(run_id)
-            if not latest or latest["status"] == "CANCELED":
-                return
-            pending = [path for path in group_files if str(path) not in done]
-            if not pending:
-                continue
-            for process_files in _compatible_batches(module, pending, bool(options.get("use_smooth"))):
-                try:
-                    batch_np = [module.decode(path.read_bytes()) for path in process_files]
-                    np, torch = _processing_deps()
-                    batch = torch.from_numpy(np.stack(batch_np)).float() / 255.0
-                    batch_options = _options_for_batch_shape(options, int(batch.shape[1]), int(batch.shape[2]))
-                    batch = _apply_cherry_pipeline(module, batch, batch_options)
-                    out_np = (batch.detach().cpu().numpy().clip(0, 1) * 255).astype(np.uint8)
-                    for index, image_path in enumerate(process_files):
-                        target = _output_target(src, dst, image_path)
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        target.write_bytes(module.encode(out_np[index]))
-                        processed.append({"src_path": str(image_path), "dst_path": str(target), "rel_path": str(image_path.relative_to(src))})
-                        options["processed"] = processed
-                        _save_progress(run_id, completed=len(processed), failed=len(errors), options=options)
-                except Exception as exc:
-                    for image_path in process_files:
-                        errors.append({"src_path": str(image_path), "rel_path": str(image_path.relative_to(src)), "error": str(exc)})
-                    options["errors"] = errors
-                    _save_progress(run_id, completed=len(processed), failed=len(errors), options=options, error=str(exc))
-                    _notify(run_id, f"Cherry 处理出错：{process_files[0].parent}\n{exc}")
-                    _set_run_status(run_id, "FAILED")
-                    return
-        final_status = "DONE_WITH_ERRORS" if errors else "DONE"
-        _set_run_status(run_id, final_status)
+        if not settings.cherry_html_runner_enabled:
+            raise RuntimeError("Cherry HTML runner is disabled; Python fallback is not permitted")
+        _require_html_runtime()
+        _run_worker_html(run_id, row)
+        return
     except Exception as exc:
         _save_progress(run_id, error=str(exc))
         _set_run_status(run_id, "FAILED")
@@ -379,7 +308,6 @@ def _run_worker(run_id: str) -> None:
 
 def _run_worker_html(run_id: str, row: Any) -> None:
     from assetclaw_matting.config import settings
-    from assetclaw_matting.services.cherry_python_fallback import run_cherry_python_fallback
     from assetclaw_matting.services.cherry_html_runner import run_cherry_html
 
     src = Path(row["input_dir"])
@@ -435,120 +363,14 @@ def _run_worker_html(run_id: str, row: Any) -> None:
             options["processed"] = processed
             _save_progress(run_id, completed=len(processed), failed=len(errors), options=options)
         except Exception as exc:
-            html_error = str(exc)
-            try:
-                result = run_cherry_python_fallback(src, dst, pending)
-                width, height = _parse_resize(result.resize)
-                if width and height:
-                    options["resize_width"] = width
-                    options["resize_height"] = height
-                options["inferred_profile"] = result.profile
-                options["html_feather_enabled"] = result.feather_enabled
-                options["html_steps"] = result.steps
-                options["fallback_used"] = True
-                options["fallback_reason"] = html_error
-                options.setdefault("html_runs", []).append(
-                    {
-                        "input_dir": str(pending[0].parent),
-                        "count": len(pending),
-                        "profile": result.profile,
-                        "resize": result.resize,
-                        "feather_enabled": result.feather_enabled,
-                        "steps": result.steps,
-                        "fallback": "html_python_fallback",
-                        "html_error": html_error,
-                    }
-                )
-                for image_path in pending:
-                    target = _output_target(src, dst, image_path)
-                    if not target.exists():
-                        raise FileNotFoundError(str(target))
-                    processed.append({"src_path": str(image_path), "dst_path": str(target), "rel_path": str(image_path.relative_to(src))})
-                options["processed"] = processed
-                _save_progress(run_id, completed=len(processed), failed=len(errors), options=options, error=f"HTML fallback used: {html_error}")
-            except Exception as fallback_exc:
-                for image_path in pending:
-                    errors.append({"src_path": str(image_path), "rel_path": str(image_path.relative_to(src)), "error": str(fallback_exc)})
-                options["errors"] = errors
-                options["fallback_reason"] = html_error
-                _save_progress(run_id, completed=len(processed), failed=len(errors), options=options, error=str(fallback_exc))
-                _set_run_status(run_id, "FAILED")
-                _notify(run_id, f"Cherry 后处理失败：{pending[0].parent}\nHTML: {html_error}\nFallback: {fallback_exc}")
-                return
-
-    final_status = "DONE_WITH_ERRORS" if errors else "DONE"
-    _set_run_status(run_id, final_status)
-
-
-def _run_worker_subprocess(run_id: str, row: Any, python: Path) -> None:
-    from assetclaw_matting.config import settings
-
-    src = Path(row["input_dir"])
-    dst = Path(row["output_dir"])
-    files = [Path(path) for path in json.loads(row["files_json"] or "[]")]
-    options = json.loads(row["options_json"] or "{}")
-    processed = options.get("processed") or []
-    errors = options.get("errors") or []
-    run_dir = Path(settings.storage_dir) / "cherry_runs" / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
-    config_path = run_dir / "config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "source_path": str(_legacy_tool_source_path()),
-                "input_dir": str(src),
-                "output_dir": str(dst),
-                "files": [str(path) for path in files],
-                "options": options,
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    script = Path(settings.assetclaw_root) / "scripts" / "cherry_batch_worker.py"
-    proc = subprocess.Popen(
-        [str(python), str(script), str(config_path)],
-        cwd=str(settings.assetclaw_root),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        latest = _get_run(run_id)
-        if latest and latest["status"] == "CANCELED":
-            proc.terminate()
-            return
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if event.get("event") == "done":
-            processed.append({"src_path": event.get("src_path"), "dst_path": event.get("dst_path"), "rel_path": event.get("rel_path")})
-            options["processed"] = processed
-            _save_progress(run_id, completed=int(event.get("completed") or len(processed)), failed=int(event.get("failed") or len(errors)), options=options)
-        elif event.get("event") == "error":
-            errors.append({"src_path": event.get("src_path"), "rel_path": event.get("rel_path"), "error": event.get("error")})
+            for image_path in pending:
+                errors.append({"src_path": str(image_path), "rel_path": str(image_path.relative_to(src)), "error": str(exc)})
             options["errors"] = errors
-            _save_progress(run_id, completed=int(event.get("completed") or len(processed)), failed=int(event.get("failed") or len(errors)), options=options, error=str(event.get("error") or ""))
-        elif event.get("event") == "finished":
-            _save_progress(run_id, completed=int(event.get("completed") or len(processed)), failed=int(event.get("failed") or len(errors)), options=options)
-    stderr = proc.stderr.read() if proc.stderr is not None else ""
-    rc = proc.wait()
-    latest = _get_run(run_id)
-    if latest and latest["status"] == "CANCELED":
-        return
-    if rc != 0:
-        message = stderr.strip() or f"Cherry worker exited with code {rc}"
-        _save_progress(run_id, error=message)
-        _set_run_status(run_id, "FAILED")
-        _notify(run_id, f"Cherry 任务异常：{message}")
-        return
+            _save_progress(run_id, completed=len(processed), failed=len(errors), options=options, error=str(exc))
+            _set_run_status(run_id, "FAILED")
+            _notify(run_id, f"Cherry HTML 后处理失败：{pending[0].parent}\n{exc}")
+            return
+
     final_status = "DONE_WITH_ERRORS" if errors else "DONE"
     _set_run_status(run_id, final_status)
 
@@ -695,57 +517,22 @@ def _save_progress(
         conn.execute(f"UPDATE cherry_runs SET {', '.join(updates)} WHERE id = ?", values)
 
 
-def _load_cherry_module() -> ModuleType:
-    global _MODULE
-    if _MODULE is not None:
-        return _MODULE
-    source = _legacy_tool_source_path()
-    if not source.exists():
-        raise FileNotFoundError(str(source))
-    spec = importlib.util.spec_from_file_location("assetclaw_cherry_temporal_smooth", source)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("cannot load Cherry tool")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    _MODULE = module
-    return module
-
-
-def _processing_deps():
-    try:
-        import numpy as np
-        import torch
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("Cherry 处理依赖缺失，请先安装 Cherry_帧序列处理工具/requirements.txt 里的 numpy、torch、opencv-python、flask、Pillow") from exc
-    return np, torch
-
-
 def _tool_source_path() -> Path:
     from assetclaw_matting.config import settings
 
     return Path(settings.cherry_postprocess_html_path)
 
 
-def _legacy_tool_source_path() -> Path:
+def _require_html_runtime() -> dict[str, str]:
     from assetclaw_matting.config import settings
+    from assetclaw_matting.services.cherry_html_runner import validate_cherry_html_runtime
 
-    root = Path(settings.assetclaw_root)
-    candidates = [
-        root / "Cherry_后处理网页_源码_20260615_0658" / "web_temporal_smooth.py",
-        root / "Cherry_帧序列处理工具_2" / "web_temporal_smooth.py",
-        root / "Cherry_帧序列处理工具_1" / "web_temporal_smooth.py",
-        root / "Cherry_帧序列处理工具" / "web_temporal_smooth.py",
-    ]
-    for source in candidates:
-        if source.exists():
-            return source
-    return candidates[0]
-
-
-def _cherry_python_path() -> Path:
-    from assetclaw_matting.config import settings
-
-    return Path(settings.comfyui_python_dir) / "python.exe"
+    if not settings.cherry_html_runner_enabled:
+        raise RuntimeError("Cherry HTML runner is disabled")
+    return validate_cherry_html_runtime(
+        _tool_source_path(),
+        Path(settings.cherry_browser_path) if settings.cherry_browser_path else None,
+    )
 
 
 def _collect_images(root: Path, recursive: bool, max_images: int) -> list[Path]:
@@ -759,18 +546,6 @@ def _group_sequences(root: Path, files: list[Path]) -> list[list[Path]]:
     for path in files:
         groups[path.parent.relative_to(root)].append(path)
     return [sorted(paths, key=lambda path: path.name.lower()) for _rel, paths in sorted(groups.items(), key=lambda item: str(item[0]).lower())]
-
-
-def _compatible_batches(module: ModuleType, files: list[Path], require_same_shape: bool) -> list[list[Path]]:
-    by_shape: dict[tuple[int, ...], list[Path]] = defaultdict(list)
-    for path in files:
-        shape = tuple(module.decode(path.read_bytes()).shape)
-        by_shape[shape].append(path)
-    if len(by_shape) <= 1:
-        return [files]
-    if require_same_shape:
-        raise ValueError(f"同一序列内图片尺寸不一致：{files[0].parent}")
-    return [paths for _shape, paths in sorted(by_shape.items(), key=lambda item: str(item[0]))]
 
 
 def _output_target(src: Path, dst: Path, image_path: Path) -> Path:
@@ -827,7 +602,7 @@ def preset_options(profile: str = "full", use_smooth: bool = False) -> dict[str,
         "sharp2_radius": 2,
         "sharp2_threshold": 0.02,
         "sharp2_shrink": 11,
-        "use_smooth": False,
+        "use_smooth": bool(use_smooth),
         "smooth_window": 7,
         "smooth_sigma": 1.5,
         "min_alpha": 0.05,
@@ -968,190 +743,6 @@ def _merge_options(options: dict[str, Any]) -> dict[str, Any]:
     ):
         merged[key] = float(merged[key])
     return merged
-
-
-def _infer_profile_from_shape(height: int, width: int) -> str:
-    if height <= 0 or width <= 0:
-        return "full"
-    ratio = float(width) / float(height)
-    return "half" if abs(ratio - 1.0) <= _AUTO_PROFILE_TOLERANCE else "full"
-
-
-def _options_for_batch_shape(options: dict[str, Any], height: int, width: int) -> dict[str, Any]:
-    if not options.get("auto_profile_by_size"):
-        return options
-    inferred = _infer_profile_from_shape(height, width)
-    preset = preset_options(inferred, use_smooth=bool(options.get("use_smooth", False)))
-    adjusted = dict(options)
-    for key in _PROFILE_OVERRIDE_KEYS:
-        adjusted[key] = preset[key]
-    adjusted["profile"] = "auto"
-    adjusted["inferred_profile"] = inferred
-    adjusted["auto_profile_by_size"] = True
-    return adjusted
-
-
-def _apply_cherry_pipeline(module: ModuleType, batch: Any, options: dict[str, Any]) -> Any:
-    shadow_source = batch
-    if options.get("use_denoise"):
-        batch = module.alpha_denoise(
-            batch,
-            float(options.get("denoise_threshold", 0.06)),
-            int(options.get("denoise_radius", 0)),
-        )
-    if options.get("use_shadow"):
-        batch = _shadow_separate_char(module, batch, shadow_source, options)
-    if options.get("use_blur") and hasattr(module, "blur_under_composite"):
-        batch = module.blur_under_composite(batch, int(options.get("blur_radius", 1)), float(options.get("blur_sigma", 10.0)))
-    if options.get("use_resize1"):
-        batch = module.ps_bicubic_sharper(batch, int(options.get("resize1_width", 768)), int(options.get("resize1_height", 1024)))
-    if options.get("use_sharp1"):
-        batch = _sharpen(
-            module,
-            batch,
-            float(options.get("sharp1_amount", 1.0)),
-            int(options.get("sharp1_radius", 2)),
-            float(options.get("sharp1_threshold", 0.02)),
-            int(options.get("sharp1_shrink", 0)),
-            float(options.get("min_alpha", 0.05)),
-        )
-    if options.get("use_resize2"):
-        batch = module.ps_bicubic_sharper(batch, int(options.get("resize2_width", 384)), int(options.get("resize2_height", 512)))
-    if options.get("use_sharp2"):
-        batch = _sharpen(
-            module,
-            batch,
-            float(options.get("sharp2_amount", 1.0)),
-            int(options.get("sharp2_radius", 2)),
-            float(options.get("sharp2_threshold", 0.02)),
-            int(options.get("sharp2_shrink", 5)),
-            float(options.get("min_alpha", 0.05)),
-        )
-    if options.get("use_smooth"):
-        batch = _temporal_smooth(module, batch, options)
-    return batch
-
-
-def _shadow_separate_char(module: ModuleType, batch: Any, shadow_source: Any, options: dict[str, Any]) -> Any:
-    separator = getattr(module, "shadow_separate_v5", None) or getattr(module, "shadow_separate", None)
-    if separator is None:
-        shadow_clean = module.alpha_denoise(shadow_source, 0.01, 0)
-        return _merge_item_shadow(batch, shadow_clean, options)
-
-    np, torch = _processing_deps()
-    branch = module.alpha_denoise(shadow_source.clone(), 0.01, 0)
-    item_branch = module.alpha_denoise(
-        shadow_source.clone(),
-        float(options.get("denoise_threshold", 0.06)),
-        int(options.get("denoise_radius", 0)),
-    )
-    if item_branch.shape[1:3] != branch.shape[1:3]:
-        item_branch = module.ps_bicubic_sharper(item_branch, branch.shape[2], branch.shape[1])
-    item_a = item_branch[..., 3:4].clamp(0.0, 1.0)
-    item_rgb_ref = (item_branch[..., :3] * item_a + (1.0 - item_a)).clamp(0.0, 1.0)
-    char_branch, shadow_batch = separator(
-        branch,
-        float(options.get("shadow_gray_limit", 0.35)),
-        int(options.get("shadow_protect_radius", -70)),
-        0.1,
-        float(options.get("shadow_alpha_boost", 1.0)),
-        int(options.get("shadow_blur_radius", 2)),
-        float(options.get("shadow_blur_sigma", 2.4)),
-        item_alpha=item_branch[..., 3],
-        item_rgb=item_rgb_ref,
-    )
-    if char_branch.shape[1:3] != batch.shape[1:3]:
-        char_branch = module.ps_bicubic_sharper(char_branch, batch.shape[2], batch.shape[1])
-    if shadow_batch.shape[1:3] != batch.shape[1:3]:
-        shadow_batch = module.ps_bicubic_sharper(shadow_batch, batch.shape[2], batch.shape[1])
-    if item_branch.shape[1:3] != shadow_batch.shape[1:3]:
-        item_branch = module.ps_bicubic_sharper(item_branch, shadow_batch.shape[2], shadow_batch.shape[1])
-
-    cv2 = getattr(module, "cv2", None)
-    if cv2 is None:
-        return char_branch
-    solid_now = (item_branch[..., 3] > 0.01).cpu().numpy().astype(np.uint8)
-    kernel = np.ones((3, 3), np.uint8)
-    solid_now = np.stack([cv2.dilate(solid_now[i], kernel) for i in range(solid_now.shape[0])], axis=0)
-    protect = torch.from_numpy(solid_now.astype(np.float32)).to(batch.device).unsqueeze(-1)
-    new_a = torch.where(
-        protect > 0.5,
-        batch[..., 3:4],
-        torch.minimum(
-            torch.clamp(batch[..., 3:4] - shadow_batch[..., 3:4], 0.0, 1.0),
-            char_branch[..., 3:4].clamp(0.0, 1.0),
-        ),
-    )
-    return torch.cat([batch[..., :3], new_a], dim=-1)
-
-
-def _sharpen(module: ModuleType, batch: Any, amount: float, radius: int, threshold: float, shrink: int, min_alpha: float) -> Any:
-    args = [batch, amount, radius, threshold, shrink]
-    if len(inspect.signature(module.sharpen).parameters) >= 6:
-        args.append(min_alpha)
-    return module.sharpen(*args)
-
-
-def _merge_item_shadow(batch: Any, shadow_source: Any, options: dict[str, Any]) -> Any:
-    if getattr(batch, "shape", None) is None or batch.shape[-1] < 4:
-        return batch
-    torch = __import__("torch")
-    gray_limit = float(options.get("shadow_gray_limit", 0.35))
-    protect_radius = int(options.get("shadow_protect_radius", -70))
-    boost = float(options.get("shadow_alpha_boost", 1.0))
-
-    src_rgb = shadow_source[..., :3].clamp(0.0, 1.0)
-    src_a = shadow_source[..., 3:4].clamp(0.0, 1.0)
-    gray = src_rgb.mean(dim=-1, keepdim=True)
-    chroma = src_rgb.max(dim=-1, keepdim=True).values - src_rgb.min(dim=-1, keepdim=True).values
-
-    _, h, w, _ = batch.shape
-    yy = torch.linspace(0.0, 1.0, h, device=batch.device, dtype=batch.dtype).view(1, h, 1, 1)
-    xx = torch.linspace(0.0, 1.0, w, device=batch.device, dtype=batch.dtype).view(1, 1, w, 1)
-    foot_ellipse = (((xx - 0.5) / 0.46) ** 2 + ((yy - 0.82) / 0.24) ** 2) <= 1.0
-    shadow_mask = (src_a > 0.01) & (gray <= gray_limit) & (chroma <= 0.12) & foot_ellipse
-
-    if protect_radius:
-        person = (src_a > float(options.get("min_alpha", 0.05))).permute(0, 3, 1, 2).float()
-        radius = min(abs(protect_radius), max(1, min(h, w) // 3))
-        kernel = radius * 2 + 1
-        if protect_radius < 0:
-            protected = -torch.nn.functional.max_pool2d(-person, kernel, stride=1, padding=radius)
-        else:
-            protected = torch.nn.functional.max_pool2d(person, kernel, stride=1, padding=radius)
-        shadow_mask = shadow_mask & ~(protected.permute(0, 2, 3, 1) > 0.5)
-
-    base_rgb = batch[..., :3].clamp(0.0, 1.0)
-    base_a = batch[..., 3:4].clamp(0.0, 1.0)
-    shadow_a = torch.where(shadow_mask, (src_a * boost).clamp(0.0, 1.0), torch.zeros_like(src_a))
-    shadow_rgb = src_rgb * 0.75
-    out_a = torch.maximum(base_a, shadow_a)
-    out_rgb = torch.where(
-        out_a > 1e-6,
-        (base_rgb * base_a + shadow_rgb * shadow_a * (1.0 - base_a)).clamp(0.0, 1.0) / out_a.clamp(min=1e-6),
-        base_rgb,
-    )
-    return torch.cat([out_rgb, out_a], dim=-1)
-
-
-def _temporal_smooth(module: ModuleType, batch: Any, options: dict[str, Any]) -> Any:
-    args = [
-        batch,
-        int(options.get("smooth_window", 5)),
-        float(options.get("smooth_sigma", 1.0)),
-        bool(options.get("sync_rgb", False)),
-        float(options.get("min_alpha", 0.05)),
-    ]
-    parameter_count = len(inspect.signature(module.temporal_smooth).parameters)
-    if parameter_count >= 6:
-        args.append(int(options.get("ring_width", 25)))
-    if parameter_count >= 7:
-        args.append(str(options.get("smooth_method", "中值+高斯")))
-    if parameter_count >= 8:
-        args.append(bool(options.get("fill_gap", True)))
-    if parameter_count >= 9:
-        args.append(float(options.get("bg_thresh", 0.02)))
-    return module.temporal_smooth(*args)
 
 
 def _steps_text(options: dict[str, Any]) -> str:

@@ -110,7 +110,7 @@ def bot_permissions(**_: Any) -> dict[str, Any]:
   - 任意 shell 执行
   - 格式化、分区、操作系统目录破坏
   - 读取文件内容（内容读取默认关闭）
-  - 越权访问 Windows 系统目录、AppData、ProgramData 等
+  - 越权访问 Windows 系统目录及其他 DENY_PATH_PATTERNS
   - 访问 .env、.ssh 等配置密钥文件
 
 写操作说明：
@@ -118,12 +118,11 @@ def bot_permissions(**_: Any) -> dict[str, Any]:
   - file.move、file.delete、file.empty_dir、批量重命名等高风险动作需要二次确认
   - 如配置了 FEISHU_ALLOWED_OPEN_IDS，只有名单内用户可执行写操作
   - 多用户隔离：飞书上下文按 chat_id + open_id 存储，同一群内不同用户不会混用记忆
-  - 共享盘可以访问和复制；抠图任务不会直接在共享盘上计算，会先 staging 到本地再同步结果回去
-  - Z:\ 是共享盘映射；等价 UNC 路径是 \\audioshare.lilith.com\AIart
+  - 配置到 ALLOWED_ROOTS 的共享盘可以访问和复制；抠图任务会先 staging 到本地再同步结果回去
 
 高风险操作：
   - 删除、移动、清空目录、批量重命名默认必须走二次确认
-  - shell、格式化、分区、C 盘系统目录操作永久禁止
+  - shell、格式化、分区、Windows 系统目录操作永久禁止
 
 二次确认格式：
   机器人会返回确认码，例如 abc123def0

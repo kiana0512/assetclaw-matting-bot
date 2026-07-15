@@ -13,7 +13,7 @@ from assetclaw_matting.skills.registry import get_skill_meta
 
 
 def _workspace() -> Path:
-    root = Path("E:/assetclaw-matting-bot/storage/debug/test_animation_ops")
+    root = Path.cwd() / "storage/debug/test_animation_ops"
     for dirname in ("videos/gary/idle", "frames/gary/idle", "matte/gary/idle", "smooth/gary/idle"):
         (root / dirname).mkdir(parents=True, exist_ok=True)
     (root / "videos/gary/idle/source.mp4").write_bytes(b"video")

@@ -27,8 +27,10 @@ def _run_id() -> str:
 
 
 def default_automation_paths(day: str | None = None) -> dict[str, str]:
+    from assetclaw_matting.config import settings
+
     label = day or datetime.now().strftime("%Y-%m-%d")
-    root = Path("E:/animation_automation") / label
+    root = Path(settings.animation_root) / label
     return {
         "workspace_root": str(root),
         "video_dir": str(root / "videos"),
@@ -270,7 +272,9 @@ def _worker(run_id: str) -> None:
         if not row:
             return
         python = _python_path()
-        script = Path("E:/assetclaw-matting-bot/scripts/frame_tool_worker.py")
+        from assetclaw_matting.config import settings
+
+        script = Path(settings.assetclaw_root) / "scripts" / "frame_tool_worker.py"
         proc = subprocess.Popen(
             [str(python), str(script), row["config_path"], str(_tool_dir())],
             cwd=str(_tool_dir()),
@@ -487,7 +491,13 @@ def _build_config(
 
 
 def _load_base_config() -> dict[str, Any]:
-    return json.loads((_tool_dir() / "config.json").read_text(encoding="utf-8"))
+    tool_dir = _tool_dir()
+    path = tool_dir / "config.json"
+    if not path.exists():
+        path = tool_dir / "config.example.json"
+    if not path.exists():
+        raise FileNotFoundError(f"frame tool config is missing: {tool_dir}")
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _project_path(path: str) -> Path:

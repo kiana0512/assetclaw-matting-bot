@@ -193,7 +193,7 @@ def test_video_attachment_is_not_treated_as_audio(monkeypatch) -> None:
         user_id="ou_1",
         text="",
         message_type="media",
-        attachments=[{"type": "video", "file_name": "clip.mp4", "local_path": "E:/assetclaw-matting-bot/storage/debug/clip.mp4"}],
+        attachments=[{"type": "video", "file_name": "clip.mp4", "local_path": "./storage/debug/clip.mp4"}],
     )
 
     assert _has_audio_attachment(event) is False
@@ -287,7 +287,7 @@ def test_stale_feishu_event_is_detected(monkeypatch) -> None:
 
 
 def test_multimodal_planner_prompts_for_next_action() -> None:
-    path = Path("E:/assetclaw-matting-bot/storage/debug/mm_prompt.png")
+    path = Path.cwd() / "storage/debug/mm_prompt.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (4, 4), (255, 0, 0, 255)).save(path)
 
@@ -333,7 +333,7 @@ def test_direct_video_confirmation_is_human_readable() -> None:
 
     text = preview_start_confirmation(
         {
-            "video_paths": ["E:/assetclaw-matting-bot/storage/source.mp4"],
+            "video_paths": ["./storage/source.mp4"],
             "source_names": ["7月13日思考-1_3.mp4"],
         },
         "abc123",
@@ -479,7 +479,7 @@ def test_direct_image_followup_uses_recent_image_set(monkeypatch, tmp_path: Path
     from assetclaw_matting.db.schema import create_tables
     from assetclaw_matting.db.sqlite import init_db
 
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
     monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
     folder = tmp_path / "海瑟序列帧"
@@ -525,7 +525,7 @@ def test_generic_progress_question_routes_to_latest_direct_video(monkeypatch, tm
     from assetclaw_matting.db.sqlite import init_db
     from assetclaw_matting.skills import direct_image_skills, direct_video_skills
 
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
     storage = tmp_path / "storage"
     video_root = storage / "direct_video_runs"
@@ -587,7 +587,7 @@ def test_generic_progress_question_routes_to_latest_direct_image(monkeypatch, tm
     from assetclaw_matting.db.sqlite import init_db
     from assetclaw_matting.skills import direct_image_skills, direct_video_skills
 
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
     storage = tmp_path / "storage"
     video_root = storage / "direct_video_runs"
@@ -648,7 +648,7 @@ def test_direct_media_natural_language_pressure_samples(monkeypatch, tmp_path: P
     from assetclaw_matting.db.sqlite import init_db
     from assetclaw_matting.skills import direct_image_skills, direct_video_skills
 
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
     storage = tmp_path / "storage"
     video_root = storage / "direct_video_runs"
@@ -838,7 +838,7 @@ def test_direct_image_cherry_profile_and_size_are_recorded(monkeypatch, tmp_path
 def test_direct_image_start_uses_exact_square_rule(monkeypatch) -> None:
     from assetclaw_matting.skills import direct_image_skills
 
-    root = Path("E:/assetclaw-matting-bot/storage/debug/test_direct_image_exact")
+    root = Path.cwd() / "storage/debug/test_direct_image_exact"
     src = root / "src"
     src.mkdir(parents=True, exist_ok=True)
     square = src / "square.png"
@@ -852,7 +852,7 @@ def test_direct_image_start_uses_exact_square_rule(monkeypatch) -> None:
     result = direct_image_skills.start(
         [str(square), str(near_square)],
         source_names=[square.name, near_square.name],
-        workflow_path="E:/assetclaw-matting-bot/workflows/test.json",
+        workflow_path="./workflows/test.json",
     )
 
     assert [item["aspect"] for item in result["images"]] == ["square", "portrait"]
@@ -1127,7 +1127,7 @@ def test_direct_image_start_formatter_mentions_postprocess_preset() -> None:
 
 
 def test_multimodal_planner_previews_image() -> None:
-    path = Path("E:/assetclaw-matting-bot/storage/debug/mm_preview.png")
+    path = Path.cwd() / "storage/debug/mm_preview.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (4, 4), (255, 0, 0, 255)).save(path)
 
@@ -1145,7 +1145,7 @@ def test_multimodal_planner_previews_image() -> None:
 
 
 def test_multimodal_planner_analyzes_image_content() -> None:
-    path = Path("E:/assetclaw-matting-bot/storage/debug/mm_analyze.png")
+    path = Path.cwd() / "storage/debug/mm_analyze.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (4, 4), (0, 255, 255, 255)).save(path)
 
@@ -1167,9 +1167,9 @@ def test_multimodal_planner_analyzes_recent_image_without_attachment() -> None:
     from assetclaw_matting.db.schema import create_tables
     from assetclaw_matting.db.sqlite import init_db
 
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
-    path = Path("E:/assetclaw-matting-bot/storage/debug/mm_recent_analyze.png")
+    path = Path.cwd() / "storage/debug/mm_recent_analyze.png"
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (4, 4), (0, 255, 255, 255)).save(path)
     upsert_memory_note("recent-analyze", "last_image_path", str(path), source="test")
@@ -1258,7 +1258,7 @@ def test_voice_reply_mode_toggle() -> None:
     from assetclaw_matting.db.schema import create_tables
     from assetclaw_matting.db.sqlite import init_db
 
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
     brain = LocalCommandBrain()
 

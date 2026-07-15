@@ -14,7 +14,7 @@ from assetclaw_matting.skills.web_skills import fetch_url, research, search_web
 
 
 def setup_module() -> None:
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
 
 

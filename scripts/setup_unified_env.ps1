@@ -1,5 +1,6 @@
 $ErrorActionPreference = "Stop"
-Set-Location "E:\assetclaw-matting-bot"
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+Set-Location $ProjectRoot
 conda create -n assetclaw python=3.11 -y
 conda activate assetclaw
 pip install -r requirements.txt

@@ -111,7 +111,7 @@ def _cases(include_speech: bool) -> list[dict[str, Any]]:
         {"name": "voice_reply_on", "text": "开启语音回复", "conversation_id": "manual-voice", "contains": ["已开启语音回复"]},
         {"name": "voice_reply_off", "text": "关闭语音回复", "conversation_id": "manual-voice", "contains": ["已关闭语音回复"]},
         {"name": "gpu_and_current_work", "text": "查看 GPU 状态和当前任务", "tools": ["system.gpu_status", "agent.current_work"]},
-        {"name": "file_list", "text": "看看 E:\\assetclaw-matting-bot\\docs 有哪些文件", "tools": ["file.list_allowed"]},
+        {"name": "file_list", "text": f"看看 {ROOT / 'docs'} 有哪些文件", "tools": ["file.list_allowed"]},
         {"name": "comfy_preview", "text": f"预览 {image_dir} 到 {output_dir} 的抠图任务，工作流 {workflow}", "tools": ["comfyui.run_preview"]},
         {"name": "comfy_start_requires_confirmation", "text": f"开始批量抠图 输入 {image_dir} 输出 {output_dir} 工作流 {workflow}", "contains": ["请确认", "确认执行"]},
         {"name": "p4_help_route", "text": "p4现在功能有哪些", "tools": ["p4.help"]},

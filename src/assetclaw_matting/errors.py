@@ -77,8 +77,8 @@ def classify_exception(exc: Exception, phase: str, trace_id: str, skill_name: Op
             error_message=raw_msg,
             user_message="这个路径不在允许访问范围内，或者命中了安全规则。",
             suggestion=(
-                "检查路径是否在 E:\\ 允许工作区内\n"
-                "不要访问 .env、.ssh、Windows、Program Files 等敏感目录\n"
+                "检查路径是否在 ALLOWED_ROOTS 允许工作区内\n"
+                "不要访问 .env、.ssh、Windows 等敏感目录\n"
                 "可以发送「查看权限说明」了解当前机器人权限"
             ),
             detail_for_log=raw_msg,

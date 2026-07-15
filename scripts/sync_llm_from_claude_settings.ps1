@@ -1,5 +1,6 @@
 $ErrorActionPreference = "Stop"
-Set-Location "E:\assetclaw-matting-bot"
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+Set-Location $ProjectRoot
 
 $settingsPath = Join-Path $env:USERPROFILE ".claude\settings.json"
 if (-not (Test-Path $settingsPath)) { throw "Claude settings not found: $settingsPath" }

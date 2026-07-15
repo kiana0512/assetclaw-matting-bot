@@ -4,5 +4,6 @@ foreach ($tool in @("git","conda")) {
   try { & $tool --version | Out-Null; Write-Host "[OK] $tool" }
   catch { Write-Host "[MISSING] $tool" }
 }
-New-Item -ItemType Directory -Force -Path "E:\assetclaw-matting-bot\data","E:\assetclaw-matting-bot\logs","E:\assetclaw-matting-bot\storage\batch_inputs","E:\assetclaw-matting-bot\storage\batch_outputs","E:\assetclaw-matting-bot\workflows" | Out-Null
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+New-Item -ItemType Directory -Force -Path (Join-Path $ProjectRoot "data"),(Join-Path $ProjectRoot "logs"),(Join-Path $ProjectRoot "storage\batch_inputs"),(Join-Path $ProjectRoot "storage\batch_outputs"),(Join-Path $ProjectRoot "workflows") | Out-Null
 Write-Host "Next: powershell -ExecutionPolicy Bypass -File scripts\setup_unified_env.ps1"

@@ -79,7 +79,7 @@ def main() -> int:
     parser.add_argument("--frames-dir", required=True)
     parser.add_argument("--workflow-path", default="")
     parser.add_argument("--date-root", default="")
-    parser.add_argument("--unity-project", default="D:/Spark/Client")
+    parser.add_argument("--unity-project", default=str(settings.unity_project_dir))
     parser.add_argument("--unity-import-mode", default="iteration", choices=["import", "iteration"])
     parser.add_argument("--p4-stream", default="//streams/rel_0.0.1")
     parser.add_argument("--status-file", required=True)

@@ -14,7 +14,7 @@ from assetclaw_matting.feishu.processor import process_feishu_message
 
 
 def setup_module() -> None:
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
 
 
@@ -115,7 +115,7 @@ def test_duplicate_direct_video_confirmations_start_once(monkeypatch) -> None:
     calls: list[tuple[str, dict]] = []
     conversation_id = "feishu:chat_confirm:user_confirm"
     args = {
-        "video_paths": [r"E:\assetclaw-matting-bot\storage\feishu_inbox\clip.mp4"],
+        "video_paths": [r".\storage\feishu_inbox\clip.mp4"],
         "source_names": ["clip.mp4"],
         "run_label": "clip.mp4",
     }

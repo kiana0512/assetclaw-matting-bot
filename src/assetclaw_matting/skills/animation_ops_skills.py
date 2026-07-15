@@ -11,10 +11,14 @@ from assetclaw_matting.skills.media_skills import IMAGE_EXTS, VIDEO_EXTS
 from assetclaw_matting.skills.security import validate_path
 
 
-DEFAULT_ROOT = r"E:\animation_automation\2026-06-02"
+def _default_root() -> str:
+    from assetclaw_matting.config import settings
+
+    return str(Path(settings.animation_root) / datetime.now().strftime("%Y-%m-%d"))
 
 
-def status(root: str = DEFAULT_ROOT, include_runs: bool = True) -> dict[str, Any]:
+def status(root: str | None = None, include_runs: bool = True) -> dict[str, Any]:
+    root = root or _default_root()
     workspace = _workspace(root, must_exist=True)
     dirs = _standard_dirs(workspace)
     counts = {
@@ -45,7 +49,7 @@ def status(root: str = DEFAULT_ROOT, include_runs: bool = True) -> dict[str, Any
 
 
 def manual_smooth_current(
-    root: str = DEFAULT_ROOT,
+    root: str | None = None,
     input_dir: str | None = None,
     output_dir: str | None = None,
     skip_existing: bool = False,
@@ -56,7 +60,7 @@ def manual_smooth_current(
 ) -> dict[str, Any]:
     from assetclaw_matting.skills.cherry_skills import preset_options, run_start
 
-    workspace = _workspace(root, must_exist=True)
+    workspace = _workspace(root or _default_root(), must_exist=True)
     src = validate_path(input_dir or str(workspace / "matte"), must_exist=True)
     dst = validate_path(output_dir or str(workspace / "smooth"), must_exist=False)
     profile = _cherry_profile_from_path(src)
@@ -88,7 +92,7 @@ def manual_smooth_current(
 
 
 def rerun_from_videos(
-    root: str = DEFAULT_ROOT,
+    root: str | None = None,
     fps: int = 24,
     workflow_path: str | None = None,
     poll_seconds: int = 30,
@@ -96,7 +100,7 @@ def rerun_from_videos(
 ) -> dict[str, Any]:
     from assetclaw_matting.config import settings
 
-    workspace = _workspace(root, must_exist=True)
+    workspace = _workspace(root or _default_root(), must_exist=True)
     videos = workspace / "videos"
     if not videos.is_dir():
         raise FileNotFoundError(str(videos))
@@ -144,7 +148,7 @@ def rerun_from_videos(
 
 def preview_manual_smooth_current_confirmation(arguments: dict[str, Any], confirmation_id: str) -> str:
     try:
-        workspace = _workspace(arguments.get("root") or DEFAULT_ROOT, must_exist=True)
+        workspace = _workspace(arguments.get("root") or _default_root(), must_exist=True)
         src = validate_path(arguments.get("input_dir") or str(workspace / "matte"), must_exist=True)
         dst = validate_path(arguments.get("output_dir") or str(workspace / "smooth"), must_exist=False)
         total = _count_files(src, IMAGE_EXTS)
@@ -170,7 +174,7 @@ def preview_manual_smooth_current_confirmation(arguments: dict[str, Any], confir
 
 def preview_rerun_from_videos_confirmation(arguments: dict[str, Any], confirmation_id: str) -> str:
     try:
-        workspace = _workspace(arguments.get("root") or DEFAULT_ROOT, must_exist=True)
+        workspace = _workspace(arguments.get("root") or _default_root(), must_exist=True)
         counts = status(str(workspace), include_runs=False)["counts"]
         lines = [
             "请确认是否从 videos 全量重做动画流程：",

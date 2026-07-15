@@ -8,7 +8,7 @@ from assetclaw_matting.skills.registry import call_skill
 
 
 def setup_module() -> None:
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
 
 

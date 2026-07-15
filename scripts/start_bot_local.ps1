@@ -7,7 +7,8 @@ chcp 65001 | Out-Null
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 $OutputEncoding = [System.Text.UTF8Encoding]::new()
 
-Set-Location "E:\assetclaw-matting-bot"
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+Set-Location $ProjectRoot
 New-Item -ItemType Directory -Force -Path "logs" | Out-Null
 
 function Get-CondaExe {
@@ -182,7 +183,7 @@ Write-Host ""
 
 $script:CondaExe = Get-CondaExe
 $script:AssetPythonExe = Get-AssetPythonExe
-$env:PYTHONPATH = "E:\assetclaw-matting-bot\src;E:\assetclaw-matting-bot"
+$env:PYTHONPATH = "$ProjectRoot\src;$ProjectRoot"
 
 Stop-OldProcesses
 

@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 
-ROOT = Path("E:/assetclaw-matting-bot")
+ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "feishu_frame_tool"
 CHECK = ROOT / "storage" / "real_pipeline_check"
 

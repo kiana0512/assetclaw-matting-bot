@@ -8,7 +8,7 @@ from assetclaw_matting.skills.registry import call_skill
 
 
 def setup_module() -> None:
-    init_db(Path("E:/assetclaw-matting-bot/data/test_assetclaw.db"))
+    init_db(Path.cwd() / "data/test_assetclaw.db")
     create_tables()
 
 
@@ -16,8 +16,8 @@ def test_matting_batch_fake_lifecycle() -> None:
     created = call_skill(
         "matting.batch_create",
         {
-            "input_dir": "E:\\assetclaw-matting-bot\\storage\\batch_inputs",
-            "output_dir": "E:\\assetclaw-matting-bot\\storage\\batch_outputs",
+            "input_dir": ".\\storage\\batch_inputs",
+            "output_dir": ".\\storage\\batch_outputs",
         },
         requested_by="test",
     )

@@ -31,9 +31,11 @@ def current_work(
         image_runs = []
     elif media in {"image", "images", "图片", "图"}:
         video_runs = []
+    from assetclaw_matting.config import settings
+
     payload = {
         "ok": True,
-        "root": root or r"E:\animation_automation\2026-06-02",
+        "root": root or str(Path(settings.animation_root) / datetime.now().strftime("%Y-%m-%d")),
         "filters": {
             "date_start": date_start or "",
             "date_end": date_end or "",
