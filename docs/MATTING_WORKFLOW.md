@@ -45,7 +45,7 @@ Python：<comfyui-root>\python
 - 启动 ComfyUI：只使用秋叶目录里的 `python\python.exe`。
 - Agent / Gateway / 飞书 / ASR / TTS / P4 / 文件技能：只使用 conda env `assetclaw`。
 - `comfyui.run_start` 运行在 Agent 里，但它只向 `COMFYUI_URL` 发 HTTP 请求，不直接导入或安装 ComfyUI 依赖。
-- `cherry.run_start` 的 worker 会调用秋叶 python，因为 Cherry 处理依赖秋叶环境中的图像/torch 依赖。
+- `cherry.run_start` 通过 Chrome/Edge 直接执行 `C:\imageclip\cherry-postprocess.html`；不会调用机器人 Conda Python 或秋叶 Python 来替代该算法。
 
 启动 ComfyUI 后端：
 

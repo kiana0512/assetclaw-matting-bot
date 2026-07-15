@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from assetclaw_matting.config import Settings
+from assetclaw_matting.config import Settings, _discover_aki_root
 
 
 def test_settings_derive_sibling_runtime_layout(tmp_path: Path) -> None:
@@ -11,6 +11,7 @@ def test_settings_derive_sibling_runtime_layout(tmp_path: Path) -> None:
     aki = tmp_path / "20250904"
     (aki / "ComfyUI").mkdir(parents=True)
     (aki / "python").mkdir()
+    (aki / "python" / "python.exe").touch()
     unity = tmp_path / "project"
     (unity / "Assets").mkdir(parents=True)
     (unity / "ProjectSettings").mkdir()
@@ -24,6 +25,7 @@ def test_settings_derive_sibling_runtime_layout(tmp_path: Path) -> None:
     assert configured.comfyui_aki_root == aki
     assert configured.comfyui_dir == aki / "ComfyUI"
     assert configured.comfyui_python_dir == aki / "python"
+    assert configured.comfyui_python_exe == aki / "python" / "python.exe"
     assert configured.comfyui_workflow_path == aki / "ComfyUI" / "user" / "default" / "workflows" / "ImageClip.json"
     assert configured.unity_project_dir == unity
 
@@ -47,3 +49,15 @@ def test_settings_explicit_external_paths_override_discovery(tmp_path: Path) -> 
     assert configured.comfyui_dir == custom_aki / "ComfyUI"
     assert configured.matting_pipeline_repo_dir == custom_pipeline
     assert configured.cherry_postprocess_html_path == custom_pipeline / "cherry-postprocess.html"
+
+
+def test_discover_aki_root_on_current_user_desktop(tmp_path: Path) -> None:
+    project_parent = tmp_path / "machine-root"
+    project_parent.mkdir()
+    home = tmp_path / "Users" / "worker"
+    aki = home / "Desktop" / "ComfyUI-aki-v3"
+    (aki / "ComfyUI").mkdir(parents=True)
+    (aki / "python").mkdir()
+    (aki / "python" / "python.exe").touch()
+
+    assert _discover_aki_root(project_parent, home=home) == aki
