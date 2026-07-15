@@ -110,7 +110,7 @@ C:\animation_auto
 
 ```powershell
 python -m assetclaw_matting.cli.main init-db
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_local_gateway.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\start_local_gateway.ps1
 Invoke-RestMethod http://127.0.0.1:7865/health
 ```
 

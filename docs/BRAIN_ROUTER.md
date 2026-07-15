@@ -53,7 +53,7 @@ DeepSeek 按 OpenAI-compatible Chat Completions 接入：`DEEPSEEK_BASE_URL=http
 本地检查 DeepSeek：
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_deepseek_api.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test_deepseek_api.ps1
 ```
 
 如果返回 401，检查 `DEEPSEEK_API_KEY`；如果返回 402，检查 DeepSeek 余额/计费；如果返回 404，检查 `DEEPSEEK_BASE_URL` 和模型名是否为 `deepseek-v4-flash` / `deepseek-v4-pro`。

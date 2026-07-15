@@ -32,7 +32,7 @@ pip install -r requirements.txt
 一键启动/重启本地机器人（长连接模式，无需公网）：
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot_local.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot_local.ps1
 ```
 
 该命令会先停止旧的 Gateway、飞书 WS Receiver、WebUI，再后台启动三件套：
@@ -44,13 +44,13 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot_local.ps1
 当前窗口会显示系统状态与 `logs\conversation.log` 实时链路日志。停止服务：
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\stop_bot_local.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\stop_bot_local.ps1
 ```
 
 清理缓存/运行产物：
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\clean_project.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\clean_project.ps1
 ```
 
 飞书后台配置：**事件与回调 → 事件配置 → 使用长连接接收事件**（无需填写回调 URL）。
@@ -58,8 +58,8 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\clean_project.ps1
 ## Local Tests
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_deepseek_api.ps1
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_feishu_ws_config.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test_deepseek_api.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test_feishu_ws_config.ps1
 conda run -n assetclaw python -m pytest
 ```
 

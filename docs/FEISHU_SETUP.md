@@ -84,7 +84,7 @@ python -c "import lark_oapi; print('lark_oapi OK')"
 ```powershell
 cd <project-root>
 conda activate assetclaw
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot_local.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot_local.ps1
 ```
 
 等待终端显示：

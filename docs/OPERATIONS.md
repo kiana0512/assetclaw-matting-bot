@@ -4,7 +4,7 @@
 
 ```powershell
 cd <project-root>
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot_local.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot_local.ps1
 ```
 
 `start_bot_local.ps1` 是后端维护的唯一推荐入口。它会：
@@ -25,20 +25,20 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot_local.ps1
 ## 停止
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\stop_bot_local.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\stop_bot_local.ps1
 ```
 
 ## 单独启动
 
 ```powershell
 # 仅 Gateway（本地调试）
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_local_gateway.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\start_local_gateway.ps1
 
 # 仅飞书 WS 接收器
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_feishu_ws.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\start_feishu_ws.ps1
 
 # 仅 WebUI
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_external_webui.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\start_external_webui.ps1
 ```
 
 单独启动只用于定位问题。正常恢复服务用 `start_bot_local.ps1`。
@@ -46,7 +46,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_external_webui.ps1
 ## 清理缓存和运行产物
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\clean_project.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\clean_project.ps1
 ```
 
 清理范围：
@@ -95,8 +95,8 @@ Get-Content logs\gateway.log -Tail 50
 ## 测试命令
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_llm_proxy.ps1
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_feishu_ws_config.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test_llm_proxy.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test_feishu_ws_config.ps1
 conda run -n assetclaw python -m pytest
 ```
 

@@ -50,7 +50,7 @@ Python：<comfyui-root>\python
 启动 ComfyUI 后端：
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\run_comfyui.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\run_comfyui.ps1
 ```
 
 这个脚本不会激活 `assetclaw`，也不会修改秋叶环境；它只进入秋叶 ComfyUI 目录并调用秋叶 python。

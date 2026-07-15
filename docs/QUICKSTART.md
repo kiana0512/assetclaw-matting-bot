@@ -26,13 +26,13 @@ SKILL_API_TOKEN=your_token
 启动：
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot_local.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot_local.ps1
 ```
 
 如果要跑真实 ComfyUI 抠图，先单独启动秋叶环境里的 ComfyUI：
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\run_comfyui.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\run_comfyui.ps1
 ```
 
 飞书后台：**事件与回调 → 使用长连接接收事件**（不需要 URL）。
@@ -44,11 +44,11 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\run_comfyui.ps1
 conda run -n assetclaw python -m assetclaw_matting.cli.main init-db
 
 # 单独启动 Gateway
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_local_gateway.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\start_local_gateway.ps1
 
 # 测试 DeepSeek / WS 配置 / 单元测试
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_deepseek_api.ps1
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_feishu_ws_config.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test_deepseek_api.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test_feishu_ws_config.ps1
 conda run -n assetclaw python -m pytest
 ```
 

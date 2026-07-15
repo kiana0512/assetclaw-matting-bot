@@ -4,10 +4,10 @@
 
 1. 确认飞书后台事件订阅方式为“使用长连接接收事件”，不是“配置请求网址”。
 2. 检查 `.env` 中 `FEISHU_EVENT_MODE=ws`，并且 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 已填写。
-3. 确认 WS Receiver 正在运行：查看 `logs/feishu_ws.log`，或重新运行 `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_feishu_ws.ps1`。
+3. 确认 WS Receiver 正在运行：查看 `logs/feishu_ws.log`，或重新运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\start_feishu_ws.ps1`。
 4. 检查 Win3090 能出向访问飞书开放平台：`open.feishu.cn`。
 5. 检查 Gateway 是否运行：`Invoke-RestMethod http://127.0.0.1:7865/health`。
-6. 运行 `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_feishu_ws_config.ps1` 检查本地配置。
+6. 运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test_feishu_ws_config.ps1` 检查本地配置。
 
 ## 飞书重复回复
 
@@ -44,7 +44,7 @@ storage\feishu_inbox\日期\会话\
 3. 404：检查 `DEEPSEEK_BASE_URL=https://api.deepseek.com`，不要重复拼 `/v1`；检查模型名是否为 `deepseek-v4-flash` / `deepseek-v4-pro`。
 4. 429 / rate limit：稍后重试，或增加重试/backoff。
 5. timeout：调大 `DEEPSEEK_TIMEOUT_SECONDS`，或保持 `DEEPSEEK_THINKING_TYPE=disabled`。
-6. 运行 `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_deepseek_api.ps1` 直接测试 DeepSeek 和 `/brain/test`。
+6. 运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test_deepseek_api.ps1` 直接测试 DeepSeek 和 `/brain/test`。
 
 旧 `scripts\test_llm_proxy.ps1` 仅用于 LLM Proxy 兼容测试。
 
@@ -66,7 +66,7 @@ storage\feishu_inbox\日期\会话\
   chcp 65001 | Out-Null
   [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
   ```
-- 启动 Gateway 时用 `pwsh`（PowerShell 7+），不用 `powershell`（5.x）
+- 启动 Gateway 时使用 `powershell.exe`（Windows PowerShell 5.1）；脚本也兼容 PowerShell 7，并会让子进程沿用当前解释器
 - 日志文件编码已设置为 UTF-8
 
 ## Cloudflare / 内网穿透（已禁用）
@@ -141,8 +141,8 @@ $headers = @{"X-Skill-Token"="your_token"}
 Invoke-RestMethod http://127.0.0.1:7865/skills/v1/manifest -Headers $headers
 
 # 运行完整测试套件
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_llm_proxy.ps1
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_deepseek_api.ps1
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\test_feishu_ws_config.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test_llm_proxy.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test_deepseek_api.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test_feishu_ws_config.ps1
 conda run -n assetclaw python -m pytest
 ```

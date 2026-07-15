@@ -7,6 +7,11 @@ chcp 65001 | Out-Null
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 $OutputEncoding = [System.Text.UTF8Encoding]::new()
 
+$PowerShellExe = (Get-Process -Id $PID).Path
+if ([string]::IsNullOrWhiteSpace($PowerShellExe) -or -not (Test-Path -LiteralPath $PowerShellExe -PathType Leaf)) {
+  throw "Unable to resolve current PowerShell executable."
+}
+
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $ProjectRoot
 New-Item -ItemType Directory -Force -Path "logs" | Out-Null
@@ -72,7 +77,8 @@ function Stop-OldProcesses {
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
   Write-Host "old Feishu WS receiver: stopped (if any)"
 
-  pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\stop_unity_mcp.ps1 2>&1 | Write-Host
+  & $script:PowerShellExe -NoProfile -ExecutionPolicy Bypass `
+    -File (Join-Path $PSScriptRoot "stop_unity_mcp.ps1") 2>&1 | Write-Host
 }
 
 function Wait-Gateway {
@@ -163,7 +169,7 @@ function Show-Status {
   if (-not $NoMonitor) {
     Write-Host "Live conversation trace. Press q or Ctrl+C to close this log monitor."
   }
-  Write-Host "Services keep running in background. Stop with: pwsh -File scripts\stop_bot_local.ps1"
+  Write-Host "Services keep running in background. Stop with: & `"$PowerShellExe`" -NoProfile -ExecutionPolicy Bypass -File scripts\stop_bot_local.ps1"
   Write-Host ""
 }
 
@@ -202,7 +208,7 @@ if (-not (Test-Path "logs\conversation.log")) {
 }
 
 Write-Host "Starting local Gateway hidden..."
-Start-Process pwsh `
+Start-Process -FilePath $PowerShellExe `
   -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File scripts\start_local_gateway.ps1" `
   -RedirectStandardOutput "logs\gateway_console.out.log" `
   -RedirectStandardError "logs\gateway_console.err.log" `
@@ -214,7 +220,7 @@ if (-not (Wait-Gateway)) {
 }
 
 Write-Host "Starting Unity MCP server hidden..."
-Start-Process pwsh `
+Start-Process -FilePath $PowerShellExe `
   -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File scripts\start_unity_mcp.ps1" `
   -RedirectStandardOutput "logs\unity_mcp_launcher.out.log" `
   -RedirectStandardError "logs\unity_mcp_launcher.err.log" `
@@ -233,14 +239,14 @@ if (-not $unityMcpReady) {
 }
 
 Write-Host "Starting Feishu WS receiver hidden..."
-Start-Process pwsh `
+Start-Process -FilePath $PowerShellExe `
   -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File scripts\start_feishu_ws.ps1" `
   -RedirectStandardOutput "logs\feishu_ws_console.out.log" `
   -RedirectStandardError "logs\feishu_ws_console.err.log" `
   -WindowStyle Hidden
 
 Write-Host "Starting WebUI hidden..."
-Start-Process pwsh `
+Start-Process -FilePath $PowerShellExe `
   -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File scripts\start_external_webui.ps1" `
   -RedirectStandardOutput "logs\webui_console.out.log" `
   -RedirectStandardError "logs\webui_console.err.log" `
