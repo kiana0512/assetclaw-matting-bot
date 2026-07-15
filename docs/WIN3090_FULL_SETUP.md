@@ -26,11 +26,11 @@ COMFYUI_URL=http://127.0.0.1:8188
 启动 ComfyUI 后端：
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\run_comfyui.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\run_comfyui.ps1
 ```
 
 启动 Agent：
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot_local.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\start_bot_local.ps1
 ```

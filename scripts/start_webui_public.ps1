@@ -9,6 +9,11 @@ chcp 65001 | Out-Null
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 $OutputEncoding = [System.Text.UTF8Encoding]::new()
 
+$PowerShellExe = (Get-Process -Id $PID).Path
+if ([string]::IsNullOrWhiteSpace($PowerShellExe) -or -not (Test-Path -LiteralPath $PowerShellExe -PathType Leaf)) {
+  throw "Unable to resolve current PowerShell executable."
+}
+
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $ProjectRoot
 New-Item -ItemType Directory -Force -Path "logs" | Out-Null
@@ -77,7 +82,7 @@ function Stop-WebUiOnly {
 
 function Start-WebUiOnly {
   Write-Host "Starting WebUI only. Backend Agent/Gateway will not be touched..."
-  Start-Process pwsh `
+  Start-Process -FilePath $PowerShellExe `
     -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File scripts\start_external_webui.ps1" `
     -RedirectStandardOutput "logs\webui_console.out.log" `
     -RedirectStandardError "logs\webui_console.err.log" `
@@ -185,7 +190,7 @@ Show-PublicUrl $publicUrl
 Write-Host "Local WebUI:    $LocalUrl"
 Write-Host "URL file:       logs\public_webui_url.txt"
 Write-Host "Tunnel logs:    logs\cloudflared.out.log / logs\cloudflared.err.log"
-Write-Host "Stop command:   pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\stop_webui_public.ps1"
+Write-Host "Stop command:   & `"$PowerShellExe`" -NoProfile -ExecutionPolicy Bypass -File scripts\stop_webui_public.ps1"
 Write-Host ""
 Write-Host "Note: trycloudflare free quick tunnels usually generate a new URL each start."
 Write-Host ""

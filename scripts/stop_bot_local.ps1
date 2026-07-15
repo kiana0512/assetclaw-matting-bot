@@ -4,6 +4,11 @@ chcp 65001 | Out-Null
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 $OutputEncoding = [System.Text.UTF8Encoding]::new()
 
+$PowerShellExe = (Get-Process -Id $PID).Path
+if ([string]::IsNullOrWhiteSpace($PowerShellExe) -or -not (Test-Path -LiteralPath $PowerShellExe -PathType Leaf)) {
+  throw "Unable to resolve current PowerShell executable."
+}
+
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $ProjectRoot
 
@@ -45,7 +50,8 @@ if ($port5180) {
 }
 
 # 4. Stop Unity MCP local HTTP server
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\stop_unity_mcp.ps1 2>&1 | Write-Host
+& $PowerShellExe -NoProfile -ExecutionPolicy Bypass `
+  -File (Join-Path $PSScriptRoot "stop_unity_mcp.ps1") 2>&1 | Write-Host
 
 # 5. Stop ws_receiver python processes (those with ws_receiver in command line)
 $pyProcs = Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'python3.exe' OR Name = 'pythonw.exe'" -ErrorAction SilentlyContinue
