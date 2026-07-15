@@ -158,19 +158,58 @@ async def _run_cherry_html_async(
         if not path.exists():
             raise FileNotFoundError(str(path))
 
-    chrome = _resolve_chrome(chrome_path)
     work_root = Path(storage_dir or tempfile.gettempdir()) / "cherry_html_runner"
     work_root.mkdir(parents=True, exist_ok=True)
     _cleanup_old_sessions(work_root)
-    session_dir = Path(tempfile.mkdtemp(prefix="run_", dir=str(work_root)))
-    profile_dir = session_dir / "chrome_profile"
-    download_dir = session_dir / "downloads"
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    download_dir.mkdir(parents=True, exist_ok=True)
-    port = _free_port()
-    proc = _start_chrome(chrome, port, profile_dir)
+
+    proc: subprocess.Popen[Any] | None = None
+    session_dir: Path | None = None
+    download_dir: Path | None = None
+    ws_url = ""
+    launch_errors: list[str] = []
+    browsers = _resolve_browser_candidates(chrome_path)
+    if not browsers:
+        raise FileNotFoundError("Chrome or Edge executable not found")
+    for browser in browsers:
+        for attempt in range(1, 3):
+            candidate_session = Path(tempfile.mkdtemp(prefix="run_", dir=str(work_root)))
+            profile_dir = candidate_session / "chrome_profile"
+            candidate_download = candidate_session / "downloads"
+            stdout_path = candidate_session / "browser.stdout.log"
+            stderr_path = candidate_session / "browser.stderr.log"
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            candidate_download.mkdir(parents=True, exist_ok=True)
+            port = _free_port()
+            candidate_proc: subprocess.Popen[Any] | None = None
+            try:
+                candidate_proc = _start_chrome(
+                    browser,
+                    port,
+                    profile_dir,
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
+                )
+                candidate_ws = _wait_for_page_ws(port, candidate_proc)
+            except Exception as exc:
+                if candidate_proc is not None:
+                    _stop_chrome(candidate_proc)
+                detail = _browser_start_failure(browser, attempt, port, exc, stdout_path, stderr_path)
+                launch_errors.append(detail)
+                _write_browser_start_failure(work_root, detail)
+                shutil.rmtree(candidate_session, ignore_errors=True)
+                continue
+            proc = candidate_proc
+            session_dir = candidate_session
+            download_dir = candidate_download
+            ws_url = candidate_ws
+            break
+        if proc is not None:
+            break
+
+    if proc is None or session_dir is None or download_dir is None or not ws_url:
+        raise RuntimeError("Cherry browser could not start after retries:\n" + "\n".join(launch_errors))
+
     try:
-        ws_url = _wait_for_page_ws(port)
         async with CdpClient(ws_url) as cdp:
             await cdp.send("Page.enable")
             await cdp.send("Runtime.enable")
@@ -293,8 +332,8 @@ def _extract_outputs(zip_path: Path, input_root: Path, output_root: Path, files:
                 shutil.copyfileobj(src, dst)
 
 
-def _resolve_chrome(chrome_path: Path | None) -> Path:
-    candidates = []
+def _resolve_browser_candidates(chrome_path: Path | None) -> list[Path]:
+    candidates: list[Path] = []
     if chrome_path:
         candidates.append(Path(chrome_path))
     for env_name in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
@@ -307,45 +346,74 @@ def _resolve_chrome(chrome_path: Path | None) -> Path:
                 Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
             ]
         )
+    for name in ("chrome", "msedge"):
+        resolved = shutil.which(name)
+        if resolved:
+            candidates.append(Path(resolved))
+
+    found: list[Path] = []
+    seen: set[str] = set()
     for candidate in candidates:
         # An empty Path setting is represented as Path("."), which exists but
         # is not executable.  Accept only files so preflight cannot falsely
         # report the current directory as the browser runtime.
-        if candidate.is_file():
-            return candidate
-    resolved = shutil.which("chrome") or shutil.which("msedge")
-    if resolved:
-        return Path(resolved)
+        key = str(candidate).lower()
+        if candidate.is_file() and key not in seen:
+            found.append(candidate)
+            seen.add(key)
+    return found
+
+
+def _resolve_chrome(chrome_path: Path | None) -> Path:
+    candidates = _resolve_browser_candidates(chrome_path)
+    if candidates:
+        return candidates[0]
     raise FileNotFoundError("Chrome or Edge executable not found")
 
 
-def _start_chrome(chrome: Path, port: int, profile_dir: Path) -> subprocess.Popen[Any]:
+def _start_chrome(
+    chrome: Path,
+    port: int,
+    profile_dir: Path,
+    *,
+    stdout_path: Path | None = None,
+    stderr_path: Path | None = None,
+) -> subprocess.Popen[Any]:
     flags = 0
     if hasattr(subprocess, "CREATE_NO_WINDOW"):
         flags = subprocess.CREATE_NO_WINDOW
-    return subprocess.Popen(
-        [
-            str(chrome),
-            "--headless=new",
-            "--disable-gpu",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-background-networking",
-            "--disable-component-update",
-            "--disable-sync",
-            "--disable-extensions",
-            "--disable-default-apps",
-            "--disable-logging",
-            "--disable-features=Translate,OptimizationHints",
-            "--allow-file-access-from-files",
-            f"--remote-debugging-port={port}",
-            f"--user-data-dir={profile_dir}",
-            "about:blank",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=flags,
-    )
+    stdout_handle = stdout_path.open("wb") if stdout_path else None
+    stderr_handle = stderr_path.open("wb") if stderr_path else None
+    try:
+        return subprocess.Popen(
+            [
+                str(chrome),
+                "--headless=new",
+                "--disable-gpu",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-background-networking",
+                "--disable-component-update",
+                "--disable-sync",
+                "--disable-extensions",
+                "--disable-default-apps",
+                "--enable-logging=stderr",
+                "--v=0",
+                "--disable-features=Translate,OptimizationHints",
+                "--allow-file-access-from-files",
+                f"--remote-debugging-port={port}",
+                f"--user-data-dir={profile_dir}",
+                "about:blank",
+            ],
+            stdout=stdout_handle or subprocess.DEVNULL,
+            stderr=stderr_handle or subprocess.DEVNULL,
+            creationflags=flags,
+        )
+    finally:
+        if stdout_handle:
+            stdout_handle.close()
+        if stderr_handle:
+            stderr_handle.close()
 
 
 def _stop_chrome(proc: subprocess.Popen[Any]) -> None:
@@ -358,19 +426,56 @@ def _stop_chrome(proc: subprocess.Popen[Any]) -> None:
         proc.kill()
 
 
-def _wait_for_page_ws(port: int) -> str:
-    deadline = time.time() + 20
+def _wait_for_page_ws(port: int, proc: subprocess.Popen[Any] | None = None) -> str:
+    deadline = time.time() + 30
     last_error: Exception | None = None
-    while time.time() < deadline:
-        try:
-            pages = requests.get(f"http://127.0.0.1:{port}/json/list", timeout=2).json()
-            for page in pages:
-                if page.get("type") == "page" and page.get("webSocketDebuggerUrl"):
-                    return str(page["webSocketDebuggerUrl"])
-        except Exception as exc:
-            last_error = exc
-        time.sleep(0.2)
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        while time.time() < deadline:
+            if proc is not None and proc.poll() is not None:
+                raise RuntimeError(f"browser exited before debugger became ready (exit_code={proc.returncode})")
+            try:
+                pages = session.get(f"http://127.0.0.1:{port}/json/list", timeout=(0.5, 1.5)).json()
+                for page in pages:
+                    if page.get("type") == "page" and page.get("webSocketDebuggerUrl"):
+                        return str(page["webSocketDebuggerUrl"])
+            except Exception as exc:
+                last_error = exc
+            time.sleep(0.2)
+    finally:
+        session.close()
     raise TimeoutError(f"Chrome remote debugging endpoint did not start: {last_error}")
+
+
+def _browser_start_failure(
+    browser: Path,
+    attempt: int,
+    port: int,
+    exc: Exception,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> str:
+    diagnostics = _read_log_tail(stderr_path) or _read_log_tail(stdout_path)
+    suffix = f"\nbrowser output:\n{diagnostics}" if diagnostics else ""
+    return f"browser={browser} attempt={attempt} port={port}: {exc}{suffix}"
+
+
+def _read_log_tail(path: Path, max_chars: int = 6000) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+    return text[-max_chars:]
+
+
+def _write_browser_start_failure(work_root: Path, detail: str) -> None:
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    path = work_root / f"browser_start_failure_{stamp}_{time.time_ns() % 1_000_000:06d}.log"
+    try:
+        path.write_text(detail, encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _wait_download(download_dir: Path, timeout_seconds: int) -> Path:

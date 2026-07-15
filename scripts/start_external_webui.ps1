@@ -19,4 +19,7 @@ if (-not (Test-Path "node_modules\vite") -or -not (Test-Path "node_modules\vue")
 }
 
 Write-Host "Starting AssetClaw External WebUI on http://127.0.0.1:5180 ..."
-npm run dev -- --host 127.0.0.1 --port 5180
+# Host, port, and strict-port behavior are already defined in package.json.
+# Repeating them through npm.ps1 on Windows can strip the option names and
+# pass only their values to Vite, which then treats 127.0.0.1 as the app root.
+npm run dev
