@@ -1,0 +1,34 @@
+{
+  "date": "test_frame_workflow_routes_sto0",
+  "feishu": {
+    "baseUrl": "",
+    "tableId": "",
+    "viewId": ""
+  },
+  "records": [
+    {
+      "recordId": "rec_story_idle",
+      "character": "gary",
+      "animation": "idle",
+      "displayName": "",
+      "assetKind": "story",
+      "unityCategory": "剧情",
+      "progress": "待抽帧",
+      "processOption": "",
+      "processVariant": "default",
+      "types": [
+        "剧情"
+      ],
+      "attachments": [
+        {
+          "name": "story.mp4",
+          "localPath": "story/videos/gary-idle/source.mp4"
+        }
+      ],
+      "taskKey": "gary-idle",
+      "skipped": false,
+      "skipReason": ""
+    }
+  ],
+  "skipped": []
+}

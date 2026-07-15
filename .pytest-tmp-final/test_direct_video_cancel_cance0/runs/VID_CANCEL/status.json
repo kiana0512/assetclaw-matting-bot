@@ -1,0 +1,44 @@
+{
+  "id": "VID_CANCEL",
+  "status": "CANCELED",
+  "stage": "canceled",
+  "run_label": "source.mp4",
+  "videos": [
+    {
+      "name": "source.mp4"
+    }
+  ],
+  "children": {
+    "comfyui_run_id": "COMFY_CHILD",
+    "cherry_run_ids": [
+      "CHERRY_CHILD"
+    ],
+    "cancel_results": [
+      {
+        "kind": "ComfyUI",
+        "run_id": "COMFY_CHILD",
+        "ok": true,
+        "status": "CANCELED",
+        "error": ""
+      },
+      {
+        "kind": "Cherry",
+        "run_id": "CHERRY_CHILD",
+        "ok": true,
+        "status": "CANCELED",
+        "error": ""
+      }
+    ]
+  },
+  "log": [
+    {
+      "ts": "2026-07-15T14:33:56",
+      "message": "用户请求取消任务。"
+    },
+    {
+      "ts": "2026-07-15T14:33:56",
+      "message": "已同步取消子任务：ComfyUI COMFY_CHILD CANCELED，Cherry CHERRY_CHILD CANCELED"
+    }
+  ],
+  "updated_at": "2026-07-15T14:33:56"
+}

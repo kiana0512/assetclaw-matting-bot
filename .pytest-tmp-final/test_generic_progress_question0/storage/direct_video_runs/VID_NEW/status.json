@@ -1,0 +1,1 @@
+{"id": "VID_NEW", "status": "RUNNING", "stage": "matting", "created_at": "2026-07-15T11:00:00", "updated_at": "2026-07-15T11:10:00", "videos": [{"frame_count": 43, "aspect": "square", "cherry_profile": "half", "cherry_output_size": "256x256"}], "children": {"comfyui": {"completed": 6, "total": 43, "status": "RUNNING"}}}

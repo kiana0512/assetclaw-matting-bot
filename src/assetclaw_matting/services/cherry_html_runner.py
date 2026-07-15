@@ -308,7 +308,10 @@ def _resolve_chrome(chrome_path: Path | None) -> Path:
             ]
         )
     for candidate in candidates:
-        if candidate.exists():
+        # An empty Path setting is represented as Path("."), which exists but
+        # is not executable.  Accept only files so preflight cannot falsely
+        # report the current directory as the browser runtime.
+        if candidate.is_file():
             return candidate
     resolved = shutil.which("chrome") or shutil.which("msedge")
     if resolved:

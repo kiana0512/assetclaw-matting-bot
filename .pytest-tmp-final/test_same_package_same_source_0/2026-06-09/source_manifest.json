@@ -1,0 +1,53 @@
+{
+  "date": "2026-06-09",
+  "feishu": {},
+  "records": [
+    {
+      "recordId": "rec_creamy_happy_emoji_default",
+      "character": "creamy",
+      "animation": "happy",
+      "displayName": "happy",
+      "assetKind": "emoji",
+      "unityCategory": "订单",
+      "progress": "待处理",
+      "processOption": "",
+      "processVariant": "default",
+      "types": [
+        "订单"
+      ],
+      "attachments": [
+        {
+          "name": "a.mp4",
+          "localPath": "emoji/videos/creamy-happy/source.mp4"
+        }
+      ],
+      "taskKey": "creamy-happy",
+      "skipped": false,
+      "skipReason": ""
+    },
+    {
+      "recordId": "rec_creamy_happy_emoji_default",
+      "character": "creamy",
+      "animation": "happy",
+      "displayName": "happy",
+      "assetKind": "emoji",
+      "unityCategory": "剧情",
+      "progress": "待处理",
+      "processOption": "",
+      "processVariant": "default",
+      "types": [
+        "剧情"
+      ],
+      "attachments": [
+        {
+          "name": "a.mp4",
+          "localPath": "emoji/videos/creamy-happy/source.mp4"
+        }
+      ],
+      "taskKey": "creamy-happy",
+      "skipped": false,
+      "skipReason": ""
+    }
+  ],
+  "skipped": []
+}

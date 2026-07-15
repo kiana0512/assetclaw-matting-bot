@@ -1,0 +1,51 @@
+{
+  "generatedAt": "2026-07-15T14:33:59+08:00",
+  "dateRoot": "E:\\assetclaw-matting-bot\\.pytest-tmp-final\\test_scene_and_emoji_same_name0\\2026-06-09",
+  "sourceManifest": "../source_manifest.json",
+  "packages": {
+    "scene": {
+      "json": "scene/animation_resource_manifest.json",
+      "framesRoot": "scene/frames",
+      "tasks": [
+        {
+          "character": "heather",
+          "animation": "idle",
+          "displayName": "待机",
+          "unityCategories": [
+            "角色动画"
+          ],
+          "processVariant": "default",
+          "sourceImageDir": "../scene/smooth/heather-idle",
+          "sourceSmoothDir": "../scene/smooth/heather-idle",
+          "readyDir": "scene/frames/heather-idle",
+          "frameCount": 1
+        }
+      ]
+    },
+    "emoji": {
+      "json": "emoji/animation_resource_manifest.json",
+      "framesRoot": "emoji/frames",
+      "tasks": [
+        {
+          "character": "heather",
+          "animation": "idle",
+          "displayName": "待机",
+          "unityCategories": [
+            "剧情"
+          ],
+          "processVariant": "default",
+          "sourceImageDir": "../emoji/smooth/heather-idle",
+          "sourceSmoothDir": "../emoji/smooth/heather-idle",
+          "readyDir": "emoji/frames/heather-idle",
+          "frameCount": 1
+        }
+      ]
+    },
+    "story": {
+      "json": "story/animation_resource_manifest.json",
+      "framesRoot": "story/frames",
+      "tasks": []
+    }
+  },
+  "warnings": []
+}

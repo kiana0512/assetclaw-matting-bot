@@ -1,0 +1,15 @@
+{
+  "status": "RUNNING",
+  "stage": "zip",
+  "run_label": null,
+  "created_at": null,
+  "updated_at": null,
+  "videos": [],
+  "children": {},
+  "fps": null,
+  "zip_path": "",
+  "pipeline_notice": "",
+  "error": "",
+  "last_log": "",
+  "run_dir": "E:\\assetclaw-matting-bot\\.pytest-tmp-final\\test_direct_video_zip_contains0\\runs\\VID_ZIP_TEST"
+}

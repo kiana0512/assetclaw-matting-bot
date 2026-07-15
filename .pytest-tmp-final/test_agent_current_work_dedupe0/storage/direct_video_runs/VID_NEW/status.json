@@ -1,0 +1,1 @@
+{"id": "VID_NEW", "status": "RUNNING", "stage": "matting", "created_at": "2026-07-14T10:05:00", "updated_at": "2026-07-14T10:05:00", "videos": [{"name": "7月13日思考-1_5.mp4", "frame_count": 111, "matte_dir": "E:\\assetclaw-matting-bot\\.pytest-tmp-final\\test_agent_current_work_dedupe0\\storage\\direct_video_runs\\VID_NEW\\matte\\video_01", "cherry_output_size": "384x512"}]}

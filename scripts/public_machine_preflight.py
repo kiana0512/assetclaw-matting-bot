@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import sys
 from pathlib import Path
@@ -20,8 +21,14 @@ def run_checks() -> dict[str, Any]:
     versions: dict[str, str] = {}
     for module_name in ("cv2", "numpy", "torch", "flask", "yaml", "psutil", "tqdm"):
         try:
-            module = __import__(module_name)
-            versions[module_name] = str(getattr(module, "__version__", "installed"))
+            __import__(module_name)
+            distribution_name = {"cv2": "opencv-python-headless", "yaml": "PyYAML"}.get(
+                module_name, module_name
+            )
+            try:
+                versions[module_name] = importlib.metadata.version(distribution_name)
+            except importlib.metadata.PackageNotFoundError:
+                versions[module_name] = "installed"
         except Exception as exc:
             versions[module_name] = f"missing: {exc}"
     checks.append(_check("python_dependencies", all(not value.startswith("missing:") for value in versions.values()), versions))

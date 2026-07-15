@@ -1,0 +1,38 @@
+{
+  "generatedAt": "2026-07-15T14:33:59+08:00",
+  "dateRoot": "E:\\assetclaw-matting-bot\\.pytest-tmp-final\\test_same_package_same_source_0\\2026-06-09",
+  "sourceManifest": "../source_manifest.json",
+  "packages": {
+    "scene": {
+      "json": "scene/animation_resource_manifest.json",
+      "framesRoot": "scene/frames",
+      "tasks": []
+    },
+    "emoji": {
+      "json": "emoji/animation_resource_manifest.json",
+      "framesRoot": "emoji/frames",
+      "tasks": [
+        {
+          "character": "creamy",
+          "animation": "happy",
+          "displayName": "happy",
+          "unityCategories": [
+            "订单",
+            "剧情"
+          ],
+          "processVariant": "default",
+          "sourceImageDir": "../emoji/smooth/creamy-happy",
+          "sourceSmoothDir": "../emoji/smooth/creamy-happy",
+          "readyDir": "emoji/frames/creamy-happy",
+          "frameCount": 1
+        }
+      ]
+    },
+    "story": {
+      "json": "story/animation_resource_manifest.json",
+      "framesRoot": "story/frames",
+      "tasks": []
+    }
+  },
+  "warnings": []
+}

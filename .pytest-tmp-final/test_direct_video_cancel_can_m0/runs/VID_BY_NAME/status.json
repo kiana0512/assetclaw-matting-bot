@@ -1,0 +1,34 @@
+{
+  "id": "VID_BY_NAME",
+  "status": "CANCELED",
+  "stage": "canceled",
+  "run_label": "source_2.mp4",
+  "videos": [
+    {
+      "name": "source_2.mp4"
+    }
+  ],
+  "children": {
+    "comfyui_run_id": "COMFY_BY_NAME",
+    "cancel_results": [
+      {
+        "kind": "ComfyUI",
+        "run_id": "COMFY_BY_NAME",
+        "ok": true,
+        "status": "CANCELED",
+        "error": ""
+      }
+    ]
+  },
+  "log": [
+    {
+      "ts": "2026-07-15T14:33:56",
+      "message": "用户请求取消任务。"
+    },
+    {
+      "ts": "2026-07-15T14:33:56",
+      "message": "已同步取消子任务：ComfyUI COMFY_BY_NAME CANCELED"
+    }
+  ],
+  "updated_at": "2026-07-15T14:33:56"
+}
