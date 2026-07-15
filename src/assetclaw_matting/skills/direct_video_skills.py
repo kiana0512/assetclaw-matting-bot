@@ -228,7 +228,7 @@ def _worker(run_id: str) -> None:
 
 
 def _extract_all(run: dict[str, Any]) -> None:
-    python = Path(settings.comfyui_python_dir) / "python.exe"
+    python = Path(settings.comfyui_python_exe)
     script = Path(settings.assetclaw_root) / "scripts" / "extract_direct_video_frames.py"
     for item in run["videos"]:
         if _is_canceled(run):

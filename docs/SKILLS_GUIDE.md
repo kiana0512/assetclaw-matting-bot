@@ -278,7 +278,7 @@ ComfyUI 状态
 
 默认本地批量抠图使用 `<allowed-root>\input` 到 `<allowed-root>\output`，递归处理图片，并保留输入目录结构。启动前会返回任务摘要并要求确认；运行中采用安静进度推送，状态变化/明显进度变化/完成/失败会主动通知，用户主动问进度会立即返回。
 
-Cherry 帧序列处理工具位于 `<project-root>\Cherry_帧序列处理工具`。Agent 调用时会递归读取输入目录图片，按父文件夹分组做时序 Alpha 平滑、缩放、锐化，输出到目标目录并保留相同相对结构。实际处理使用秋叶环境 `<comfyui-root>\python\python.exe`，不要求 bot 的 conda 环境安装 torch。启动前会给图片数、序列数、参数摘要并要求确认。
+Cherry 后处理只使用 `<pipeline-root>\cherry-postprocess.html`。Agent 会按父文件夹分组并通过 Chrome/Edge 执行 HTML 中的 256×256 或 384×512 预设，输出时保留相对结构；HTML 或浏览器不可用时明确失败，不调用 Python 近似算法。
 
 Cherry / animation flow 这类长任务不能用短生命周期的 `python -c "run_start(...)"` 当作真实执行方式。`run_start` 会在当前进程里启动后台 worker/thread；如果 `python -c` 进程立刻退出，数据库可能显示 `RUNNING`，但输出目录会保持空、进度停在 `0/total`。手动补跑或测试时必须使用常驻 Gateway/Agent，或使用前台 worker，例如：
 

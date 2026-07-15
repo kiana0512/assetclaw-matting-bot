@@ -27,7 +27,13 @@ Copy-Item .env.example .env
 
 ```dotenv
 ANIMATION_ROOT=C:\animation_auto
-COMFYUI_AKI_ROOT=C:\ComfyUI-aki-v3
+COMFYUI_AKI_ROOT=C:\Users\zhangqichao\Desktop\ComfyUI-aki-v3
+COMFYUI_DIR=C:\Users\zhangqichao\Desktop\ComfyUI-aki-v3\ComfyUI
+COMFYUI_PYTHON_DIR=C:\Users\zhangqichao\Desktop\ComfyUI-aki-v3\python
+COMFYUI_PYTHON_EXE=C:\Users\zhangqichao\Desktop\ComfyUI-aki-v3\python\python.exe
+COMFYUI_WORKFLOW_PATH=C:\Users\zhangqichao\Desktop\ComfyUI-aki-v3\ComfyUI\user\default\workflows\ImageClip.json
+MATTING_PIPELINE_REPO_DIR=C:\imageclip
+CHERRY_POSTPROCESS_HTML_PATH=C:\imageclip\cherry-postprocess.html
 UNITY_PROJECT_DIR=C:\UnityProject
 ```
 
@@ -48,23 +54,23 @@ ALLOWED_ROOTS=C:\;Z:\;\\server\share
 
 ## 3. 安装环境
 
-推荐 Python 3.11 或 3.12：
+机器人可以使用独立的 Conda `assetclaw` 环境；不要用秋叶 Python 启动机器人：
 
 ```powershell
 Set-Location C:\assetclaw-matting-bot
-py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m pip install -e .
+conda activate assetclaw
+python -m pip install -e .
+python -m pip install -r requirements.txt
+python -c "import cv2, torch, flask, psutil, tqdm; print('bot dependencies OK')"
 ```
 
-`requirements.txt` 已包含 OpenCV（导入名 `cv2`）、NumPy、PyTorch、Flask、PyYAML、psutil 和 tqdm。GPU 机器若需要指定 CUDA 版 PyTorch，应先按机器 CUDA 版本安装对应 wheel，再执行 requirements；pip 会复用已满足的版本。
+`requirements.txt` 已包含 OpenCV（导入名 `cv2`）、NumPy、PyTorch、Flask、PyYAML、psutil 和 tqdm。GPU 机器若需要指定 CUDA 版 PyTorch，应先按机器 CUDA 版本安装对应 wheel，再执行 requirements；pip 会复用已满足的版本。秋叶环境继续使用其自己的 `python\python.exe` 和 PyTorch，两套环境互不替换。
 
 ## 4. 配置外部组件
 
 外部组件默认使用项目父目录下的可迁移约定目录：
 
-- ComfyUI：优先使用 `<project-parent>\ComfyUI-aki-v3`；如果秋叶目录名称不同，会自动查找同时包含 `ComfyUI` 和 `python` 子目录的同级目录
+- ComfyUI：优先读取 `.env`；未配置时会查找项目同级目录、当前用户桌面和 OneDrive 桌面下包含 `ComfyUI` 与 `python\python.exe` 的秋叶目录
 - 抠图管线：`<project-parent>\imageclip`
 - Unity：`<project-parent>\UnityProject`
 
@@ -86,10 +92,10 @@ Unity 项目同样先使用 `<project-parent>\UnityProject`，不存在时会按
 ## 5. 验证
 
 ```powershell
-.\.venv\Scripts\python.exe -c "import cv2, numpy, torch; print(cv2.__version__)"
-.\.venv\Scripts\python.exe -c "from assetclaw_matting.config import settings; print(settings.assetclaw_root); print(settings.animation_root); print(settings.allowed_roots_list)"
-.\.venv\Scripts\python.exe scripts\public_machine_preflight.py
-.\.venv\Scripts\python.exe -m pytest --ignore=tests/test_p4_assistant.py --basetemp=.pytest-tmp
+python -c "import cv2, numpy, torch; print(cv2.__version__)"
+python -c "from assetclaw_matting.config import settings; print(settings.comfyui_dir); print(settings.comfyui_python_exe); print(settings.matting_pipeline_repo_dir)"
+python scripts\public_machine_preflight.py
+python -m pytest --ignore=tests/test_p4_assistant.py --basetemp=.pytest-tmp
 ```
 
 预期第二条命令依次包含：
@@ -103,7 +109,7 @@ C:\animation_auto
 最后执行初始化与健康检查：
 
 ```powershell
-.\.venv\Scripts\python.exe -m assetclaw_matting.cli.main init-db
+python -m assetclaw_matting.cli.main init-db
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\start_local_gateway.ps1
 Invoke-RestMethod http://127.0.0.1:7865/health
 ```

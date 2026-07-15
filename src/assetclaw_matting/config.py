@@ -10,19 +10,28 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _discover_aki_root(parent: Path) -> Path:
+def _discover_aki_root(parent: Path, home: Path | None = None) -> Path:
     """Find an Aki/ComfyUI bundle without relying on its machine-specific folder name."""
+    user_home = Path.home() if home is None else Path(home)
     conventional = parent / "ComfyUI-aki-v3"
-    if (conventional / "ComfyUI").is_dir() and (conventional / "python").is_dir():
-        return conventional
-    try:
-        candidates = [
-            item
-            for item in parent.iterdir()
-            if item.is_dir() and (item / "ComfyUI").is_dir() and (item / "python").is_dir()
-        ]
-    except OSError:
-        candidates = []
+    direct_candidates = [
+        conventional,
+        user_home / "Desktop" / "ComfyUI-aki-v3",
+        user_home / "OneDrive" / "Desktop" / "ComfyUI-aki-v3",
+    ]
+    for candidate in direct_candidates:
+        if (candidate / "ComfyUI").is_dir() and (candidate / "python" / "python.exe").is_file():
+            return candidate
+    candidates: list[Path] = []
+    for search_root in (parent, user_home / "Desktop", user_home / "OneDrive" / "Desktop"):
+        try:
+            candidates.extend(
+                item
+                for item in search_root.iterdir()
+                if item.is_dir() and (item / "ComfyUI").is_dir() and (item / "python" / "python.exe").is_file()
+            )
+        except OSError:
+            continue
     return sorted(candidates, key=lambda item: item.name.lower())[0] if candidates else conventional
 
 
@@ -159,6 +168,7 @@ class Settings(BaseSettings):
     comfyui_aki_root: Path = PROJECT_ROOT.parent / "ComfyUI-aki-v3"
     comfyui_dir: Path = PROJECT_ROOT.parent / "ComfyUI-aki-v3" / "ComfyUI"
     comfyui_python_dir: Path = PROJECT_ROOT.parent / "ComfyUI-aki-v3" / "python"
+    comfyui_python_exe: Path = PROJECT_ROOT.parent / "ComfyUI-aki-v3" / "python" / "python.exe"
     comfyui_url: str = "http://127.0.0.1:8188"
     comfyui_workflow_path: Path = PROJECT_ROOT.parent / "ComfyUI-aki-v3" / "ComfyUI" / "user" / "default" / "workflows" / "ImageClip.json"
     comfyui_timeout_seconds: int = 600
@@ -223,6 +233,7 @@ class Settings(BaseSettings):
         animation_root = Path(data.get("animation_root") or parent / "animation_auto").expanduser()
         comfy_root = Path(data.get("comfyui_aki_root") or _discover_aki_root(parent)).expanduser()
         comfy_dir = Path(data.get("comfyui_dir") or comfy_root / "ComfyUI").expanduser()
+        comfy_python_dir = Path(data.get("comfyui_python_dir") or comfy_root / "python").expanduser()
         pipeline_root = Path(data.get("matting_pipeline_repo_dir") or parent / "imageclip").expanduser()
         defaults: dict[str, Path | str] = {
             "assetclaw_root": root,
@@ -235,7 +246,8 @@ class Settings(BaseSettings):
             "unity_project_dir": _discover_unity_project(parent),
             "comfyui_aki_root": comfy_root,
             "comfyui_dir": comfy_dir,
-            "comfyui_python_dir": comfy_root / "python",
+            "comfyui_python_dir": comfy_python_dir,
+            "comfyui_python_exe": comfy_python_dir / "python.exe",
             "comfyui_workflow_path": comfy_dir / "user" / "default" / "workflows" / "ImageClip.json",
             "matting_pipeline_repo_dir": pipeline_root,
             "cherry_postprocess_html_path": pipeline_root / "cherry-postprocess.html",

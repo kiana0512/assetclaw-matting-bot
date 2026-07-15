@@ -514,7 +514,7 @@ def _tool_dir() -> Path:
 def _python_path() -> Path:
     from assetclaw_matting.config import settings
 
-    return Path(settings.comfyui_python_dir) / "python.exe"
+    return Path(settings.comfyui_python_exe)
 
 
 def _get_run(run_id: str | None = None):

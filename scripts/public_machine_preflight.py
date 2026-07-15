@@ -31,7 +31,8 @@ def run_checks() -> dict[str, Any]:
         "animation": Path(settings.animation_root),
         "imageclip": Path(settings.matting_pipeline_repo_dir),
         "comfyui": Path(settings.comfyui_dir),
-        "comfyui_python": Path(settings.comfyui_python_dir),
+        "comfyui_python_dir": Path(settings.comfyui_python_dir),
+        "comfyui_python_exe": Path(settings.comfyui_python_exe),
     }
     for name, path in expected_paths.items():
         checks.append(_check(name, path.exists(), str(path)))

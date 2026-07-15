@@ -24,6 +24,8 @@ def comfyui_status() -> dict[str, Any]:
         "comfyui_dir_exists": settings.comfyui_dir.exists(),
         "comfyui_python_dir": str(settings.comfyui_python_dir),
         "comfyui_python_dir_exists": settings.comfyui_python_dir.exists(),
+        "comfyui_python_exe": str(settings.comfyui_python_exe),
+        "comfyui_python_exe_exists": settings.comfyui_python_exe.is_file(),
         "comfyui_version": _read_comfyui_version(settings.comfyui_dir),
     }
     if settings.comfyui_fake_mode:
