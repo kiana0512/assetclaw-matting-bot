@@ -49,6 +49,32 @@ def test_feishu_image_message_extracts_attachment() -> None:
     assert event.attachments[0]["resource_key"] == "img_key_1"
 
 
+def test_feishu_folder_message_is_recognized_without_fake_text() -> None:
+    event = from_webhook_dict({
+        "header": {"event_id": "evt_folder"},
+        "event": {
+            "sender": {"sender_id": {"open_id": "ou_1"}},
+            "message": {
+                "message_id": "om_folder",
+                "chat_id": "oc_1",
+                "chat_type": "p2p",
+                "message_type": "folder",
+                "content": json.dumps({"file_key": "folder_key_1", "file_name": "关键帧"}),
+            },
+        },
+    })
+
+    assert event.text == ""
+    assert event.attachments == [{
+        "type": "folder",
+        "source_message_type": "folder",
+        "resource_key": "folder_key_1",
+        "file_name": "关键帧",
+        "size": None,
+        "mime": None,
+    }]
+
+
 def test_feishu_audio_message_extracts_audio_attachment() -> None:
     event = from_webhook_dict({
         "header": {"event_id": "evt_audio"},
@@ -503,6 +529,74 @@ def test_current_work_keeps_all_members_of_active_repair_batch_visible() -> None
         assert f"video_{position}.mp4" in completed_text
 
 
+def test_current_work_groups_image_sequence_and_does_not_truncate_rows() -> None:
+    from assetclaw_matting.brain.result_formatter import _format_direct_media_overview
+
+    image_items = [
+        {
+            "name": f"{index:04d}.png",
+            "status": "完成",
+            "total": 1,
+            "matte_done": 1,
+            "smooth_done": 1,
+            "output_size": "256x256",
+        }
+        for index in range(22)
+    ]
+    video_runs = [
+        {
+            "run_id": f"VID_{index}",
+            "status": "DONE",
+            "stage": "done",
+            "items": [{"name": f"video_{index}.mp4", "status": "完成", "total": 1}],
+        }
+        for index in range(13)
+    ]
+    text = "\n".join(_format_direct_media_overview({
+        "direct_videos": video_runs,
+        "direct_images": [{
+            "run_id": "IMG_SEQUENCE",
+            "run_label": "关键帧",
+            "status": "DONE",
+            "stage": "done",
+            "items": image_items,
+        }],
+        "filters": {"date_start": "2026-07-21", "date_end": "2026-07-21"},
+    }))
+
+    assert "video_12.mp4" in text
+    assert "关键帧（22张）" in text
+    assert "0000.png" not in text
+    assert "未显示" not in text
+
+
+def test_current_work_in_feishu_only_shows_same_conversation(monkeypatch) -> None:
+    from assetclaw_matting.runtime_context import reset_runtime_context, set_runtime_context
+    from assetclaw_matting.skills import agent_ops_skills
+
+    monkeypatch.setattr(agent_ops_skills, "_direct_video_runs", lambda limit=40: [
+        {"run_id": "VID_OTHER", "conversation_id": "feishu:other", "items": []},
+    ])
+    monkeypatch.setattr(agent_ops_skills, "_direct_image_runs", lambda limit=40: [
+        {"run_id": "IMG_MINE", "conversation_id": "feishu:mine", "items": []},
+        {"run_id": "IMG_OTHER", "conversation_id": "feishu:other", "items": []},
+    ])
+    monkeypatch.setattr(agent_ops_skills, "_latest_comfyui", lambda: {})
+    monkeypatch.setattr(agent_ops_skills, "_latest_cherry", lambda: {})
+    monkeypatch.setattr(agent_ops_skills, "_latest_frame", lambda: {})
+    monkeypatch.setattr(agent_ops_skills, "_latest_pipeline", lambda: {})
+    monkeypatch.setattr(agent_ops_skills, "_pending_confirmations", lambda: [])
+    monkeypatch.setattr(agent_ops_skills, "_recent_errors", lambda: [])
+    token = set_runtime_context(channel="feishu", conversation_id="feishu:mine")
+    try:
+        payload = agent_ops_skills.current_work(include_gpu=False)
+    finally:
+        reset_runtime_context(token)
+
+    assert payload["direct_videos"] == []
+    assert [run["run_id"] for run in payload["direct_images"]] == ["IMG_MINE"]
+
+
 def test_direct_image_attachment_routes_without_confirmation(tmp_path: Path) -> None:
     image = tmp_path / "source.png"
     Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(image)
@@ -530,6 +624,34 @@ def test_direct_image_attachment_routes_without_confirmation(tmp_path: Path) -> 
     assert tool_calls[0].arguments["image_paths"] == [str(image)]
 
 
+def test_many_images_are_one_named_sequence_task(tmp_path: Path) -> None:
+    attachments = []
+    for index in range(22):
+        image = tmp_path / f"{index:04d}.png"
+        Image.new("RGBA", (8, 8), (index, 0, 0, 255)).save(image)
+        attachments.append({
+            "type": "image",
+            "file_name": image.name,
+            "downloaded": True,
+            "local_path": str(image),
+            "source_collection": "关键帧",
+        })
+
+    planned = plan_direct_image_task(BrainMessage(
+        text="",
+        conversation_id="feishu:chat_sequence:user",
+        user_id="user",
+        attachments=attachments,
+    ))
+
+    assert planned is not None
+    tool_calls, _reason = planned
+    assert len(tool_calls) == 1
+    assert tool_calls[0].skill == "direct_image.start"
+    assert tool_calls[0].arguments["run_label"] == "关键帧"
+    assert [Path(path).name for path in tool_calls[0].arguments["image_paths"]] == [f"{index:04d}.png" for index in range(22)]
+
+
 def test_direct_image_folder_attachment_routes_as_image_set(tmp_path: Path) -> None:
     folder = tmp_path / "海瑟序列帧"
     folder.mkdir()
@@ -555,8 +677,11 @@ def test_direct_image_folder_attachment_routes_as_image_set(tmp_path: Path) -> N
     assert tool_calls[0].arguments["run_label"] == "海瑟序列帧"
 
 
-def test_direct_image_zip_attachment_routes_as_image_set(tmp_path: Path) -> None:
+def test_direct_image_zip_attachment_routes_as_image_set(monkeypatch, tmp_path: Path) -> None:
     import zipfile
+    from assetclaw_matting.config import settings
+
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
 
     source = tmp_path / "src"
     source.mkdir()
@@ -586,6 +711,34 @@ def test_direct_image_zip_attachment_routes_as_image_set(tmp_path: Path) -> None
     assert len(paths) == 2
     assert paths[0].endswith("0001.png")
     assert paths[1].endswith("0002.png")
+    assert tool_calls[0].arguments["package_as_sequence"] is True
+    assert tool_calls[0].arguments["run_label"].endswith(".zip")
+
+
+def test_direct_image_zip_uses_natural_frame_order_and_stays_a_sequence(monkeypatch, tmp_path: Path) -> None:
+    import zipfile
+    from assetclaw_matting.config import settings
+
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+
+    archive = tmp_path / "keyframes.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        for name, color in (("10.png", 10), ("2.png", 2), ("1.png", 1)):
+            image = tmp_path / name
+            Image.new("RGBA", (8, 8), (color, 0, 0, 255)).save(image)
+            zf.write(image, name)
+
+    planned = plan_direct_image_task(BrainMessage(
+        text="",
+        conversation_id="feishu:chat_zip_order:user",
+        user_id="user",
+        attachments=[{"type": "file", "file_name": archive.name, "downloaded": True, "local_path": str(archive)}],
+    ))
+
+    assert planned is not None
+    tool_calls, _reason = planned
+    assert [Path(path).name for path in tool_calls[0].arguments["image_paths"]] == ["1.png", "2.png", "10.png"]
+    assert tool_calls[0].arguments["package_as_sequence"] is True
 
 
 def test_direct_image_followup_uses_recent_image_set(monkeypatch, tmp_path: Path) -> None:
@@ -1037,6 +1190,62 @@ def test_direct_image_send_results_returns_matte_processed_and_comparison(monkey
     assert run["images"][0]["postprocessed_result_path"] == str(result_image)
     assert run["images"][0]["comparison_path"] == str(comparison)
     assert run["images"][0]["result_path"] == str(result_image)
+
+
+def test_direct_image_sequence_sends_one_ordered_zip(monkeypatch, tmp_path: Path) -> None:
+    import zipfile
+
+    from assetclaw_matting.feishu.client import feishu_client
+    from assetclaw_matting.skills import direct_image_skills
+
+    monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", tmp_path / "runs")
+    sent_files: list[str] = []
+    monkeypatch.setattr(
+        feishu_client,
+        "send_file_to_chat",
+        lambda _chat_id, path, file_name: sent_files.append(file_name) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        feishu_client,
+        "send_image_to_chat",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("sequence must not send individual images")),
+    )
+    images = []
+    for index in range(2):
+        original = tmp_path / "original" / f"{index}.png"
+        matte = tmp_path / "matte" / str(index) / "0000.png"
+        smooth = tmp_path / "smooth" / str(index) / "0000.png"
+        original.parent.mkdir(parents=True, exist_ok=True)
+        matte.parent.mkdir(parents=True, exist_ok=True)
+        smooth.parent.mkdir(parents=True, exist_ok=True)
+        for path in (original, matte, smooth):
+            Image.new("RGBA", (8, 8), (index, 0, 0, 255)).save(path)
+        images.append({
+            "index": index + 1,
+            "source_name": f"{index:04d}.png",
+            "original_path": str(original),
+            "matte_dir": str(matte.parent),
+            "smooth_dir": str(smooth.parent),
+        })
+    run = {
+        "id": "IMG_SEQUENCE_TEST",
+        "run_label": "关键帧",
+        "chat_id": "oc_test",
+        "updated_at": "",
+        "images": images,
+        "log": [],
+    }
+
+    sent = direct_image_skills._send_results(run)
+
+    assert len(sent) == 1
+    assert sent_files == ["关键帧_animation_processed.zip"]
+    with zipfile.ZipFile(sent[0]) as archive:
+        names = set(archive.namelist())
+    for index in range(2):
+        for section in ("frames", "matte", "smooth", "comparison"):
+            assert f"{section}/{index:04d}.png" in names
+    assert "manifest.json" in names
 
 
 def test_direct_video_zip_contains_required_sections(monkeypatch, tmp_path: Path) -> None:

@@ -163,6 +163,7 @@ SKILLS: list[dict[str, Any]] = [
             "detail": "boolean optional",
             "media_type": "string optional video/image",
             "include_finished": "boolean optional",
+            "all_conversations": "boolean optional; defaults false for Feishu users",
         },
         domain="agent",
         risk_level="readonly",
@@ -2064,7 +2065,7 @@ SKILLS: list[dict[str, Any]] = [
     ),
     _skill(
         "direct_image.start",
-        "Process Feishu-uploaded image attachments directly: run ComfyUI matting and Cherry post-processing, then return the matte PNG, post-processed PNG, and an inline original/matte/post-process comparison image for each input.",
+        "Process Feishu-uploaded images or a ZIP image sequence directly: run ComfyUI matting and Cherry post-processing. A ZIP is always treated as one ordered sequence and returned as one ZIP; individual images keep the image result behavior.",
         True,
         direct_image_skills.start,
         {
@@ -2072,6 +2073,8 @@ SKILLS: list[dict[str, Any]] = [
             "source_names": "array[string] optional",
             "workflow_path": "string optional",
             "notify_interval_seconds": "integer optional",
+            "run_label": "string optional",
+            "package_as_sequence": "boolean optional",
         },
         domain="direct_image",
         risk_level="write_safe",
@@ -2087,6 +2090,17 @@ SKILLS: list[dict[str, Any]] = [
         domain="direct_image",
         risk_level="readonly",
         natural_language_examples=["图片处理进度", "这张图处理到哪了"],
+    ),
+    _skill(
+        "direct_image.package_and_send",
+        "Package an existing multi-image sequence run in source order and send one ZIP back to its original Feishu chat.",
+        True,
+        direct_image_skills.package_and_send,
+        {"run_id": "string optional", "package_name": "string optional"},
+        domain="direct_image",
+        risk_level="egress_caution",
+        requires_confirmation=False,
+        natural_language_examples=["把这组序列帧打包发回", "补发图片序列压缩包"],
     ),
     _skill(
         "direct_image.list",

@@ -75,6 +75,10 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
     event.attachments = _prepare_attachments(event, conversation_id)
     _remember_recent_attachments(conversation_id, event.attachments)
 
+    folder_result = _try_handle_folder_message(event, conversation_id, trace_id, dedup_key)
+    if folder_result is not None:
+        return folder_result
+
     if _is_simple_greeting(event.text):
         text_out = "初音在。今天想让我陪你聊一会儿，还是一起把某个任务往前推一点？"
         _try_reply(event.message_id, event.chat_id, text_out)
@@ -487,8 +491,15 @@ def _prepare_attachments(event: FeishuMessageEvent, conversation_id: str) -> lis
     day = datetime.now().strftime("%Y%m%d")
     inbox = settings.storage_dir / "feishu_inbox" / day / safe_conversation
     prepared: list[dict[str, object]] = []
+    pending_collection = _pending_folder_name(conversation_id)
     for index, attachment in enumerate(event.attachments, start=1):
         item = dict(attachment)
+        if str(item.get("type") or "").lower() == "folder":
+            item["downloaded"] = False
+            item["folder_message"] = True
+            item["error"] = "Feishu bot API does not expose native chat-folder contents"
+            prepared.append(item)
+            continue
         if _should_skip_compressed_feishu_video_download(item):
             item["downloaded"] = False
             item["download_skipped"] = True
@@ -532,6 +543,16 @@ def _prepare_attachments(event: FeishuMessageEvent, conversation_id: str) -> lis
                 error=redact_secrets(str(exc)),
             )
         prepared.append(item)
+    image_items = [
+        item for item in prepared
+        if str(item.get("type") or "").lower() == "image" and item.get("local_path")
+    ]
+    if pending_collection and image_items:
+        for item in image_items:
+            item["source_collection"] = pending_collection
+        from assetclaw_matting.db.repos import upsert_memory_note
+
+        upsert_memory_note(conversation_id, "pending_image_collection_name", "", source="feishu_attachment")
     return prepared
 
 
@@ -607,6 +628,12 @@ def _remember_recent_attachments(conversation_id: str, attachments: list[dict[st
     from assetclaw_matting.db.repos import upsert_memory_note
     from assetclaw_matting.skills.media_skills import IMAGE_EXTS
 
+    folders = [item for item in attachments if str(item.get("type") or "").lower() == "folder"]
+    if folders:
+        folder_name = str(folders[-1].get("file_name") or "序列帧").strip()
+        upsert_memory_note(conversation_id, "pending_image_collection_name", folder_name, source="feishu_folder")
+        return
+
     for item in reversed(attachments):
         path = str(item.get("local_path") or "")
         if path and _looks_like_image_set_path(Path(path)):
@@ -618,6 +645,55 @@ def _remember_recent_attachments(conversation_id: str, attachments: list[dict[st
             upsert_memory_note(conversation_id, "last_image_path", path, source="feishu_attachment")
             upsert_memory_note(conversation_id, "last_image_name", str(item.get("file_name") or Path(path).name), source="feishu_attachment")
             return
+
+
+def _pending_folder_name(conversation_id: str) -> str:
+    from assetclaw_matting.db.repos import list_memory_notes
+
+    for note in list_memory_notes(conversation_id, limit=30):
+        if note.get("key") == "pending_image_collection_name":
+            name = str(note.get("value") or "").strip()
+            if not name:
+                return ""
+            try:
+                updated = datetime.fromisoformat(str(note.get("updated_at") or ""))
+                now = datetime.now(updated.tzinfo) if updated.tzinfo else datetime.now()
+                if (now - updated).total_seconds() > 3600:
+                    return ""
+            except (TypeError, ValueError):
+                return ""
+            return name
+    return ""
+
+
+def _try_handle_folder_message(
+    event: FeishuMessageEvent,
+    conversation_id: str,
+    trace_id: str,
+    dedup_key: str,
+) -> FeishuProcessResult | None:
+    folders = [item for item in event.attachments if str(item.get("type") or "").lower() == "folder"]
+    if not folders:
+        return None
+    from assetclaw_matting.db.repos import update_event_dedup_status
+
+    name = str(folders[0].get("file_name") or "序列帧")
+    text_out = (
+        f"已收到文件夹「{name}」，但飞书暂不向机器人提供文件夹内的文件。"
+        "请一次全选其中的图片直接发送，不用逐张发送；"
+        f"我会自动合并为一个「{name}」序列任务，按文件名顺序处理，并只返回一个 ZIP。"
+    )
+    _try_reply(event.message_id, event.chat_id, text_out)
+    _log_direct_brain_message(conversation_id, event, text_out)
+    update_event_dedup_status(dedup_key, "success")
+    trace(
+        "feishu.folder_recognized",
+        trace_id=trace_id,
+        conversation_id=conversation_id,
+        message_id=event.message_id,
+        folder_name=name,
+    )
+    return FeishuProcessResult(ok=True, trace_id=trace_id, reply_text=text_out)
 
 
 def _looks_like_image_set_path(path: Path) -> bool:

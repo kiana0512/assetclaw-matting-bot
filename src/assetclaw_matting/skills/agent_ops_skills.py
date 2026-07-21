@@ -20,10 +20,18 @@ def current_work(
     detail: bool = False,
     media_type: str | None = None,
     include_finished: bool = True,
+    all_conversations: bool = False,
 ) -> dict[str, Any]:
     """Summarize the machine's current production context in one readonly call."""
     video_runs = _direct_video_runs(limit=40)
     image_runs = _direct_image_runs(limit=40)
+    from assetclaw_matting.runtime_context import get_runtime_context
+
+    runtime = get_runtime_context()
+    conversation_id = str(runtime.get("conversation_id") or "")
+    if runtime.get("channel") == "feishu" and conversation_id and not all_conversations:
+        video_runs = [run for run in video_runs if str(run.get("conversation_id") or "") == conversation_id]
+        image_runs = [run for run in image_runs if str(run.get("conversation_id") or "") == conversation_id]
     video_runs = _filter_media_runs(video_runs, date_start=date_start, date_end=date_end, query=query, include_finished=include_finished)
     image_runs = _filter_media_runs(image_runs, date_start=date_start, date_end=date_end, query=query, include_finished=include_finished)
     media = str(media_type or "").lower()
@@ -43,6 +51,7 @@ def current_work(
             "detail": bool(detail),
             "media_type": media_type or "",
             "include_finished": bool(include_finished),
+            "all_conversations": bool(all_conversations),
         },
         "direct_videos": video_runs,
         "direct_images": image_runs,
@@ -283,6 +292,7 @@ def _direct_video_runs(limit: int = 8) -> list[dict[str, Any]]:
                 "status": run.get("status"),
                 "stage": run.get("stage"),
                 "run_label": run.get("run_label"),
+                "conversation_id": run.get("conversation_id") or "",
                 "repair_batch": run.get("repair_batch") or {},
                 "created_at": run.get("created_at"),
                 "updated_at": run.get("updated_at"),
@@ -312,6 +322,7 @@ def _direct_image_runs(limit: int = 8) -> list[dict[str, Any]]:
                 "status": run.get("status"),
                 "stage": run.get("stage"),
                 "run_label": run.get("run_label"),
+                "conversation_id": run.get("conversation_id") or "",
                 "created_at": run.get("created_at"),
                 "updated_at": run.get("updated_at"),
                 "items": images,

@@ -5,6 +5,7 @@ import shutil
 import threading
 import time
 import uuid
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ def start(
     workflow_path: str | None = None,
     notify_interval_seconds: int = 60,
     run_label: str = "",
+    package_as_sequence: bool = False,
     **_: Any,
 ) -> dict[str, Any]:
     if not image_paths:
@@ -65,6 +67,7 @@ def start(
             {
                 "index": index,
                 "source_path": str(image),
+                "source_name": name,
                 "original_path": str(target),
                 "name": target.name,
                 "matte_dir": str(matte_dir / f"image_{index:02d}"),
@@ -89,6 +92,7 @@ def start(
         "created_at": _now(),
         "updated_at": _now(),
         "run_label": run_label or f"{len(items)} 张图片",
+        "package_as_sequence": bool(package_as_sequence or len(items) > 1),
         "chat_id": (ctx.get("chat_id") or "") if ctx.get("channel") == "feishu" else "",
         "conversation_id": ctx.get("conversation_id") or "",
         "images": items,
@@ -167,7 +171,10 @@ def _worker(run_id: str) -> None:
         _save(run)
         plan = _cherry_plan_summary(run.get("images") or [])
         suffix = f"，{plan}" if plan else ""
-        _notify(run, f"图片完成：{run['id']}，已发回 {len(sent)} 份结果（抠图、后处理、三联对比）{suffix}。")
+        if bool(run.get("package_as_sequence")) or len(run.get("images") or []) > 1:
+            _notify(run, f"序列帧完成：{run['id']}，共 {len(run.get('images') or [])} 帧，已按顺序发回 1 个 ZIP{suffix}。")
+        else:
+            _notify(run, f"图片完成：{run['id']}，已发回抠图、后处理、三联对比 3 份结果{suffix}。")
     except Exception as exc:
         run = _load(run_id) or run
         if run.get("status") != "CANCELED":
@@ -256,7 +263,34 @@ def _send_results(run: dict[str, Any]) -> list[str]:
         return []
     from assetclaw_matting.feishu.client import feishu_client
 
+    items = list(run.get("images") or [])
+    prepared = _prepare_result_files(run)
+    if bool(run.get("package_as_sequence")) or len(items) > 1:
+        zip_path = _make_sequence_zip(run)
+        drive_file = feishu_client.send_file_to_chat(chat_id, zip_path, zip_path.name) or {}
+        if drive_file:
+            run["drive_file"] = drive_file
+        run["sequence_zip_path"] = str(zip_path)
+        _append_log(run, f"序列帧结果已打包发送：{zip_path.name}，共 {len(items)} 帧")
+        _save(run)
+        return [str(zip_path)]
+
     sent: list[str] = []
+    for item, (matte, processed, comparison) in zip(items, prepared):
+        base_name = Path(str(item.get("source_name") or item.get("name") or processed.name)).stem
+        matte_send_name = f"{base_name}_matte{matte.suffix.lower()}"
+        processed_send_name = f"{base_name}_processed{processed.suffix.lower()}"
+        feishu_client.send_file_to_chat(chat_id, matte, matte_send_name)
+        feishu_client.send_file_to_chat(chat_id, processed, processed_send_name)
+        feishu_client.send_image_to_chat(chat_id, comparison)
+        sent.extend([str(matte), str(processed), str(comparison)])
+        _append_log(run, f"已发送三份图片结果：{matte.name}、{processed.name}、{comparison.name}")
+        _save(run)
+    return sent
+
+
+def _prepare_result_files(run: dict[str, Any]) -> list[tuple[Path, Path, Path]]:
+    prepared: list[tuple[Path, Path, Path]] = []
     for item in run.get("images") or []:
         matte_dir = Path(str(item["matte_dir"]))
         smooth_dir = Path(str(item["smooth_dir"]))
@@ -270,24 +304,85 @@ def _send_results(run: dict[str, Any]) -> list[str]:
         if not processed:
             raise RuntimeError(f"smooth_dir has no result image: {smooth_dir}")
 
-        base_name = Path(str(item.get("name") or processed.name)).stem
+        base_name = Path(str(item.get("source_name") or item.get("name") or processed.name)).stem
         comparison = _run_dir(run) / "comparison" / f"{base_name}_comparison.png"
-        _create_comparison_image(original, matte, processed, comparison)
-
-        matte_send_name = f"{base_name}_matte{matte.suffix.lower()}"
-        processed_send_name = f"{base_name}_processed{processed.suffix.lower()}"
-        feishu_client.send_file_to_chat(chat_id, matte, matte_send_name)
-        feishu_client.send_file_to_chat(chat_id, processed, processed_send_name)
-        feishu_client.send_image_to_chat(chat_id, comparison)
+        if not comparison.is_file():
+            _create_comparison_image(original, matte, processed, comparison)
 
         item["matte_result_path"] = str(matte)
         item["postprocessed_result_path"] = str(processed)
         item["comparison_path"] = str(comparison)
         item["result_path"] = str(processed)
-        sent.extend([str(matte), str(processed), str(comparison)])
-        _append_log(run, f"已发送三份图片结果：{matte.name}、{processed.name}、{comparison.name}")
-        _save(run)
-    return sent
+        prepared.append((matte, processed, comparison))
+    _save(run)
+    return prepared
+
+
+def package_and_send(run_id: str | None = None, package_name: str = "", **_: Any) -> dict[str, Any]:
+    run = _load(run_id)
+    if not run:
+        return {"ok": False, "error": "direct image run not found"}
+    if not run.get("chat_id"):
+        return {"ok": False, "error": "run has no Feishu chat_id"}
+    from assetclaw_matting.feishu.client import feishu_client
+
+    _prepare_result_files(run)
+    zip_path = _make_sequence_zip(run, package_name=package_name)
+    drive_file = feishu_client.send_file_to_chat(str(run["chat_id"]), zip_path, zip_path.name) or {}
+    run["sequence_zip_path"] = str(zip_path)
+    if drive_file:
+        run["drive_file"] = drive_file
+    run["status"] = "DONE"
+    run["stage"] = "done"
+    run["error"] = ""
+    _append_log(run, f"序列帧压缩包已补发：{zip_path.name}，共 {len(run.get('images') or [])} 帧")
+    _save(run)
+    return {
+        "ok": True,
+        "run_id": run["id"],
+        "zip_path": str(zip_path),
+        "zip_name": zip_path.name,
+        "frame_count": len(run.get("images") or []),
+        "drive_file": drive_file,
+    }
+
+
+def _make_sequence_zip(run: dict[str, Any], package_name: str = "") -> Path:
+    items = sorted(run.get("images") or [], key=lambda item: int(item.get("index") or 0))
+    if not items:
+        raise RuntimeError("sequence run contains no images")
+    if package_name:
+        zip_name = _safe_name(package_name)
+        if not zip_name.lower().endswith(".zip"):
+            zip_name += ".zip"
+    else:
+        label = str(run.get("run_label") or "").strip()
+        if not label or "、" in label or label.lower().startswith("feishu_image"):
+            label = f"序列帧_{len(items)}张"
+        zip_name = f"{Path(_safe_name(label)).stem}_animation_processed.zip"
+    zip_path = _run_dir(run) / zip_name
+    manifest = {"run_id": run.get("id"), "frame_count": len(items), "ordered": True, "files": []}
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as archive:
+        for position, item in enumerate(items):
+            original = Path(str(item.get("original_path") or ""))
+            matte = Path(str(item.get("matte_result_path") or ""))
+            processed = Path(str(item.get("postprocessed_result_path") or ""))
+            comparison = Path(str(item.get("comparison_path") or ""))
+            paths = {"frames": original, "matte": matte, "smooth": processed, "comparison": comparison}
+            missing = [f"{kind}:{path}" for kind, path in paths.items() if not path.is_file()]
+            if missing:
+                raise RuntimeError("sequence package missing result files: " + ", ".join(missing))
+            stem = f"{position:04d}"
+            entries: dict[str, str] = {}
+            for kind, path in paths.items():
+                entry = f"{kind}/{stem}{path.suffix.lower() or '.png'}"
+                archive.write(path, entry)
+                entries[kind] = entry
+            manifest["files"].append(
+                {"index": position, "source_name": item.get("source_name") or item.get("name") or "", **entries}
+            )
+        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+    return zip_path
 
 
 def _create_comparison_image(original_path: Path, matte_path: Path, processed_path: Path, output_path: Path) -> Path:
@@ -498,11 +593,14 @@ def _public(run: dict[str, Any]) -> dict[str, Any]:
         "status": run.get("status"),
         "stage": run.get("stage"),
         "run_label": run.get("run_label"),
+        "package_as_sequence": bool(run.get("package_as_sequence")),
         "created_at": run.get("created_at"),
         "updated_at": run.get("updated_at"),
         "images": run.get("images") or [],
         "children": run.get("children") or {},
         "sent_files": run.get("sent_files") or [],
+        "sequence_zip_path": run.get("sequence_zip_path") or "",
+        "drive_file": run.get("drive_file") or {},
         "pipeline_notice": run.get("pipeline_notice") or "",
         "error": run.get("error") or "",
         "last_log": (run.get("log") or [{}])[-1].get("message", ""),

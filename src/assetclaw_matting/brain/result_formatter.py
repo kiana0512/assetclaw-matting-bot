@@ -917,16 +917,19 @@ def _format_direct_media_overview(payload: dict[str, Any]) -> list[str]:
     )
     rows: list[dict[str, str]] = []
     seen_files: set[tuple[str, str]] = set()
-    for run in recent_video_runs[:10]:
-        for item in (run.get("items") or [])[:6]:
+    for run in recent_video_runs:
+        for item in (run.get("items") or []):
             row = _media_item_row("视频", item)
             key = ("视频", row["文件"].lower())
             if key in seen_files:
                 continue
             seen_files.add(key)
             rows.append(row)
-    for run in recent_image_runs[:4]:
-        for item in (run.get("items") or [])[:6]:
+    for run in recent_image_runs:
+        image_items = run.get("items") or []
+        if len(image_items) > 1:
+            image_items = [_image_sequence_status_item(run, image_items)]
+        for item in image_items:
             row = _media_item_row("图片", item)
             key = ("图片", row["文件"].lower())
             if key in seen_files:
@@ -1089,9 +1092,37 @@ def _media_item_row(kind: str, item: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _image_sequence_status_item(run: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any]:
+    count = len(items)
+    label = str(run.get("run_label") or "").strip()
+    if not label or "、" in label or label.lower().startswith("feishu_image"):
+        label = "序列帧"
+    sizes = sorted({str(item.get("output_size") or "").strip() for item in items if item.get("output_size")})
+    run_status = str(run.get("status") or "")
+    run_stage = str(run.get("stage") or "")
+    first_status = str((items[0] or {}).get("status") or "处理中")
+    status = "完成" if run_status == "DONE" else first_status
+    return {
+        "run_id": run.get("run_id") or run.get("id") or "",
+        "run_status": run_status,
+        "run_stage": run_stage,
+        "run_label": label,
+        "updated_at": run.get("updated_at") or "",
+        "name": f"{label}（{count}张）",
+        "status": status,
+        "total": count,
+        "matte_done": sum(min(1, int(item.get("matte_done") or 0)) for item in items),
+        "smooth_done": sum(min(1, int(item.get("smooth_done") or 0)) for item in items),
+        "output_size": " / ".join(sizes),
+        "comfyui_run_id": "",
+        "cherry_run_id": "",
+        "last_log": "",
+    }
+
+
 def _format_media_table(rows: list[dict[str, str]]) -> list[str]:
     lines: list[str] = []
-    for index, row in enumerate(rows[:12], start=1):
+    for index, row in enumerate(rows, start=1):
         stage = str(row.get("阶段") or "处理中")
         icon = _media_stage_icon(stage)
         name = _table_cell(row.get("文件", ""))
@@ -1107,8 +1138,6 @@ def _format_media_table(rows: list[dict[str, str]]) -> list[str]:
             details.append(output_size.replace("x", "×"))
         lines.append(f"{icon} {index}. {name}")
         lines.append("   " + "  ·  ".join(details))
-    if len(rows) > 12:
-        lines.append(f"还有 {len(rows) - 12} 项未显示。")
     return lines
 
 
@@ -1605,7 +1634,7 @@ def _format_direct_image(skill: str, payload: dict[str, Any], max_items: int) ->
     if skill == "direct_image.list":
         items = payload.get("items") or []
         lines = [f"图片处理任务：{payload.get('count', len(items))} 个"]
-        for item in items[:max_items]:
+        for item in items:
             lines.append(f"- {item.get('run_id')}：{item.get('status')} / {item.get('stage')} / {len(item.get('images') or [])} 张图片")
         return lines
     if skill == "direct_image.cancel":
@@ -1613,21 +1642,31 @@ def _format_direct_image(skill: str, payload: dict[str, Any], max_items: int) ->
         label = names or str(payload.get("run_label") or run_id)
         return [f"已取消图片任务：{label}。ComfyUI 队列已同步取消。"]
     media_items = [_direct_image_status_item(payload, item) for item in images]
+    if len(media_items) > 1:
+        media_items = [_image_sequence_status_item(payload, media_items)]
     if media_items:
         lines = ["图片任务："]
-        lines.extend(_format_media_table([_media_item_row("图片", item) for item in media_items[:max_items]]))
+        lines.extend(_format_media_table([_media_item_row("图片", item) for item in media_items]))
     else:
         lines = [f"图片任务：{stage}/{status}，图片 {len(images)}"]
     cherry_plan = _cherry_plan_summary(images)
     if cherry_plan:
         lines.append(cherry_plan)
-    if comfy:
-        lines.append(f"整体抠图：{comfy.get('completed', 0)}/{comfy.get('total', 0)}")
-    if cherry:
-        lines.append(f"整体后处理：{cherry.get('completed', 0)}/{cherry.get('total', 0)}")
+    if len(images) > 1:
+        matte_total = sum(min(1, _count_pngs_text(item.get("matte_dir"))) for item in images)
+        smooth_total = sum(min(1, _count_pngs_text(item.get("smooth_dir"))) for item in images)
+        lines.append(f"整体抠图：{matte_total}/{len(images)}")
+        lines.append(f"整体后处理：{smooth_total}/{len(images)}")
+    else:
+        if comfy:
+            lines.append(f"整体抠图：{comfy.get('completed', 0)}/{comfy.get('total', 0)}")
+        if cherry:
+            lines.append(f"整体后处理：{cherry.get('completed', 0)}/{cherry.get('total', 0)}")
     sent = payload.get("sent_files") or []
-    if sent:
-        lines.append(f"已发回结果：{len(sent)} 份（每张图包含抠图、后处理、三联对比）")
+    if payload.get("sequence_zip_path"):
+        lines.append("已发回结果：序列帧 ZIP（原图、抠图、后处理、三联对比）")
+    elif sent:
+        lines.append(f"已发回结果：{len(sent)} 份（抠图、后处理、三联对比）")
     if payload.get("error"):
         lines.append(f"错误：{payload.get('error')}")
     return lines

@@ -29,6 +29,7 @@ const state = reactive({
   error: "",
   updatedAt: "",
   flows: { items: [], current: null },
+  currentFlowStatus: null,
   animation: null,
   workspaceSummary: null,
   comfyStatus: null,
@@ -48,8 +49,9 @@ const state = reactive({
     workflowPath: "",
     unityProject: "",
     package: "both",
+    fps: 24,
     p4Stream: "//streams/rel_0.0.1",
-    allowP4Writes: true,
+    allowP4Writes: false,
     fakeMatting: false,
   },
   launchResult: "",
@@ -68,7 +70,21 @@ const state = reactive({
 
 let timer = null;
 
-const currentFlow = computed(() => state.flows.current || state.flows.items[0] || null);
+const currentFlowBase = computed(() => state.flows.current || state.flows.items[0] || null);
+const currentFlow = computed(() => {
+  const base = currentFlowBase.value;
+  const detail = state.currentFlowStatus;
+  if (!base || !detail || detail.run_id !== (base.run_id || base.id)) return base;
+  return {
+    ...base,
+    ...detail,
+    children: { ...(base.children || {}), ...(detail.children || {}) },
+  };
+});
+const currentPipeline = computed(() => currentFlow.value?.pipeline || null);
+const currentFrameRun = computed(() => currentPipeline.value?.frame || null);
+const currentComfyRun = computed(() => currentPipeline.value?.comfyui || null);
+const currentCherryRun = computed(() => currentFlow.value?.cherry || currentPipeline.value?.cherry || null);
 const currentFlowUi = computed(() => flowDisplay(currentFlow.value));
 const currentUnity = computed(() => unityImportSummary(currentFlow.value));
 const currentStage = computed(() => currentFlow.value?.current_stage || "");
@@ -79,7 +95,11 @@ const currentStageIndex = computed(() => {
 });
 const stageProgress = computed(() => flowStageProgress(currentFlow.value));
 const allTasks = computed(() => {
-  const flowTasks = (state.flows.items || []).map((item) => normalizeTask("AFLOW", item));
+  const currentId = currentFlow.value?.run_id || currentFlow.value?.id || "";
+  const flowTasks = (state.flows.items || []).map((item) => normalizeTask(
+    "AFLOW",
+    (item.run_id || item.id) === currentId ? currentFlow.value : item,
+  ));
   const comfy = state.comfyRuns.map((item) => normalizeTask("COMFY", item));
   const frame = state.frameRuns.map((item) => normalizeTask("FRAME", item));
   const cherry = state.cherryRuns.map((item) => normalizeTask("CHERRY", item));
@@ -97,12 +117,21 @@ const failedTasks = computed(() => allTasks.value.filter((task) => ["FAILED", "B
 const workspaceCards = computed(() => buildWorkspaceCards());
 const stageCards = computed(() => buildStageCards(currentFlow.value));
 const childRuns = computed(() => buildChildRuns(currentFlow.value));
+const processProfile = computed(() => buildProcessProfile(currentFlow.value));
+const overviewMetrics = computed(() => buildOverviewMetrics());
+const activeStageRun = computed(() => flowActiveChild(currentFlow.value)?.raw || null);
+const activeStageProgress = computed(() => progressFrom(activeStageRun.value || {}));
+const primaryIsFlow = computed(() => primaryTask.value?.module === "AFLOW");
+const focusProgress = computed(() => primaryIsFlow.value ? currentFlowUi.value.progress : (primaryTask.value?.progress || 0));
+const focusLabel = computed(() => primaryIsFlow.value ? "总体流程" : `${primaryTask.value?.module || "任务"} 进度`);
+const fpsValid = computed(() => Number.isInteger(Number(state.form.fps)) && Number(state.form.fps) > 0);
 const connectionText = computed(() => state.health?.ok === false ? "后端异常" : state.health ? "后端在线" : "连接中");
 const launchCommand = computed(() => {
   const compactDate = state.form.date.replaceAll("-", "");
   const modeText = state.form.mode === "iteration" ? "替换" : "导入";
   const priority = state.form.priority.trim() ? ` 优先 ${state.form.priority.trim()}` : "";
-  return `动画自动化${compactDate} ${modeText}${priority}`;
+  const p4 = state.form.allowP4Writes ? " P4 Shelve" : " P4 跳过";
+  return `动画自动化${compactDate} · ${state.form.fps} FPS · ${modeText}${priority}${p4}`;
 });
 
 onMounted(async () => {
@@ -157,6 +186,17 @@ async function refreshAll(silent = false) {
     state.frameRuns = unwrapSkill(valueOf(frameRuns))?.items || [];
     state.cherryRuns = unwrapSkill(valueOf(cherryRuns))?.items || [];
     state.jobs = valueOf(jobs)?.items || [];
+    const flowId = state.flows?.current?.run_id || state.flows?.current?.id || state.flows?.items?.[0]?.run_id || "";
+    if (flowId) {
+      try {
+        const detail = unwrapSkill(await skillCall("animation_flow.status", { run_id: flowId }, true));
+        if (detail?.run_id === flowId) state.currentFlowStatus = detail;
+      } catch {
+        // Keep the last known flow detail when this optional enrichment call fails.
+      }
+    } else {
+      state.currentFlowStatus = null;
+    }
     state.updatedAt = timeOnly(new Date());
   } catch (error) {
     state.error = String(error?.message || error);
@@ -181,7 +221,8 @@ async function previewFlow() {
 }
 
 async function startFlow() {
-  if (!window.confirm(`确认启动完整动画自动化？\n\n${launchCommand.value}\n\n这会从飞书下载、抽帧、抠图、Cherry 平滑、Unity 导入，并走 P4 shelve-only。`)) return;
+  const p4Text = state.form.allowP4Writes ? "最后执行 P4 shelve-only。" : "P4 阶段将跳过。";
+  if (!window.confirm(`确认启动完整动画自动化？\n\n${launchCommand.value}\n\n将从飞书下载、按 ${state.form.fps} FPS 抽帧、抠图、Cherry 后处理并导入 Unity。${p4Text}`)) return;
   state.launchBusy = true;
   state.launchResult = "正在启动...";
   try {
@@ -342,11 +383,13 @@ function multimodalPrompt(text, attachments) {
 }
 
 function flowArgs() {
+  if (!fpsValid.value) throw new Error("抽帧速率必须是大于 0 的整数 FPS。");
   const args = {
     date_root: workspaceRoot(),
     unity_import_mode: state.form.mode,
     unity_project: state.form.unityProject,
     package: state.form.package || "both",
+    fps: Number(state.form.fps),
     p4_stream: state.form.p4Stream || "//streams/rel_0.0.1",
     allow_p4_writes: Boolean(state.form.allowP4Writes),
     fake_matting_from_frames: Boolean(state.form.fakeMatting),
@@ -427,17 +470,20 @@ function normalizeTask(module, raw) {
   const input = raw.date_root || raw.input_dir || raw.download_dir || raw.workspace_root || "";
   const output = raw.output_dir || raw.export_dir || raw.unity_ready || raw.matte_output_dir || raw.smooth_output_dir || "";
   const activeChild = module === "AFLOW" ? flowActiveChild(raw) : null;
+  const activeInput = activeChild?.raw?.input_dir || activeChild?.raw?.download_dir || activeChild?.raw?.workspace_root || "";
+  const activeOutput = activeChild?.raw?.output_dir || activeChild?.raw?.export_dir || activeChild?.raw?.matte_output_dir || activeChild?.raw?.smooth_output_dir || "";
   const position = taskPosition(module, raw) || (activeChild ? taskPosition(activeChild.module, activeChild.raw) : "");
   const eta = etaText(raw) || (activeChild ? etaText(activeChild.raw) : "");
+  const activeCount = activeChild ? countText(activeChild.raw) : "";
   return {
     module,
     id,
     status,
     stage: flowUi?.stage || raw.current_stage || raw.current_step || "",
-    input,
-    output,
+    input: activeInput || input,
+    output: activeOutput || output,
     progress: flowUi?.progress ?? progressFrom(raw),
-    count: countText(raw),
+    count: flowUi?.count || activeCount || countText(raw),
     last: flowUi?.short || lastDoneText(raw),
     position,
     eta,
@@ -450,9 +496,18 @@ function normalizeTask(module, raw) {
 
 function flowActiveChild(run) {
   const stage = run?.current_stage || "";
-  if (stage === "frame_extract" && state.frameStatus) return { module: "FRAME", raw: state.frameStatus };
-  if (stage === "matting" && state.comfyStatus) return { module: "COMFY", raw: state.comfyStatus };
-  if (stage === "cherry_smooth" && state.cherryStatus) return { module: "CHERRY", raw: state.cherryStatus };
+  if (stage === "frame_extract") {
+    const raw = run?.pipeline?.frame || null;
+    if (raw) return { module: "FRAME", raw };
+  }
+  if (stage === "matting") {
+    const raw = run?.pipeline?.comfyui || null;
+    if (raw) return { module: "COMFY", raw };
+  }
+  if (stage === "cherry_smooth") {
+    const raw = run?.cherry || run?.pipeline?.cherry || null;
+    if (raw) return { module: "CHERRY", raw };
+  }
   return null;
 }
 
@@ -582,18 +637,30 @@ function buildStageCards(run) {
   const stages = run?.stages?.length ? run.stages : Object.entries(STAGE_LABELS).map(([key, label]) => ({ key, label, status: "pending" }));
   const unity = unityImportSummary(run);
   const flowUi = flowDisplay(run);
-  return stages.map((stage) => ({
-    ...stage,
-    label: STAGE_LABELS[stage.key] || stage.label || stage.key,
-    status: flowUi.status === "DONE" ? "done" : (unity?.recovered && stage.key === "unity_import" ? "done" : stage.status),
-  }));
+  return stages.map((stage) => {
+    const stageRun = stageRunFor(stage.key, run);
+    const terminalStageStatus = ["CANCELED", "FAILED", "BLOCKED"].includes(flowUi.status) && stage.key === run?.current_stage
+      ? flowUi.status.toLowerCase()
+      : "";
+    return {
+      ...stage,
+      label: STAGE_LABELS[stage.key] || stage.label || stage.key,
+      status: terminalStageStatus || (run?.allow_p4_writes === false && stage.key === "p4_shelve"
+        ? "skipped"
+        : (flowUi.status === "DONE" ? "done" : (unity?.recovered && stage.key === "unity_import" ? "done" : stage.status))),
+      detail: stageDetailText(stage.key, run, stageRun),
+      progress: stageRun ? progressFrom(stageRun) : (stage.status === "done" ? 100 : 0),
+    };
+  });
 }
 
 function buildChildRuns(run) {
   const children = run?.children || {};
   const result = [];
   if (children.pipeline_run_id) result.push(["Pipeline", children.pipeline_run_id]);
-  const comfy = state.comfyStatus?.run_id;
+  const frame = run?.pipeline?.frame?.run_id || run?.pipeline?.frame_run_id;
+  if (frame) result.push(["抽帧", frame]);
+  const comfy = run?.pipeline?.comfyui?.run_id || run?.pipeline?.comfyui_run_id || currentComfyRun.value?.run_id;
   if (comfy) result.push(["ComfyUI", comfy]);
   const cherryIds = children.cherry_run_ids || [];
   if (cherryIds.length) result.push(["Cherry", cherryIds.join(", ")]);
@@ -603,6 +670,76 @@ function buildChildRuns(run) {
   const p4 = children.p4;
   if (p4?.changelist_id) result.push(["P4 CL", p4.changelist_id]);
   return result;
+}
+
+function stageRunFor(key, run) {
+  if (key === "frame_extract") return run?.pipeline?.frame || null;
+  if (key === "matting") return run?.pipeline?.comfyui || null;
+  if (key === "cherry_smooth") return run?.cherry || run?.pipeline?.cherry || null;
+  return null;
+}
+
+function stageDetailText(key, run, stageRun) {
+  if (key === "feishu_download") return "Timo · 仅处理待抽帧";
+  if (key === "frame_extract") {
+    const frames = workspaceItem("frames");
+    return `${run?.fps || 24} FPS${frames?.count ? ` · ${frames.count} 帧 / ${frames.folders} 组` : ""}`;
+  }
+  if (key === "matting") {
+    const count = stageRun ? countText(stageRun) : "";
+    return [run?.workflow_name || fileName(run?.workflow_path), count && `抠图 ${count}`].filter(Boolean).join(" · ") || "等待抠图";
+  }
+  if (key === "cherry_smooth") {
+    const count = stageRun ? countText(stageRun) : "";
+    return ["Cherry 默认后处理", count].filter(Boolean).join(" · ");
+  }
+  if (key === "unity_ready") {
+    const item = workspaceItem("unity_ready");
+    return item?.count ? `${item.count} 个产物` : "等待整理";
+  }
+  if (key === "unity_import") return `${run?.unity_import_mode === "iteration" ? "替换 / 迭代" : "新导入"} · ${run?.package || "both"}`;
+  if (key === "p4_shelve") return run?.allow_p4_writes === false ? "本次跳过" : (run?.p4?.stream || "Shelve-only");
+  return "";
+}
+
+function workspaceItem(key) {
+  return state.workspaceSummary?.items?.find((item) => item.key === key) || null;
+}
+
+function fileName(value) {
+  const parts = String(value || "").split(/[\\/]+/).filter(Boolean);
+  return parts.at(-1) || "";
+}
+
+function buildProcessProfile(run) {
+  const active = run || {};
+  const p4Enabled = run ? active.allow_p4_writes !== false : state.form.allowP4Writes;
+  return [
+    { label: "飞书来源", value: "Timo", detail: "指定视图 · 仅待抽帧" },
+    { label: "抽帧策略", value: `${active.fps || state.form.fps || 24} FPS`, detail: "保留原始顺序 · 不去重" },
+    { label: "抠图工作流", value: active.workflow_name || fileName(active.workflow_path) || "后端默认", detail: active.workflow_path || "启动时由后端解析" },
+    { label: "后处理", value: "Cherry 默认流程", detail: "透明边缘修整 · 时序平滑关闭" },
+    { label: "Unity", value: active.unity_import_mode === "iteration" ? "替换 / 迭代" : "新导入", detail: active.unity_project || state.form.unityProject || "未指定" },
+    { label: "P4", value: p4Enabled ? "Shelve-only" : "已跳过", detail: p4Enabled ? (active.p4?.stream || state.form.p4Stream || "未指定") : "本次不创建 changelist" },
+  ];
+}
+
+function buildOverviewMetrics() {
+  const specs = [
+    ["videos", "视频"],
+    ["frames", "抽帧"],
+    ["matte", "抠图"],
+    ["smooth", "后处理"],
+  ];
+  return specs.map(([key, label]) => {
+    const item = workspaceItem(key);
+    return {
+      key,
+      label,
+      value: item?.exists ? String(item.count) : "0",
+      detail: item?.folders ? `${item.folders} 组` : "等待产出",
+    };
+  });
 }
 
 function buildWorkspaceCards() {
@@ -691,12 +828,17 @@ function flowDisplay(run) {
       detail: unity.detail,
     };
   }
+  const child = flowActiveChild(run);
+  const childCount = child ? countText(child.raw) : "";
+  const childProgress = child ? progressFrom(child.raw) : 0;
   return {
     status: rawStatus,
     stage: run.current_stage || "",
     label: formatStage(run.current_stage),
     progress: flowStageProgress(run),
-    short: "",
+    stageProgress: childProgress,
+    count: childCount,
+    short: childCount ? `${formatStage(run.current_stage)} ${childCount}` : "",
     detail: run.error || "",
   };
 }
@@ -715,12 +857,13 @@ function flowP4Summary(run) {
 
 function flowStageProgress(run) {
   if (String(run?.status || "").toUpperCase() === "DONE") return 100;
-  const stages = run?.stages || [];
+  const stages = (run?.stages || []).filter((stage) => !(run?.allow_p4_writes === false && stage.key === "p4_shelve"));
   if (!stages.length) return 0;
   const current = run?.current_stage || "";
   const currentIndex = Math.max(0, stages.findIndex((item) => item.key === current));
   const done = stages.filter((stage, index) => stage.status === "done" || index < currentIndex).length;
-  const running = stages.some((stage) => stage.status === "running") ? 0.5 : 0;
+  const child = flowActiveChild(run);
+  const running = child ? progressFrom(child.raw) / 100 : (stages.some((stage) => stage.status === "running") ? 0.05 : 0);
   return Math.min(100, Math.round(((done + running) / stages.length) * 100));
 }
 
@@ -805,9 +948,9 @@ function toast(message, type = "ok") {
   <div :class="['shell', `theme-${state.theme}`]">
     <aside class="sidebar">
       <div class="brand">
-        <div class="mark">AC</div>
+        <div class="mark">Li</div>
         <div class="brand-copy">
-          <b class="brand-title">Animation Console</b>
+          <b class="brand-title">LilClick Animation</b>
           <span class="brand-sub">{{ connectionText }}</span>
         </div>
       </div>
@@ -826,12 +969,12 @@ function toast(message, type = "ok") {
     <main class="main">
       <header class="topbar">
         <div>
-          <p class="eyebrow">SPARK ANIMATION</p>
+          <p class="eyebrow">LILCLICK · PIPELINE</p>
           <h1>动画生产面板</h1>
         </div>
         <div class="top-actions">
           <span class="timestamp">更新 {{ state.updatedAt || "-" }}</span>
-          <button class="ghost" @click="toggleTheme">{{ state.theme === "light" ? "夜间模式" : "纯白模式" }}</button>
+          <button class="ghost" @click="toggleTheme">{{ state.theme === "light" ? "深色模式" : "浅色模式" }}</button>
           <button class="ghost" :disabled="state.refreshing" @click="refreshAll()">{{ state.refreshing ? "刷新中" : "刷新" }}</button>
         </div>
       </header>
@@ -844,11 +987,16 @@ function toast(message, type = "ok") {
             <p class="eyebrow">CURRENT FLOW</p>
             <h2>{{ currentFlow?.run_id || "暂无完整流程" }}</h2>
             <p>{{ currentFlow?.date_root || workspaceRoot() }}</p>
+            <div class="hero-meta">
+              <span>{{ currentFlow?.fps || state.form.fps }} FPS</span>
+              <span>{{ currentFlow?.workflow_name || fileName(currentFlow?.workflow_path) || "默认抠图工作流" }}</span>
+              <span>{{ currentFlow ? (currentFlow.allow_p4_writes === false ? "P4 已跳过" : "P4 Shelve-only") : (state.form.allowP4Writes ? "P4 Shelve-only" : "P4 已跳过") }}</span>
+            </div>
           </div>
           <div class="hero-state">
             <span :class="['status-pill', statusClass(currentFlowUi.status)]">{{ currentFlowUi.status }}</span>
             <b>{{ currentFlowUi.label || formatStage(currentStage) }}</b>
-            <small>{{ currentFlowUi.progress || stageProgress }}%</small>
+            <small>总体 {{ currentFlowUi.progress ?? stageProgress }}%</small>
           </div>
         </section>
 
@@ -875,8 +1023,12 @@ function toast(message, type = "ok") {
             <span :class="['status-pill', statusClass(primaryTask.status)]">{{ primaryTask.status }}</span>
           </div>
           <div class="focus-progress">
-            <div class="progress"><i :style="{ width: `${primaryTask.progress}%` }"></i></div>
-            <b>{{ primaryTask.count || `${primaryTask.progress}%` }}</b>
+            <div class="progress-copy"><span>{{ focusLabel }}</span><b>{{ focusProgress }}%</b></div>
+            <div class="progress"><i :style="{ width: `${focusProgress}%` }"></i></div>
+            <div v-if="primaryIsFlow && activeStageRun" class="stage-progress-row">
+              <div class="progress-copy"><span>{{ currentFlowUi.label }} · {{ primaryTask.count || "计算中" }}</span><b>{{ activeStageProgress }}%</b></div>
+              <div class="progress secondary"><i :style="{ width: `${activeStageProgress}%` }"></i></div>
+            </div>
           </div>
           <div class="focus-detail">
             <span>{{ primaryTask.position || (primaryTask.last ? `刚完成 ${primaryTask.last}` : formatStage(primaryTask.stage)) }}</span>
@@ -885,23 +1037,37 @@ function toast(message, type = "ok") {
           </div>
         </section>
 
-        <section class="stats-grid">
-          <article class="stat"><span>活动任务</span><b>{{ activeTasks.length }}</b></article>
-          <article class="stat"><span>失败 / 阻塞</span><b>{{ failedTasks.length }}</b></article>
-          <article class="stat"><span>ComfyUI</span><b>{{ state.comfyStatus?.completed || 0 }}/{{ state.comfyStatus?.total || 0 }}</b></article>
-          <article class="stat"><span>Agent 队列</span><b>{{ state.jobs.filter((j) => ['QUEUED','RUNNING'].includes(j.status)).length }}</b></article>
+        <section class="stats-grid production-metrics">
+          <article v-for="metric in overviewMetrics" :key="metric.key" class="stat">
+            <span>{{ metric.label }}</span>
+            <b>{{ metric.value }}</b>
+            <small>{{ metric.detail }}</small>
+          </article>
         </section>
 
         <section class="panel">
           <div class="panel-title">
-            <h3>七步流程</h3>
+            <div><h3>生产链路</h3><span>所有进度均绑定当前 AFLOW 的真实子任务</span></div>
             <button v-if="currentFlow?.run_id && isActiveStatus(currentFlow.status)" class="danger" @click="cancelFlow(currentFlow.run_id)">终止流程</button>
           </div>
           <div class="stages">
             <article v-for="(stage, index) in stageCards" :key="stage.key" :class="['stage', stage.status, { active: index === currentStageIndex }]">
               <span>{{ index + 1 }}</span>
-              <b>{{ stage.label }}</b>
-              <small>{{ stage.status }}</small>
+              <div class="stage-copy"><b>{{ stage.label }}</b><small>{{ stage.detail || stage.status }}</small></div>
+              <em>{{ stage.status === "running" && stage.progress ? `${stage.progress}%` : stage.status }}</em>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel process-panel">
+          <div class="panel-title">
+            <div><h3>本次处理配置</h3><span>来源、工作流与交付策略</span></div>
+          </div>
+          <div class="profile-grid">
+            <article v-for="item in processProfile" :key="item.label" class="profile-item">
+              <span>{{ item.label }}</span>
+              <b>{{ item.value }}</b>
+              <small :title="item.detail">{{ item.detail }}</small>
             </article>
           </div>
         </section>
@@ -971,27 +1137,62 @@ function toast(message, type = "ok") {
       </section>
 
       <section v-if="state.tab === 'launch'" class="view launch-grid">
-        <section class="panel">
-          <div class="panel-title"><h3>启动完整动画自动化</h3></div>
-          <div class="form-grid">
-            <label><span>日期</span><input v-model="state.form.date" /></label>
-            <label><span>Unity 模式</span><select v-model="state.form.mode"><option value="iteration">替换 / 迭代</option><option value="import">新导入</option></select></label>
-            <label><span>优先角色</span><input v-model="state.form.priority" placeholder="留空则不指定" /></label>
-            <label><span>Unity Project</span><input v-model="state.form.unityProject" /></label>
-            <label class="wide"><span>ComfyUI 工作流</span><input v-model="state.form.workflowPath" placeholder="留空使用后端默认工作流" /></label>
-            <label><span>Package</span><select v-model="state.form.package"><option value="both">both</option><option value="scene">scene</option><option value="emoji">emoji</option><option value="story">story</option></select></label>
-            <label><span>P4 Stream</span><input v-model="state.form.p4Stream" /></label>
-            <label class="check"><input v-model="state.form.allowP4Writes" type="checkbox" /><span>允许 P4 create/reconcile/shelve</span></label>
-            <label class="check"><input v-model="state.form.fakeMatting" type="checkbox" /><span>测试模式：抽帧当抠图</span></label>
-          </div>
+        <section class="panel launch-panel">
+          <div class="panel-title"><div><h3>启动完整动画自动化</h3><span>真实环境 · Timo 表格下载 · P4 默认关闭</span></div></div>
+
+          <section class="launch-section">
+            <div class="section-index">01</div>
+            <div class="section-body">
+              <div class="section-heading"><div><h4>飞书来源与抽帧</h4><p>只下载指定视图中进度为“待抽帧”且包含动画附件的记录。</p></div><span class="source-tag">Timo</span></div>
+              <div class="form-grid three">
+                <label><span>输出日期</span><input v-model="state.form.date" /></label>
+                <label><span>抽帧速率</span><input v-model.number="state.form.fps" type="number" min="1" step="1" inputmode="numeric" placeholder="24" /><small>可填写任意正整数 FPS；默认 24，不改变视频原文件。</small></label>
+                <label><span>优先角色</span><input v-model="state.form.priority" placeholder="留空则按表格顺序" /></label>
+              </div>
+            </div>
+          </section>
+
+          <section class="launch-section">
+            <div class="section-index">02</div>
+            <div class="section-body">
+              <div class="section-heading"><div><h4>抠图与后处理</h4><p>与直接图片、视频任务共用 ComfyUI 队列和 ImageClip 执行组件。</p></div></div>
+              <div class="form-grid">
+                <label class="wide"><span>ComfyUI 工作流</span><input v-model="state.form.workflowPath" placeholder="留空使用后端默认 ImageClip.json" /><small>总览会显示本次实际解析到的工作流名称与路径。</small></label>
+                <label class="read-only-field"><span>Cherry 后处理</span><input value="默认后处理 · 时序平滑关闭" readonly /></label>
+                <label class="check"><input v-model="state.form.fakeMatting" type="checkbox" /><span>仅测试：直接把抽帧复制为抠图结果</span></label>
+              </div>
+            </div>
+          </section>
+
+          <section class="launch-section">
+            <div class="section-index">03</div>
+            <div class="section-body">
+              <div class="section-heading"><div><h4>Unity 交付</h4><p>整理 unity_ready 后执行替换/迭代或新导入。</p></div></div>
+              <div class="form-grid">
+                <label><span>Unity 模式</span><select v-model="state.form.mode"><option value="iteration">替换 / 迭代</option><option value="import">新导入</option></select></label>
+                <label><span>资源包</span><select v-model="state.form.package"><option value="both">全部（both）</option><option value="scene">场景（scene）</option><option value="emoji">表情（emoji）</option><option value="story">剧情（story）</option></select></label>
+                <label class="wide"><span>Unity Project</span><input v-model="state.form.unityProject" /></label>
+                <label class="check"><input v-model="state.form.allowP4Writes" type="checkbox" /><span>完成 Unity 后执行 P4 Shelve（默认关闭）</span></label>
+                <label v-if="state.form.allowP4Writes"><span>P4 Stream</span><input v-model="state.form.p4Stream" /></label>
+              </div>
+            </div>
+          </section>
+
           <div class="command-preview">{{ launchCommand }}</div>
           <div class="button-row">
-            <button class="ghost" :disabled="state.launchBusy" @click="previewFlow">预览</button>
-            <button class="primary" :disabled="state.launchBusy" @click="startFlow">{{ state.launchBusy ? "处理中" : "启动完整流程" }}</button>
+            <button class="ghost" :disabled="state.launchBusy || !fpsValid" @click="previewFlow">预览</button>
+            <button class="primary" :disabled="state.launchBusy || !fpsValid" @click="startFlow">{{ state.launchBusy ? "处理中" : "启动完整流程" }}</button>
           </div>
         </section>
         <section class="panel">
-          <div class="panel-title"><h3>返回结果</h3></div>
+          <div class="panel-title"><div><h3>预览与返回</h3><span>启动前核对最终参数</span></div></div>
+          <div class="launch-summary">
+            <div><span>飞书筛选</span><b>待抽帧</b></div>
+            <div><span>抽帧</span><b>{{ state.form.fps }} FPS</b></div>
+            <div><span>抠图</span><b>{{ fileName(state.form.workflowPath) || "后端默认" }}</b></div>
+            <div><span>后处理</span><b>Cherry 默认流程</b></div>
+            <div><span>P4</span><b>{{ state.form.allowP4Writes ? "Shelve-only" : "跳过" }}</b></div>
+          </div>
           <pre>{{ state.launchResult || "还没有操作。" }}</pre>
         </section>
       </section>

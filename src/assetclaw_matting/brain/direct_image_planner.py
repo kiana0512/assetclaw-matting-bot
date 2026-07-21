@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import re
+import shutil
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,7 @@ from assetclaw_matting.skills.media_skills import IMAGE_EXTS
 
 ARCHIVE_EXTS = {".zip"}
 MAX_IMAGE_SET_ITEMS = 1000
+MAX_ARCHIVE_UNCOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024
 
 
 STATUS_WORDS = (
@@ -44,7 +47,13 @@ def plan_direct_image_task(message: BrainMessage) -> tuple[list[ToolCall], str] 
     paths = [str(item["local_path"]) for item in images if item.get("local_path")]
     names = [str(item.get("file_name") or Path(path).name) for item, path in zip(images, paths)]
     collections = [str(item.get("source_collection") or "").strip() for item in images if item.get("source_collection")]
-    run_label = collections[0] if len(set(collections)) == 1 and len(paths) > 1 else "、".join(names[:3])
+    package_as_sequence = len(paths) > 1 or any(bool(item.get("sequence_source")) for item in images)
+    if len(paths) > 1 and collections and len(set(collections)) == 1:
+        run_label = collections[0]
+    elif len(paths) > 1:
+        run_label = f"{len(paths)}张序列帧"
+    else:
+        run_label = names[0]
     return (
         [
             ToolCall(
@@ -53,6 +62,7 @@ def plan_direct_image_task(message: BrainMessage) -> tuple[list[ToolCall], str] 
                     "image_paths": paths,
                     "source_names": names,
                     "run_label": run_label,
+                    "package_as_sequence": package_as_sequence,
                 },
             )
         ],
@@ -97,6 +107,7 @@ def _expand_image_set_attachment(item: dict[str, Any]) -> list[dict[str, Any]]:
             "local_path": str(image_path),
             "file_name": image_path.name,
             "source_collection": source_name,
+            "sequence_source": True,
         }
         for image_path in image_paths[:MAX_IMAGE_SET_ITEMS]
     ]
@@ -117,11 +128,16 @@ def _image_paths_in_dir(path: Path) -> list[Path]:
         images = [item for item in path.rglob("*") if item.is_file() and item.suffix.lower() in IMAGE_EXTS]
     except OSError:
         return []
-    return sorted(images, key=lambda item: str(item).lower())[:MAX_IMAGE_SET_ITEMS]
+    return sorted(images, key=lambda item: _natural_path_key(item, path))[:MAX_IMAGE_SET_ITEMS]
 
 
 def _extract_archive_images(path: Path) -> list[Path]:
-    digest = hashlib.sha1(str(path.resolve()).encode("utf-8", errors="ignore")).hexdigest()[:10]
+    try:
+        stat = path.stat()
+        fingerprint = f"{path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
+    except OSError:
+        return []
+    digest = hashlib.sha1(fingerprint.encode("utf-8", errors="ignore")).hexdigest()[:10]
     target_root = Path(settings.storage_dir) / "direct_image_imports" / f"{path.stem}_{digest}"
     if _image_paths_in_dir(target_root):
         return _image_paths_in_dir(target_root)
@@ -129,14 +145,18 @@ def _extract_archive_images(path: Path) -> list[Path]:
     extracted: list[Path] = []
     try:
         with zipfile.ZipFile(path) as archive:
+            total_size = 0
             for member in archive.infolist():
                 if member.is_dir():
                     continue
-                member_path = Path(member.filename)
+                member_path = Path(member.filename.replace("\\", "/"))
                 if member_path.suffix.lower() not in IMAGE_EXTS:
                     continue
                 if any(part in {"", ".", ".."} for part in member_path.parts):
                     continue
+                total_size += max(0, int(member.file_size or 0))
+                if total_size > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
+                    return []
                 safe_parts = [part for part in member_path.parts if part not in {"", ".", ".."}]
                 if not safe_parts:
                     continue
@@ -145,13 +165,29 @@ def _extract_archive_images(path: Path) -> list[Path]:
                     continue
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(member) as src, target.open("wb") as dst:
-                    dst.write(src.read())
+                    shutil.copyfileobj(src, dst, length=1024 * 1024)
                 extracted.append(target)
                 if len(extracted) >= MAX_IMAGE_SET_ITEMS:
                     break
     except (OSError, zipfile.BadZipFile):
         return []
-    return sorted(extracted, key=lambda item: str(item).lower())
+    return sorted(extracted, key=lambda item: _natural_path_key(item, target_root))
+
+
+def _natural_path_key(path: Path, root: Path) -> tuple[tuple[tuple[int, object], ...], ...]:
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        relative = path
+    return tuple(_natural_text_key(part) for part in relative.parts)
+
+
+def _natural_text_key(value: str) -> tuple[tuple[int, object], ...]:
+    return tuple(
+        (0, int(token)) if token.isdigit() else (1, token.casefold())
+        for token in re.split(r"(\d+)", value)
+        if token
+    )
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:

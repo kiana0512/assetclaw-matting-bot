@@ -136,7 +136,7 @@ def _extract_text(message_type: str, content: dict[str, Any], mentions: Any) -> 
             text = content.get("text", "").strip()
         elif message_type == "post":
             text = _extract_post_text(content)
-        elif message_type in {"image", "file", "media", "video", "audio"}:
+        elif message_type in {"image", "file", "media", "video", "audio", "folder"}:
             text = ""
         else:
             text = f"收到 {message_type or '未知'} 类型消息。"
@@ -159,7 +159,7 @@ def _extract_post_text(content: dict[str, Any]) -> str:
 def _extract_attachments(message_type: str, content: dict[str, Any]) -> list[dict[str, Any]]:
     if message_type == "post":
         return _extract_post_attachments(content)
-    if message_type not in {"image", "file", "media", "video", "audio"}:
+    if message_type not in {"image", "file", "media", "video", "audio", "folder"}:
         return []
     key = _attachment_resource_key(message_type, content)
     if not key:
@@ -193,6 +193,8 @@ def _attachment_resource_key(message_type: str, content: dict[str, Any]) -> Any:
         return content.get("file_key") or content.get("media_key")
     if message_type == "file":
         return content.get("file_key")
+    if message_type == "folder":
+        return content.get("file_key") or content.get("folder_key") or content.get("folder_token") or content.get("token")
     return content.get("file_key") or content.get("media_key") or content.get("image_key") or content.get("audio_key")
 
 
