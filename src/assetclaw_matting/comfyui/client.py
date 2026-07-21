@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import re
 import shutil
 import time
 from pathlib import Path
@@ -54,21 +55,48 @@ class ComfyUIClient:
 
     # ── Upload ────────────────────────────────────────────────────────────────
 
-    def upload_image(self, image_path: str | Path) -> str:
+    def upload_image(self, image_path: str | Path, remote_name: str | None = None) -> str:
         """Upload an image to ComfyUI's input folder. Returns the filename."""
         path = Path(image_path)
+        upload_name = _safe_upload_name(remote_name or path.name, suffix=path.suffix or ".png")
         with path.open("rb") as fh:
             resp = requests.post(
                 f"{self._base}/upload/image",
-                files={"image": (path.name, fh, "image/png")},
+                files={"image": (upload_name, fh, "image/png")},
                 data={"overwrite": "true"},
                 timeout=60,
             )
         resp.raise_for_status()
         data = resp.json()
-        filename = data.get("name") or data.get("filename") or path.name
+        filename = data.get("name") or data.get("filename") or upload_name
         log.debug("Uploaded %s → ComfyUI filename=%s", path.name, filename)
         return filename
+
+    def verify_uploaded_image(self, source_path: str | Path, uploaded_filename: str) -> dict[str, str]:
+        from assetclaw_matting.skills.sequence_integrity import sha256_file
+
+        source = Path(source_path)
+        uploaded = self.resolve_local_output_path(uploaded_filename, "", "input")
+        if not uploaded or not uploaded.is_file():
+            raise RuntimeError(f"ComfyUI uploaded input cannot be verified locally: {uploaded_filename}")
+        source_sha256 = sha256_file(source)
+        uploaded_sha256 = sha256_file(uploaded)
+        if source_sha256 != uploaded_sha256:
+            raise RuntimeError(
+                f"ComfyUI input hash mismatch: source={source.name} uploaded={uploaded_filename}"
+            )
+        return {
+            "uploaded_name": uploaded_filename,
+            "source_sha256": source_sha256,
+            "uploaded_sha256": uploaded_sha256,
+        }
+
+    def cleanup_uploaded_image(self, uploaded_filename: str) -> None:
+        if not str(uploaded_filename).startswith("assetclaw_"):
+            return
+        uploaded = self.resolve_local_output_path(uploaded_filename, "", "input")
+        if uploaded and uploaded.is_file():
+            uploaded.unlink(missing_ok=True)
 
     # ── Prompt ────────────────────────────────────────────────────────────────
 
@@ -269,3 +297,12 @@ class ComfyUIClient:
 
 
 comfyui_client = ComfyUIClient()
+
+
+def _safe_upload_name(value: str, *, suffix: str = ".png") -> str:
+    raw = Path(str(value or "image.png").replace("\\", "/")).name
+    stem = re.sub(r"[^0-9A-Za-z._-]+", "_", Path(raw).stem).strip("._-") or "image"
+    extension = Path(raw).suffix.lower() or suffix.lower() or ".png"
+    if extension not in {".png", ".jpg", ".jpeg", ".webp"}:
+        extension = ".png"
+    return f"{stem[:180]}{extension}"

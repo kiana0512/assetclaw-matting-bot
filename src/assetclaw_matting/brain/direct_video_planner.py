@@ -21,12 +21,15 @@ STATUS_WORDS = (
     "处理到哪",
 )
 RESEND_WORDS = ("重发zip", "重发 zip", "重新发zip", "重新发 zip", "发回zip", "发回 zip", "zip再发", "zip 再发")
+LIST_WORDS = ("任务列表", "进度列表", "全部进度", "这批任务", "六个任务", "6个任务", "所有视频进度")
 
 
 def plan_direct_video_task(message: BrainMessage) -> tuple[list[ToolCall], str] | tuple[None, str] | None:
     text = (message.text or "").strip()
     if _asks_resend_zip(text):
         return [ToolCall(skill="direct_video.resend_zip", arguments={})], "direct video resend zip route"
+    if any(word in text for word in LIST_WORDS):
+        return [ToolCall(skill="direct_video.list", arguments={"limit": 10, "include_finished": True})], "direct video list route"
     if _asks_status(text):
         return [ToolCall(skill="direct_video.status", arguments={})], "direct video status route"
 

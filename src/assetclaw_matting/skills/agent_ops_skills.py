@@ -283,6 +283,7 @@ def _direct_video_runs(limit: int = 8) -> list[dict[str, Any]]:
                 "status": run.get("status"),
                 "stage": run.get("stage"),
                 "run_label": run.get("run_label"),
+                "repair_batch": run.get("repair_batch") or {},
                 "created_at": run.get("created_at"),
                 "updated_at": run.get("updated_at"),
                 "items": videos,
@@ -392,10 +393,11 @@ def _load_status_file(path: Path) -> dict[str, Any]:
 
 
 def _video_item_summary(run: dict[str, Any], item: dict[str, Any], count_cache: dict[str, int] | None = None) -> dict[str, Any]:
-    frame_total = int(item.get("frame_count") or _count_pngs(Path(str(item.get("frame_dir") or "")), count_cache))
-    matte_done = _count_pngs(Path(str(item.get("matte_dir") or "")), count_cache)
-    smooth_done = _count_pngs(Path(str(item.get("smooth_dir") or "")), count_cache)
+    frame_total = int(item.get("frame_count") or _count_pngs_value(item.get("frame_dir"), count_cache))
+    matte_done = _count_pngs_value(item.get("matte_dir"), count_cache)
+    smooth_done = _count_pngs_value(item.get("smooth_dir"), count_cache)
     children = run.get("children") if isinstance(run.get("children"), dict) else {}
+    repair_batch = run.get("repair_batch") if isinstance(run.get("repair_batch"), dict) else {}
     return {
         "run_id": run.get("id"),
         "run_status": run.get("status"),
@@ -413,12 +415,17 @@ def _video_item_summary(run: dict[str, Any], item: dict[str, Any], count_cache: 
         "comfyui_run_id": children.get("comfyui_run_id") or "",
         "cherry_run_id": children.get("cherry_run_id") or "",
         "last_log": (run.get("log") or [{}])[-1].get("message", ""),
+        "queue_position": (
+            f"{repair_batch.get('position')}/{repair_batch.get('total')}"
+            if repair_batch.get("position") and repair_batch.get("total")
+            else ""
+        ),
     }
 
 
 def _image_item_summary(run: dict[str, Any], item: dict[str, Any], count_cache: dict[str, int] | None = None) -> dict[str, Any]:
-    matte_done = _count_pngs(Path(str(item.get("matte_dir") or "")), count_cache)
-    smooth_done = _count_pngs(Path(str(item.get("smooth_dir") or "")), count_cache)
+    matte_done = _count_pngs_value(item.get("matte_dir"), count_cache)
+    smooth_done = _count_pngs_value(item.get("smooth_dir"), count_cache)
     total = 1
     children = run.get("children") if isinstance(run.get("children"), dict) else {}
     return {
@@ -442,7 +449,7 @@ def _image_item_summary(run: dict[str, Any], item: dict[str, Any], count_cache: 
 
 
 def _display_name(item: dict[str, Any]) -> str:
-    for key in ("name", "source_name"):
+    for key in ("source_name", "name"):
         value = str(item.get(key) or "").strip()
         if value:
             return value
@@ -460,6 +467,26 @@ def _media_item_status(run_status: str, stage: str, total: int, matte_done: int,
         return {"FAILED": "失败", "CANCELED": "已取消", "DONE_WITH_ERRORS": "部分完成"}.get(run_status, run_status)
     if stage in {"queued", "pending"}:
         return "排队中"
+    if stage == "repair_queued":
+        return "修复排队"
+    if stage == "repair_extract_frames":
+        return "重新抽帧"
+    if stage == "waiting_matting_queue":
+        return "等待独占抠图"
+    if stage == "repair_matting":
+        return "重新抠图" if matte_done else "准备抠图"
+    if stage == "repair_postprocess":
+        return "重新后处理" if smooth_done else "准备后处理"
+    if stage == "repair_zip":
+        return "校验并打包"
+    if stage == "repair_delivery":
+        return "发送结果"
+    if stage == "repair_failed":
+        return "修复失败"
+    if stage == "recovery_queued":
+        return "重启恢复排队"
+    if stage == "waiting_pipeline_queue":
+        return "等待独占流水线"
     if stage == "extract_frames":
         return "抽帧中" if total else "等待抽帧"
     if stage == "matting":
@@ -494,6 +521,13 @@ def _count_pngs(path: Path, cache: dict[str, int] | None = None) -> int:
     if cache is not None:
         cache[key] = count
     return count
+
+
+def _count_pngs_value(path_value: object, cache: dict[str, int] | None = None) -> int:
+    text = str(path_value or "").strip()
+    if not text:
+        return 0
+    return _count_pngs(Path(text), cache)
 
 
 def _pending_confirmations(limit: int = 5) -> list[dict[str, Any]]:

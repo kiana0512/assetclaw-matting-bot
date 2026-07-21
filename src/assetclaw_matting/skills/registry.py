@@ -1498,6 +1498,7 @@ SKILLS: list[dict[str, Any]] = [
             "skip_existing": "boolean optional",
             "priority_characters": "array optional",
             "notify_interval_seconds": "integer optional",
+            "strict_frame_identity": "boolean optional",
         },
         domain="comfyui",
         risk_level="write_safe",

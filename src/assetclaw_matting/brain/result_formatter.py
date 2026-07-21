@@ -905,12 +905,19 @@ def _format_direct_media_overview(payload: dict[str, Any]) -> list[str]:
             return detail_lines
     active_video_runs = [run for run in video_runs if str(run.get("status") or "") not in {"DONE", "FAILED", "CANCELED", "DONE_WITH_ERRORS"}]
     active_image_runs = [run for run in image_runs if str(run.get("status") or "") not in {"DONE", "FAILED", "CANCELED", "DONE_WITH_ERRORS"}]
+    repair_batch_runs = _latest_repair_batch(video_runs, active_video_runs)
+    if repair_batch_runs:
+        active_video_runs = repair_batch_runs
     explicit_scope = bool(filters.get("date_start") or filters.get("date_end") or filters.get("query"))
     recent_video_runs = video_runs if explicit_scope else (active_video_runs or video_runs[:2])
-    recent_image_runs = image_runs if explicit_scope else (active_image_runs or image_runs[:2])
+    recent_image_runs = (
+        image_runs
+        if explicit_scope
+        else ([] if repair_batch_runs else (active_image_runs or image_runs[:2]))
+    )
     rows: list[dict[str, str]] = []
     seen_files: set[tuple[str, str]] = set()
-    for run in recent_video_runs[:4]:
+    for run in recent_video_runs[:10]:
         for item in (run.get("items") or [])[:6]:
             row = _media_item_row("视频", item)
             key = ("视频", row["文件"].lower())
@@ -1003,6 +1010,16 @@ def _stage_label(stage: str) -> str:
         "send": "发送",
         "done": "完成",
         "canceled": "取消",
+        "repair_queued": "修复排队",
+        "repair_extract_frames": "重新抽帧",
+        "waiting_matting_queue": "等待独占抠图",
+        "repair_matting": "重新抠图",
+        "repair_postprocess": "重新后处理",
+        "repair_zip": "校验并打包",
+        "repair_delivery": "发送结果",
+        "repair_failed": "修复失败",
+        "recovery_queued": "重启恢复排队",
+        "waiting_pipeline_queue": "等待独占流水线",
         "queued": "排队",
         "pending": "排队",
     }.get(stage, stage or "-")
@@ -1036,13 +1053,14 @@ def _media_item_row(kind: str, item: dict[str, Any]) -> dict[str, str]:
     matte_done = int(item.get("matte_done") or 0)
     smooth_done = int(item.get("smooth_done") or 0)
     output_size = str(item.get("output_size") or "")
-    if status in {"抠图中", "排队抠图", "等待抠图", "等待后处理"}:
+    queue_position = str(item.get("queue_position") or "")
+    if status in {"抠图中", "排队抠图", "等待抠图", "等待后处理", "重新抠图", "准备抠图", "等待独占抠图"}:
         progress = f"抠图 {matte_done}/{total}" if total else "抠图中"
-    elif status in {"后处理中", "排队后处理", "等待打包"}:
+    elif status in {"后处理中", "排队后处理", "等待打包", "重新后处理", "准备后处理"}:
         progress = f"后处理 {smooth_done}/{total}" if total else "后处理中"
     elif status == "完成":
         progress = "已完成"
-    elif status == "抽帧中":
+    elif status in {"抽帧中", "重新抽帧"}:
         progress = f"已抽帧 {total}" if total else "抽帧中"
     else:
         progress = status
@@ -1067,17 +1085,77 @@ def _media_item_row(kind: str, item: dict[str, Any]) -> dict[str, str]:
         "进度": progress,
         "规格": output_size,
         "说明": "；".join(note_parts),
+        "队列": queue_position,
     }
 
 
 def _format_media_table(rows: list[dict[str, str]]) -> list[str]:
-    headers = ["类型", "文件", "任务", "阶段", "进度", "规格", "说明"]
-    lines = [" | ".join(headers), " | ".join("---" for _ in headers)]
-    for row in rows[:12]:
-        lines.append(" | ".join(_table_cell(row.get(header, "")) for header in headers))
+    lines: list[str] = []
+    for index, row in enumerate(rows[:12], start=1):
+        stage = str(row.get("阶段") or "处理中")
+        icon = _media_stage_icon(stage)
+        name = _table_cell(row.get("文件", ""))
+        details = [stage]
+        progress = str(row.get("进度") or "").strip()
+        if progress and progress != stage:
+            details.append(progress)
+        queue_position = str(row.get("队列") or "").strip()
+        if queue_position and ("排队" in stage or "等待" in stage):
+            details.append(f"队列 {queue_position}")
+        output_size = str(row.get("规格") or "").strip()
+        if output_size:
+            details.append(output_size.replace("x", "×"))
+        lines.append(f"{icon} {index}. {name}")
+        lines.append("   " + "  ·  ".join(details))
     if len(rows) > 12:
         lines.append(f"还有 {len(rows) - 12} 项未显示。")
     return lines
+
+
+def _latest_repair_batch(video_runs: list[dict[str, Any]], active_video_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep a repair batch visible as one unit, including its completed members."""
+    if active_video_runs:
+        anchor = next(
+            (run for run in active_video_runs if (run.get("repair_batch") or {}).get("position")),
+            None,
+        )
+    else:
+        anchor = next(
+            (run for run in video_runs if (run.get("repair_batch") or {}).get("position")),
+            None,
+        )
+    if not anchor:
+        return []
+    batch = anchor.get("repair_batch") or {}
+    total = int(batch.get("total") or 0)
+    if total <= 0:
+        return []
+    by_position: dict[int, dict[str, Any]] = {}
+    for run in video_runs:
+        run_batch = run.get("repair_batch") or {}
+        position = int(run_batch.get("position") or 0)
+        if position <= 0 or int(run_batch.get("total") or 0) != total:
+            continue
+        by_position.setdefault(position, run)
+    return [by_position[position] for position in sorted(by_position)[:total]]
+
+
+def _media_stage_icon(stage: str) -> str:
+    if "失败" in stage or "错误" in stage:
+        return "❌"
+    if "完成" in stage:
+        return "✅"
+    if "发送" in stage or "打包" in stage:
+        return "📦"
+    if "后处理" in stage:
+        return "✨"
+    if "抠图" in stage:
+        return "🟣"
+    if "抽帧" in stage:
+        return "🎞️"
+    if "排队" in stage or "等待" in stage:
+        return "⏳"
+    return "🎬"
 
 
 def _table_cell(value: str) -> str:
@@ -1461,7 +1539,21 @@ def _format_direct_video(skill: str, payload: dict[str, Any], max_items: int) ->
         items = payload.get("items") or []
         lines.append(f"直传视频处理任务：{payload.get('count', len(items))} 个")
         for item in items[:max_items]:
-            lines.append(f"- {item.get('run_id')}：{item.get('status')} / {item.get('stage')} / {len(item.get('videos') or [])} 个视频")
+            videos_in_run = item.get("videos") or []
+            names = "、".join(
+                _clean_media_name(str(video.get("source_name") or video.get("name") or video.get("source_path") or ""))
+                for video in videos_in_run[:3]
+            )
+            label = names or str(item.get("run_label") or item.get("run_id") or "未命名视频")
+            children_in_run = item.get("children") if isinstance(item.get("children"), dict) else {}
+            comfy_in_run = children_in_run.get("comfyui") if isinstance(children_in_run.get("comfyui"), dict) else {}
+            cherry_in_run = children_in_run.get("cherry") if isinstance(children_in_run.get("cherry"), dict) else {}
+            detail = ""
+            if comfy_in_run:
+                detail += f"，抠图 {comfy_in_run.get('completed', 0)}/{comfy_in_run.get('total', 0)}"
+            if cherry_in_run:
+                detail += f"，后处理 {cherry_in_run.get('completed', 0)}/{cherry_in_run.get('total', 0)}"
+            lines.append(f"- {label}：{item.get('status')} / {item.get('stage')}{detail}")
         return lines
     if skill == "direct_video.cancel":
         names = "、".join(_clean_media_name(str(item.get("name") or item.get("source_path") or "")) for item in videos[:4] if item)
@@ -1546,13 +1638,14 @@ def _direct_video_status_item(payload: dict[str, Any], item: dict[str, Any]) -> 
     matte_done = _count_pngs_text(item.get("matte_dir"))
     smooth_done = _count_pngs_text(item.get("smooth_dir"))
     children = payload.get("children") if isinstance(payload.get("children"), dict) else {}
+    repair_batch = payload.get("repair_batch") if isinstance(payload.get("repair_batch"), dict) else {}
     return {
         "run_id": payload.get("run_id") or payload.get("id") or "",
         "run_status": payload.get("status") or "",
         "run_stage": payload.get("stage") or "",
         "run_label": payload.get("run_label") or "",
         "updated_at": payload.get("updated_at") or "",
-        "name": item.get("name") or item.get("source_path") or "未命名视频",
+        "name": item.get("source_name") or item.get("name") or item.get("source_path") or "未命名视频",
         "status": _media_status_from_stage(str(payload.get("status") or ""), str(payload.get("stage") or ""), frame_total, matte_done, smooth_done),
         "total": frame_total,
         "matte_done": matte_done,
@@ -1561,6 +1654,11 @@ def _direct_video_status_item(payload: dict[str, Any], item: dict[str, Any]) -> 
         "comfyui_run_id": children.get("comfyui_run_id") or "",
         "cherry_run_id": children.get("cherry_run_id") or "",
         "last_log": payload.get("last_log") or "",
+        "queue_position": (
+            f"{repair_batch.get('position')}/{repair_batch.get('total')}"
+            if repair_batch.get("position") and repair_batch.get("total")
+            else ""
+        ),
     }
 
 
@@ -1595,6 +1693,26 @@ def _media_status_from_stage(run_status: str, stage: str, total: int, matte_done
         return {"FAILED": "失败", "CANCELED": "已取消", "DONE_WITH_ERRORS": "部分完成"}.get(run_status, run_status)
     if stage == "extract_frames":
         return "抽帧中"
+    if stage == "repair_queued":
+        return "修复排队"
+    if stage == "repair_extract_frames":
+        return "重新抽帧"
+    if stage == "waiting_matting_queue":
+        return "等待独占抠图"
+    if stage == "repair_matting":
+        return "重新抠图" if matte_done else "准备抠图"
+    if stage == "repair_postprocess":
+        return "重新后处理" if smooth_done else "准备后处理"
+    if stage == "repair_zip":
+        return "校验并打包"
+    if stage == "repair_delivery":
+        return "发送结果"
+    if stage == "repair_failed":
+        return "修复失败"
+    if stage == "recovery_queued":
+        return "重启恢复排队"
+    if stage == "waiting_pipeline_queue":
+        return "等待独占流水线"
     if stage == "matting":
         if total and matte_done >= total:
             return "等待后处理"
@@ -1613,7 +1731,10 @@ def _media_status_from_stage(run_status: str, stage: str, total: int, matte_done
 def _count_pngs_text(path_value: object) -> int:
     from pathlib import Path
 
-    path = Path(str(path_value or ""))
+    text = str(path_value or "").strip()
+    if not text:
+        return 0
+    path = Path(text)
     if not path.exists():
         return 0
     try:

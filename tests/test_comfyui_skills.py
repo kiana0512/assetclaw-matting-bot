@@ -85,6 +85,60 @@ def _wait_done(run_id: str) -> dict:
     return status
 
 
+def test_comfyui_video_upload_names_are_unique_per_run(tmp_path: Path) -> None:
+    root = tmp_path / "frames"
+    frame = root / "video_01" / "0007.png"
+    frame.parent.mkdir(parents=True)
+    Image.new("RGB", (8, 8), (255, 0, 0)).save(frame)
+
+    first = comfyui_skills._unique_upload_name("COMFY_A", root, frame)
+    second = comfyui_skills._unique_upload_name("COMFY_B", root, frame)
+
+    assert first != second
+    assert first.startswith("assetclaw_COMFY_A_")
+    assert first.endswith("video_01_0007.png")
+
+
+def test_comfyui_upload_uses_explicit_isolated_remote_name(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "0007.png"
+    Image.new("RGB", (8, 8), (255, 0, 0)).save(source)
+    captured: dict[str, object] = {}
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"name": "assetclaw_RUN_HASH_0007.png"}
+
+    def fake_post(url, files, data, timeout):
+        captured["name"] = files["image"][0]
+        captured["overwrite"] = data["overwrite"]
+        return Response()
+
+    monkeypatch.setattr("assetclaw_matting.comfyui.client.requests.post", fake_post)
+    uploaded = ComfyUIClient().upload_image(source, remote_name="assetclaw_RUN_HASH_0007.png")
+
+    assert uploaded == "assetclaw_RUN_HASH_0007.png"
+    assert captured == {"name": "assetclaw_RUN_HASH_0007.png", "overwrite": "true"}
+
+
+def test_sequence_integrity_accepts_same_frame_and_rejects_cross_task_frame(tmp_path: Path) -> None:
+    from assetclaw_matting.skills.sequence_integrity import validate_matte_identity
+
+    source = tmp_path / "source.png"
+    correct = tmp_path / "correct.png"
+    wrong = tmp_path / "wrong.png"
+    Image.new("RGB", (64, 80), (220, 30, 20)).save(source)
+    Image.new("RGBA", (64, 80), (220, 30, 20, 255)).save(correct)
+    Image.new("RGBA", (64, 80), (20, 30, 220, 255)).save(wrong)
+
+    report = validate_matte_identity(source, correct)
+    assert report["weighted_mae"] == 0
+    with pytest.raises(RuntimeError, match="does not match"):
+        validate_matte_identity(source, wrong)
+
+
 def test_workflow_info_reads_api_workflow() -> None:
     workflow = Path.cwd() / "storage/debug/comfy_test_workflow.json"
     _make_workflow(workflow)

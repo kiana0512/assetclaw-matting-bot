@@ -84,6 +84,15 @@ def main() -> None:
     init_db(settings.data_db_path)
     create_tables()
 
+    from assetclaw_matting.skills.direct_video_skills import recover_incomplete_runs
+
+    recovery = recover_incomplete_runs()
+    log.info(
+        "direct video recovery scan recovered=%s still_running=%s",
+        recovery.get("recovered"),
+        recovery.get("still_running"),
+    )
+
     log.info("Feishu WS receiver initializing")
     log.info("event_mode=%s cloudflare=disabled public_exposure=none", settings.feishu_event_mode)
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 
 from PIL import Image
@@ -437,6 +439,70 @@ def test_direct_video_status_question_routes_without_attachment() -> None:
     assert tool_calls[0].skill == "direct_video.status"
 
 
+def test_direct_video_batch_list_includes_completed_runs() -> None:
+    planned = plan_direct_video_task(
+        BrainMessage(text="这批六个任务进度列表", attachments=[], conversation_id="test")
+    )
+    assert planned is not None
+    tool_calls, _reason = planned
+    assert tool_calls[0].skill == "direct_video.list"
+    assert tool_calls[0].arguments["include_finished"] is True
+
+
+def test_current_work_keeps_all_members_of_active_repair_batch_visible() -> None:
+    from assetclaw_matting.brain.result_formatter import _format_direct_media_overview
+
+    runs = []
+    for position in range(1, 7):
+        runs.append(
+            {
+                "run_id": f"VID_BATCH_{position}",
+                "status": "DONE" if position <= 4 else "RUNNING",
+                "stage": "done" if position <= 4 else "repair_matting",
+                "repair_batch": {"position": position, "total": 6},
+                "items": [
+                    {
+                        "name": f"video_{position}.mp4",
+                        "stage": "done" if position <= 4 else "repair_matting",
+                        "total": 10,
+                        "matte_done": 10 if position <= 4 else position,
+                        "smooth_done": 10 if position <= 4 else 0,
+                        "output_size": "384x512",
+                    }
+                ],
+            }
+        )
+
+    lines = _format_direct_media_overview(
+        {
+            "direct_videos": runs,
+            "direct_images": [
+                {
+                    "run_id": "IMG_UNRELATED",
+                    "status": "DONE",
+                    "items": [{"name": "unrelated.png", "stage": "done"}],
+                }
+            ],
+            "filters": {},
+        }
+    )
+    text = "\n".join(lines)
+    for position in range(1, 7):
+        assert f"video_{position}.mp4" in text
+    assert "unrelated.png" not in text
+
+    for run in runs:
+        run["status"] = "DONE"
+        run["stage"] = "done"
+    completed_text = "\n".join(
+        _format_direct_media_overview(
+            {"direct_videos": runs, "direct_images": [], "filters": {}}
+        )
+    )
+    for position in range(1, 7):
+        assert f"video_{position}.mp4" in completed_text
+
+
 def test_direct_image_attachment_routes_without_confirmation(tmp_path: Path) -> None:
     image = tmp_path / "source.png"
     Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(image)
@@ -623,8 +689,8 @@ def test_generic_progress_question_routes_to_latest_direct_video(monkeypatch, tm
     assert response.tool_calls
     assert response.tool_calls[0].skill in {"direct_video.status", "agent.current_work"}
     assert "当前执行现场" not in response.text
-    assert "类型 | 文件 | 任务 | 阶段 | 进度 | 规格 | 说明" in response.text or "视频任务：" in response.text
-    assert "256x256" in response.text
+    assert "1. " in response.text
+    assert "256×256" in response.text
 
 
 def test_generic_progress_question_routes_to_latest_direct_image(monkeypatch, tmp_path: Path) -> None:
@@ -684,8 +750,8 @@ def test_generic_progress_question_routes_to_latest_direct_image(monkeypatch, tm
 
     assert response.tool_calls
     assert response.tool_calls[0].skill in {"direct_image.status", "agent.current_work"}
-    assert "类型 | 文件 | 任务 | 阶段 | 进度 | 规格 | 说明" in response.text or "图片任务：" in response.text
-    assert "384x512" in response.text
+    assert "1. " in response.text
+    assert "384×512" in response.text
 
 
 def test_direct_media_natural_language_pressure_samples(monkeypatch, tmp_path: Path) -> None:
@@ -780,6 +846,10 @@ def test_direct_video_cherry_runs_per_video_dir(monkeypatch, tmp_path: Path) -> 
     def fake_run_start(**kwargs):
         calls.append(kwargs)
         size = (256, 256) if kwargs.get("profile") == "half" else (384, 512)
+        output_dir = Path(str(kwargs["output_dir"]))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for source in Path(str(kwargs["input_dir"])).glob("*.png"):
+            shutil.copy2(source, output_dir / source.name)
         return {
             "run_id": f"CHERRY_TEST_{len(calls)}",
             "options": {"resize_width": size[0], "resize_height": size[1]},
@@ -1005,6 +1075,78 @@ def test_direct_video_zip_contains_required_sections(monkeypatch, tmp_path: Path
     assert "smooth/video_01/0000.png" in names
 
 
+def test_direct_video_zip_uses_original_video_name() -> None:
+    from assetclaw_matting.skills import direct_video_skills
+
+    run = {
+        "id": "VID_INTERNAL_ID",
+        "run_label": "客户动画-走路.mp4",
+        "videos": [{"source_name": "客户动画-走路.mp4", "name": "01_客户动画-走路.mp4"}],
+    }
+
+    assert direct_video_skills._zip_filename(run) == "客户动画-走路_animation_processed.zip"
+
+
+def test_direct_video_recovery_resumes_dead_worker_and_keeps_live_worker(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.skills import direct_video_skills
+
+    monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", tmp_path / "runs")
+    started: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        direct_video_skills,
+        "_start_worker",
+        lambda run_id, recover=False: started.append((run_id, recover)),
+    )
+    dead = {"id": "VID_DEAD", "status": "RUNNING", "stage": "matting", "worker_pid": 0, "videos": [], "log": []}
+    live = {"id": "VID_LIVE", "status": "RUNNING", "stage": "matting", "worker_pid": os.getpid(), "videos": [], "log": []}
+    direct_video_skills._save(dead)
+    direct_video_skills._save(live)
+
+    result = direct_video_skills.recover_incomplete_runs()
+
+    assert result["recovered"] == ["VID_DEAD"]
+    assert result["still_running"] == ["VID_LIVE"]
+    assert started == [("VID_DEAD", True)]
+    assert direct_video_skills._load("VID_DEAD")["stage"] == "recovery_queued"
+
+
+def test_direct_video_comfyui_enables_strict_frame_identity(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.skills import direct_video_skills
+
+    frame_dir = tmp_path / "frames" / "video_01"
+    matte_dir = tmp_path / "matte" / "video_01"
+    frame_dir.mkdir(parents=True)
+    matte_dir.mkdir(parents=True)
+    Image.new("RGB", (16, 16), (200, 20, 10)).save(frame_dir / "0000.png")
+    Image.new("RGBA", (16, 16), (200, 20, 10, 255)).save(matte_dir / "0000.png")
+    calls: list[dict[str, object]] = []
+
+    def fake_start(**kwargs):
+        calls.append(kwargs)
+        return {"run_id": "COMFY_STRICT"}
+
+    monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", tmp_path)
+    monkeypatch.setattr("assetclaw_matting.skills.comfyui_skills.run_start", fake_start)
+    monkeypatch.setattr(
+        "assetclaw_matting.skills.comfyui_skills.run_status",
+        lambda *_args, **_kwargs: {"status": "DONE", "completed": 1, "total": 1},
+    )
+    run = {
+        "id": "VID_STRICT",
+        "status": "RUNNING",
+        "children": {},
+        "videos": [{"index": 1, "frame_dir": str(frame_dir), "matte_dir": str(matte_dir)}],
+        "workflow_path": "workflow.json",
+        "notify_interval_seconds": 60,
+        "log": [],
+    }
+
+    direct_video_skills._run_comfyui_unlocked(run)
+
+    assert calls[0]["strict_frame_identity"] is True
+    assert run["integrity"]["matte"]["video_01"]["identity_verified"] == 1
+
+
 def test_direct_video_resend_zip_reuses_saved_result(monkeypatch, tmp_path: Path) -> None:
     import zipfile
 
@@ -1163,10 +1305,12 @@ def test_direct_status_formatter_uses_media_table() -> None:
 
     text = format_skill_results([result])
 
-    assert "类型 | 文件 | 任务 | 阶段 | 进度 | 规格 | 说明" in text
+    assert "视频任务：" in text
+    assert "1. " in text
+    assert "2. " in text
     assert "思考.mp4" in text
     assert "待机.mp4" in text
-    assert "VID_TEST" in text
+    assert "VID_TEST" not in text
 
 
 def test_progress_question_adds_message_reaction(monkeypatch) -> None:

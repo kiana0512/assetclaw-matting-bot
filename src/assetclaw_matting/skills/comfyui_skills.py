@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 import shutil
@@ -100,6 +101,7 @@ def run_start(
     skip_existing: bool = False,
     priority_characters: list[str] | None = None,
     notify_interval_seconds: int = 300,
+    strict_frame_identity: bool = False,
 ) -> dict[str, Any]:
     from assetclaw_matting.config import settings
     from assetclaw_matting.comfyui.client import comfyui_client
@@ -143,6 +145,7 @@ def run_start(
         "skip_existing": skip_existing,
         "priority_characters": list(priority_characters or []),
         "notify_interval_seconds": max(60, min(notify_interval_seconds, 3600)),
+        "strict_frame_identity": bool(strict_frame_identity),
         "prompt_map": prompt_map,
         "chat_id": (ctx.get("chat_id") or "") if ctx.get("channel") == "feishu" else "",
         "archived": False,
@@ -592,16 +595,23 @@ def _run_worker(run_id: str) -> None:
             _set_run_status(run_id, "RUNNING")
             target = _output_target(src, dst, image_path, bool(options.get("preserve_structure", True)))
             prompt_id = ""
+            uploaded = ""
             try:
                 attempts = max(1, int(options.get("output_validation_retries", 3)))
                 retry_delay = max(5, int(options.get("output_validation_retry_delay_seconds", 20)))
                 last_error: Exception | None = None
+                upload_verification: dict[str, str] = {}
+                identity_verification: dict[str, Any] = {}
                 for attempt in range(1, attempts + 1):
                     try:
                         if settings.comfyui_fake_mode:
                             _fake_copy_image(image_path, target)
                         else:
-                            uploaded = comfyui_client.upload_image(image_path)
+                            uploaded = comfyui_client.upload_image(
+                                image_path,
+                                remote_name=_unique_upload_name(run_id, src, image_path),
+                            )
+                            upload_verification = comfyui_client.verify_uploaded_image(image_path, uploaded)
                             workflow = copy.deepcopy(base_workflow)
                             if options.get("input_node_id"):
                                 workflow = patch_node_input(workflow, str(options["input_node_id"]), str(options.get("input_name") or "image"), uploaded)
@@ -620,6 +630,10 @@ def _run_worker(run_id: str) -> None:
                             comfyui_client.download_output(output["filename"], output.get("subfolder", ""), output.get("type", "output"), target)
                         if not settings.comfyui_fake_mode:
                             _ensure_final_transparent_png(target)
+                            if options.get("strict_frame_identity"):
+                                from assetclaw_matting.skills.sequence_integrity import validate_matte_identity
+
+                                identity_verification = validate_matte_identity(image_path, target)
                         last_error = None
                         break
                     except Exception as exc:
@@ -643,6 +657,8 @@ def _run_worker(run_id: str) -> None:
                     "src_path": str(image_path),
                     "rel_path": _relative_output_key(src, image_path, bool(options.get("preserve_structure", True))),
                     "dst_path": str(target),
+                    **upload_verification,
+                    "identity_verification": identity_verification,
                 })
                 options["prompt_map"] = prompt_map
                 _save_run_progress(run_id, prompt_ids, options)
@@ -665,6 +681,9 @@ def _run_worker(run_id: str) -> None:
                     f"\n原因：{exc}",
                 )
                 return
+            finally:
+                if uploaded:
+                    comfyui_client.cleanup_uploaded_image(uploaded)
         final_status = "DONE_WITH_ERRORS" if any(item.get("error") for item in prompt_map) else "DONE"
         _set_run_status(run_id, final_status)
     except Exception as exc:
@@ -915,6 +934,13 @@ def _relative_output_key(input_root: Path, image_path: Path, preserve_structure:
 
 def _output_target(input_root: Path, output_root: Path, image_path: Path, preserve_structure: bool) -> Path:
     return output_root / _relative_output_key(input_root, image_path, preserve_structure)
+
+
+def _unique_upload_name(run_id: str, input_root: Path, image_path: Path) -> str:
+    relative = str(image_path.relative_to(input_root)).replace("\\", "/")
+    digest = hashlib.sha256(relative.encode("utf-8")).hexdigest()[:12]
+    safe_rel = re.sub(r"[^0-9A-Za-z._-]+", "_", relative).strip("._-")
+    return f"assetclaw_{run_id}_{digest}_{safe_rel}"
 
 
 def _fake_copy_image(src: Path, dst: Path) -> None:

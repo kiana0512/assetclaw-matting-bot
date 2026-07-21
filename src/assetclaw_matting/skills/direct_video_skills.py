@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -17,12 +20,14 @@ from assetclaw_matting.config import settings
 from assetclaw_matting.runtime_context import get_runtime_context
 from assetclaw_matting.skills import matting_pipeline_skills
 from assetclaw_matting.skills.media_skills import VIDEO_EXTS
+from assetclaw_matting.skills.sequence_integrity import validate_matte_sequence, validate_sequence_names
 from assetclaw_matting.skills.security import validate_path
 
 
 RUNS_ROOT = Path(settings.storage_dir) / "direct_video_runs"
 FINISHED = {"DONE", "FAILED", "CANCELED", "DONE_WITH_ERRORS"}
 _WORKERS: set[str] = set()
+_COMFYUI_SEQUENCE_LOCK = threading.Lock()
 
 
 def start(
@@ -79,6 +84,7 @@ def start(
             {
                 "index": index,
                 "source_path": str(videos[index - 1]),
+                "source_name": _safe_name(names[index - 1] if index - 1 < len(names) else videos[index - 1].name),
                 "original_path": copied[index - 1],
                 "name": Path(copied[index - 1]).name,
                 "frame_dir": str(frames_dir / f"video_{index:02d}"),
@@ -98,6 +104,7 @@ def start(
         "pipeline_notice": pipeline_notice,
         "notify_interval_seconds": max(30, min(int(notify_interval_seconds or 60), 3600)),
         "zip_path": "",
+        "integrity": {},
         "error": "",
         "log": [],
     }
@@ -126,6 +133,31 @@ def list_runs(limit: int = 10, include_finished: bool = True, **_: Any) -> dict[
     return {"ok": True, "count": len(items), "items": items}
 
 
+def recover_incomplete_runs() -> dict[str, Any]:
+    RUNS_ROOT.mkdir(parents=True, exist_ok=True)
+    recovered: list[str] = []
+    still_running: list[str] = []
+    for status_path in sorted(RUNS_ROOT.glob("VID_*/status.json"), key=lambda path: path.stat().st_mtime):
+        try:
+            run = json.loads(status_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(run.get("status") or "") not in {"RUNNING", "QUEUED", "PENDING"}:
+            continue
+        worker_pid = int(run.get("worker_pid") or 0)
+        if worker_pid and _process_alive(worker_pid):
+            still_running.append(str(run.get("id") or ""))
+            continue
+        _append_log(run, "检测到机器人进程曾重启：从原视频安全恢复未完成任务")
+        run["status"] = "QUEUED"
+        run["stage"] = "recovery_queued"
+        run["worker_pid"] = 0
+        _save(run)
+        _start_worker(str(run["id"]), recover=True)
+        recovered.append(str(run["id"]))
+    return {"ok": True, "recovered": recovered, "still_running": still_running}
+
+
 def resend_zip(run_id: str | None = None, **_: Any) -> dict[str, Any]:
     run = _load(run_id)
     if not run:
@@ -144,6 +176,53 @@ def resend_zip(run_id: str | None = None, **_: Any) -> dict[str, Any]:
     _append_log(run, f"zip 重发完成：{zip_path.name}，{zip_path.stat().st_size} bytes")
     _save(run)
     return {"ok": True, "run_id": run["id"], "zip_path": str(zip_path), "zip_size": zip_path.stat().st_size}
+
+
+def repair_from_frames(run_id: str, resend: bool = True) -> dict[str, Any]:
+    run = _load(run_id)
+    if not run:
+        return {"ok": False, "run_id": run_id, "error": "direct video run not found"}
+    try:
+        for item in run.get("videos") or []:
+            original = Path(str(item.get("original_path") or ""))
+            if not original.is_file():
+                raise RuntimeError(f"cannot fully repair without original video: {original}")
+            if not item.get("source_name"):
+                item["source_name"] = _source_display_name(run, item)
+        backup_dir = _archive_previous_results(run)
+        run["status"] = "RUNNING"
+        run["stage"] = "repair_extract_frames"
+        run["error"] = ""
+        run["children"] = {"repair_backup": str(backup_dir)}
+        run["integrity"] = {}
+        run["zip_path"] = ""
+        _append_log(run, f"开始红线修复：从原视频重新抽帧、抠图和后处理，旧结果已归档到 {backup_dir.name}")
+        _save(run)
+        _extract_all(run)
+        _mark(run, "RUNNING", "repair_matting")
+        _run_comfyui(run)
+        _mark(run, "RUNNING", "repair_postprocess")
+        _run_cherry(run)
+        _mark(run, "RUNNING", "repair_zip")
+        zip_path = _make_zip(run)
+        run["zip_path"] = str(zip_path)
+        if resend and run.get("chat_id"):
+            _mark(run, "RUNNING", "repair_delivery")
+            _send_zip_with_retries(run, zip_path)
+        run["status"] = "DONE"
+        run["stage"] = "done"
+        run["error"] = ""
+        _append_log(run, f"红线修复完成：{zip_path.name}，逐帧校验及打包闸门均通过")
+        _save(run)
+        return {"ok": True, "run_id": run_id, **_public(run)}
+    except Exception as exc:
+        run = _load(run_id) or run
+        run["status"] = "FAILED"
+        run["stage"] = "repair_failed"
+        run["error"] = str(exc)
+        _append_log(run, f"红线修复失败并停止发送：{exc}")
+        _save(run)
+        return {"ok": False, "run_id": run_id, **_public(run)}
 
 
 def cancel(run_id: str | None = None, **_: Any) -> dict[str, Any]:
@@ -286,6 +365,17 @@ def _extract_all(run: dict[str, Any]) -> None:
 
 
 def _run_comfyui(run: dict[str, Any]) -> None:
+    requested_stage = str(run.get("stage") or "matting")
+    _mark(run, "RUNNING", "waiting_matting_queue")
+    _append_log(run, "等待独占抠图队列：视频任务将逐个处理，禁止并发混帧")
+    _save(run)
+    with _COMFYUI_SEQUENCE_LOCK:
+        with _cross_process_video_matting_lock(run):
+            _mark(run, "RUNNING", requested_stage)
+            _run_comfyui_unlocked(run)
+
+
+def _run_comfyui_unlocked(run: dict[str, Any]) -> None:
     from assetclaw_matting.skills.comfyui_skills import run_start, run_status
 
     run_dir = _run_dir(run)
@@ -297,6 +387,7 @@ def _run_comfyui(run: dict[str, Any]) -> None:
         preserve_structure=True,
         skip_existing=False,
         notify_interval_seconds=run["notify_interval_seconds"],
+        strict_frame_identity=True,
     )
     child_id = result["run_id"]
     run.setdefault("children", {})["comfyui_run_id"] = child_id
@@ -309,8 +400,14 @@ def _run_comfyui(run: dict[str, Any]) -> None:
         run["children"]["comfyui"] = payload
         _save(run)
         if payload.get("status") in {"DONE", "FAILED", "CANCELED", "DONE_WITH_ERRORS"}:
-            if payload.get("status") in {"FAILED", "CANCELED"}:
+            if payload.get("status") in {"FAILED", "CANCELED", "DONE_WITH_ERRORS"}:
                 raise RuntimeError(_format_comfyui_failure(child_id, payload))
+            integrity = run.setdefault("integrity", {}).setdefault("matte", {})
+            for item in run.get("videos") or []:
+                key = f"video_{int(item.get('index') or 0):02d}"
+                integrity[key] = validate_matte_sequence(item["frame_dir"], item["matte_dir"])
+            _append_log(run, "红线校验通过：全部抽帧与抠图逐帧同名、同内容、无串帧")
+            _save(run)
             return
         time.sleep(5)
 
@@ -350,17 +447,34 @@ def _run_cherry(run: dict[str, Any]) -> None:
             run["children"].setdefault("cherry_runs", {})[child_id] = payload
             _save(run)
             if payload.get("status") in {"DONE", "FAILED", "CANCELED", "DONE_WITH_ERRORS"}:
-                if payload.get("status") in {"FAILED", "CANCELED"}:
+                if payload.get("status") in {"FAILED", "CANCELED", "DONE_WITH_ERRORS"}:
                     raise RuntimeError(f"Cherry run {child_id} ended as {payload.get('status')}")
+                key = f"video_{int(item.get('index') or 0):02d}"
+                report = validate_sequence_names(matte_dir, smooth_dir, label="matte_to_smooth")
+                run.setdefault("integrity", {}).setdefault("smooth", {})[key] = report
+                _append_log(run, f"后处理序列校验通过：{key}，{report['count']} 帧")
+                _save(run)
                 break
             time.sleep(5)
 
 
 def _make_zip(run: dict[str, Any]) -> Path:
     run_dir = _run_dir(run)
+    integrity = run.setdefault("integrity", {})
+    matte_reports = integrity.setdefault("matte", {})
+    smooth_reports = integrity.setdefault("smooth", {})
+    for item in run.get("videos") or []:
+        key = f"video_{int(item.get('index') or 0):02d}"
+        matte_reports[key] = validate_matte_sequence(item["frame_dir"], item["matte_dir"])
+        smooth_reports[key] = validate_sequence_names(item["matte_dir"], item["smooth_dir"], label="matte_to_smooth")
+    integrity["package_gate"] = {
+        "passed": True,
+        "checked_at": _now(),
+        "rule": "frames/N.png -> matte/N.png -> smooth/N.png must preserve the same ordered frame identity",
+    }
     manifest = run_dir / "manifest.json"
     manifest.write_text(json.dumps(_public(run), ensure_ascii=False, indent=2), encoding="utf-8")
-    zip_path = run_dir / f"{run['id']}_animation_processed.zip"
+    zip_path = run_dir / _zip_filename(run)
     if zip_path.exists():
         zip_path.unlink()
     include_dirs = ["original_videos", "frames", "matte", "smooth"]
@@ -382,6 +496,91 @@ def _verify_zip(zip_path: Path) -> None:
         damaged = archive.testzip()
     if damaged:
         raise RuntimeError(f"zip integrity check failed: {damaged}")
+
+
+def _archive_previous_results(run: dict[str, Any]) -> Path:
+    run_dir = _run_dir(run).resolve()
+    backup_dir = (run_dir / "repairs" / datetime.now().strftime("%Y%m%d_%H%M%S")).resolve()
+    if run_dir not in backup_dir.parents:
+        raise RuntimeError(f"unsafe repair backup path: {backup_dir}")
+    backup_dir.mkdir(parents=True, exist_ok=False)
+    candidates: list[Path] = [run_dir / "frames", run_dir / "matte", run_dir / "smooth", run_dir / "manifest.json"]
+    current_zip = Path(str(run.get("zip_path") or "")) if run.get("zip_path") else None
+    if current_zip and current_zip.resolve().parent == run_dir:
+        candidates.append(current_zip)
+    candidates.extend(run_dir.glob("*_animation_processed.zip"))
+    seen: set[Path] = set()
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved in seen or not path.exists():
+            continue
+        seen.add(resolved)
+        if resolved.parent != run_dir and run_dir not in resolved.parents:
+            raise RuntimeError(f"unsafe repair source path: {resolved}")
+        shutil.move(str(path), str(backup_dir / path.name))
+    for item in run.get("videos") or []:
+        item["frame_count"] = 0
+        Path(str(item["frame_dir"])).mkdir(parents=True, exist_ok=True)
+        Path(str(item["matte_dir"])).mkdir(parents=True, exist_ok=True)
+        Path(str(item["smooth_dir"])).mkdir(parents=True, exist_ok=True)
+    return backup_dir
+
+
+@contextmanager
+def _cross_process_video_matting_lock(run: dict[str, Any]):
+    import msvcrt
+
+    RUNS_ROOT.mkdir(parents=True, exist_ok=True)
+    lock_path = RUNS_ROOT / ".video_matting.lock"
+    with lock_path.open("a+b") as handle:
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        while True:
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError:
+                if _is_canceled(run):
+                    raise RuntimeError(f"video matting queue canceled: {run['id']}")
+                time.sleep(2)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+@contextmanager
+def _cross_process_video_pipeline_lock(run: dict[str, Any]):
+    import msvcrt
+
+    RUNS_ROOT.mkdir(parents=True, exist_ok=True)
+    lock_path = RUNS_ROOT / ".video_pipeline.lock"
+    with lock_path.open("a+b") as handle:
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        while True:
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError:
+                if _is_canceled(run):
+                    raise RuntimeError(f"video pipeline queue canceled: {run['id']}")
+                latest = _load(str(run["id"])) or run
+                if latest.get("stage") != "waiting_pipeline_queue":
+                    latest["stage"] = "waiting_pipeline_queue"
+                    _append_log(latest, "等待独占视频流水线：前一个视频完成后自动继续")
+                    _save(latest)
+                time.sleep(2)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _send_zip(run: dict[str, Any], zip_path: Path) -> None:
@@ -531,11 +730,71 @@ def _notify(run: dict[str, Any], text: str) -> None:
         _save(run)
 
 
-def _start_worker(run_id: str) -> None:
+def _start_worker(run_id: str, recover: bool = False) -> None:
     if run_id in _WORKERS:
         return
+    run = _load(run_id)
+    if not run:
+        return
+    existing_pid = int(run.get("worker_pid") or 0)
+    if existing_pid and _process_alive(existing_pid):
+        return
     _WORKERS.add(run_id)
-    threading.Thread(target=_worker, args=(run_id,), name=f"direct_video_{run_id}", daemon=True).start()
+    script = Path(settings.assetclaw_root) / "scripts" / "direct_video_worker.py"
+    log_path = Path(settings.log_dir) / f"direct_video_worker_{run_id}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [sys.executable, "-u", str(script), run_id]
+    if recover:
+        command.append("--recover")
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = 0x00000008 | 0x00000200 | 0x08000000
+    with log_path.open("a", encoding="utf-8") as log_handle:
+        process = subprocess.Popen(
+            command,
+            cwd=str(Path(settings.assetclaw_root)),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            creationflags=creationflags,
+            close_fds=True,
+        )
+    run["worker_pid"] = process.pid
+    run["worker_mode"] = "detached"
+    _append_log(run, f"持久化工作进程已启动：PID={process.pid}，机器人重启不会中断")
+    _save(run)
+    _WORKERS.discard(run_id)
+
+
+def run_worker_process(run_id: str, recover: bool = False) -> dict[str, Any]:
+    run = _load(run_id)
+    if not run:
+        return {"ok": False, "run_id": run_id, "error": "direct video run not found"}
+    run["worker_pid"] = os.getpid()
+    run["worker_mode"] = "detached_recovery" if recover else "detached"
+    _save(run)
+    try:
+        with _cross_process_video_pipeline_lock(run):
+            if recover:
+                return repair_from_frames(run_id, resend=True)
+            _worker(run_id)
+            completed = _load(run_id) or run
+            return {"ok": completed.get("status") == "DONE", "run_id": run_id, **_public(completed)}
+    finally:
+        latest = _load(run_id)
+        if latest and int(latest.get("worker_pid") or 0) == os.getpid():
+            latest["worker_pid"] = 0
+            _save(latest)
+
+
+def _process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
 
 def _is_canceled(run: dict[str, Any]) -> bool:
@@ -571,6 +830,10 @@ def _public(run: dict[str, Any]) -> dict[str, Any]:
         "children": run.get("children") or {},
         "fps": run.get("fps"),
         "zip_path": run.get("zip_path") or "",
+        "integrity": run.get("integrity") or {},
+        "repair_batch": run.get("repair_batch") or {},
+        "worker_pid": int(run.get("worker_pid") or 0),
+        "worker_mode": run.get("worker_mode") or "",
         "pipeline_notice": run.get("pipeline_notice") or "",
         "error": run.get("error") or "",
         "last_log": (run.get("log") or [{}])[-1].get("message", ""),
@@ -676,6 +939,35 @@ def _safe_name(value: str) -> str:
     text = str(value or "").replace("\\", "/").split("/")[-1].strip()
     cleaned = "".join(ch if ch.isalnum() or ch in "._- " else "_" for ch in text).strip(" .")
     return cleaned or "video.mp4"
+
+
+def _zip_filename(run: dict[str, Any]) -> str:
+    videos = run.get("videos") or []
+    first = videos[0] if videos else {}
+    source_name = str(first.get("source_name") or "").strip()
+    if not source_name:
+        source_name = str(run.get("run_label") or first.get("name") or run.get("id") or "animation")
+    stem = Path(_safe_name(source_name)).stem
+    if stem[:3].isdigit() and len(stem) > 3 and stem[2] == "_":
+        stem = stem[3:]
+    if len(videos) > 1:
+        stem = f"{stem}_and_{len(videos)}_videos"
+    stem = _safe_name(stem)[:120].rstrip(" .") or "animation"
+    return f"{stem}_animation_processed.zip"
+
+
+def _source_display_name(run: dict[str, Any], item: dict[str, Any]) -> str:
+    source_name = str(item.get("source_name") or "").strip()
+    if source_name:
+        return _safe_name(source_name)
+    label = str(run.get("run_label") or "").strip()
+    if label and "、" not in label:
+        return _safe_name(label)
+    name = _safe_name(str(item.get("name") or Path(str(item.get("original_path") or "video.mp4")).name))
+    stem = Path(name).stem
+    if stem[:3].isdigit() and len(stem) > 3 and stem[2] == "_":
+        stem = stem[3:]
+    return f"{stem}{Path(name).suffix}"
 
 
 def _first_frame_size(folder: Path) -> tuple[int, int]:
