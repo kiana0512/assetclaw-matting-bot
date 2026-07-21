@@ -14,6 +14,8 @@ from assetclaw_matting.config import settings
 
 log = logging.getLogger(__name__)
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
+DIRECT_MESSAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+RETRYABLE_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
 
 
 class FeishuClient:
@@ -65,13 +67,16 @@ class FeishuClient:
             "msg_type": "text",
             "content": json.dumps({"text": text}, ensure_ascii=False),
         }
-        response = requests.post(
+        response = self._post_with_retry(
             f"{FEISHU_BASE}/im/v1/messages?receive_id_type=chat_id",
             headers=self._headers(),
             json=payload,
             timeout=15,
         )
-        response.raise_for_status()
+        self._raise_for_api_error(response, "send_text_to_chat")
+        data = response.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"send_text_to_chat failed: code={data.get('code')} msg={data.get('msg')} error={data.get('error')}")
 
     def add_message_reaction(self, message_id: str, emoji_type: str) -> bool:
         if not message_id or not emoji_type:
@@ -112,26 +117,25 @@ class FeishuClient:
         return data["data"]["file_key"]
 
     def send_file_to_chat(self, chat_id: str, path: Path, file_name: str | None = None) -> dict[str, str] | None:
+        # Large one-shot message uploads can spend the whole 60-second timeout
+        # writing the request body. Route them straight to Drive's chunked API.
+        if path.stat().st_size > DIRECT_MESSAGE_UPLOAD_MAX_BYTES:
+            return self._send_drive_file_to_chat(chat_id, path, file_name)
         try:
             file_key = self.upload_file(path, file_name)
         except requests.HTTPError as exc:
             if not _is_message_file_size_error(exc):
                 raise
-            drive_file = self.upload_drive_file(path, file_name)
-            file_token = str(drive_file.get("file_token") or "")
-            if file_token:
-                self.grant_drive_file_to_chat(file_token, chat_id, perm="full_access")
-            url = str(drive_file.get("url") or "")
-            if not url:
-                raise RuntimeError(f"drive upload succeeded but url is empty: {drive_file}") from exc
-            self.send_text_to_chat(chat_id, f"文件已生成：{file_name or path.name}\n{url}")
-            return drive_file
+            return self._send_drive_file_to_chat(chat_id, path, file_name, cause=exc)
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            log.warning("message file upload failed, switching to Drive: file=%s error=%s", path, exc)
+            return self._send_drive_file_to_chat(chat_id, path, file_name, cause=exc)
         payload = {
             "receive_id": chat_id,
             "msg_type": "file",
             "content": json.dumps({"file_key": file_key}, ensure_ascii=False),
         }
-        response = requests.post(
+        response = self._post_with_retry(
             f"{FEISHU_BASE}/im/v1/messages?receive_id_type=chat_id",
             headers=self._headers(),
             json=payload,
@@ -143,24 +147,49 @@ class FeishuClient:
             raise RuntimeError(f"send_file_to_chat failed: code={data.get('code')} msg={data.get('msg')} error={data.get('error')}")
         return None
 
+    def _send_drive_file_to_chat(
+        self,
+        chat_id: str,
+        path: Path,
+        file_name: str | None = None,
+        cause: Exception | None = None,
+    ) -> dict[str, str]:
+        drive_file = self.upload_drive_file(path, file_name)
+        file_token = str(drive_file.get("file_token") or "")
+        if file_token:
+            self.grant_drive_file_to_chat(file_token, chat_id, perm="full_access")
+        url = str(drive_file.get("url") or "")
+        if not url:
+            error = RuntimeError(f"drive upload succeeded but url is empty: {drive_file}")
+            if cause is not None:
+                raise error from cause
+            raise error
+        self.send_text_to_chat(chat_id, f"文件已生成：{file_name or path.name}\n{url}")
+        return drive_file
+
     def upload_drive_file(self, path: Path, file_name: str | None = None) -> dict[str, str]:
         sent_name = file_name or path.name
         size = path.stat().st_size
         if size > 20 * 1024 * 1024:
             return self.upload_drive_file_chunked(path, sent_name)
-        with path.open("rb") as f:
-            response = requests.post(
-                f"{FEISHU_BASE}/drive/v1/files/upload_all",
-                headers=self._headers(),
-                data={
-                    "file_name": sent_name,
-                    "parent_type": "explorer",
-                    "parent_node": "",
-                    "size": str(size),
-                },
-                files={"file": (sent_name, f, _guess_mime_type(sent_name))},
-                timeout=300,
-            )
+        try:
+            with path.open("rb") as f:
+                response = requests.post(
+                    f"{FEISHU_BASE}/drive/v1/files/upload_all",
+                    headers=self._headers(),
+                    data={
+                        "file_name": sent_name,
+                        "parent_type": "explorer",
+                        "parent_node": "",
+                        "size": str(size),
+                    },
+                    files={"file": (sent_name, f, _guess_mime_type(sent_name))},
+                    timeout=300,
+                )
+        except (requests.Timeout, requests.ConnectionError):
+            return self.upload_drive_file_chunked(path, sent_name)
+        if response.status_code in RETRYABLE_HTTP_STATUSES:
+            return self.upload_drive_file_chunked(path, sent_name)
         self._raise_for_api_error(response, "upload_drive_file")
         data = response.json()
         if data.get("code") != 0:
@@ -175,7 +204,7 @@ class FeishuClient:
     def upload_drive_file_chunked(self, path: Path, file_name: str | None = None) -> dict[str, str]:
         sent_name = file_name or path.name
         size = path.stat().st_size
-        prepare = requests.post(
+        prepare = self._post_with_retry(
             f"{FEISHU_BASE}/drive/v1/files/upload_prepare",
             headers=self._headers(),
             data={
@@ -205,7 +234,7 @@ class FeishuClient:
                 chunk = f.read(block_size)
                 if not chunk:
                     break
-                part = requests.post(
+                part = self._post_with_retry(
                     f"{FEISHU_BASE}/drive/v1/files/upload_part",
                     headers=self._headers(),
                     data={"upload_id": upload_id, "seq": str(seq), "size": str(len(chunk))},
@@ -220,7 +249,7 @@ class FeishuClient:
                         f"msg={part_data.get('msg')} error={part_data.get('error')}"
                     )
 
-        finish = requests.post(
+        finish = self._post_with_retry(
             f"{FEISHU_BASE}/drive/v1/files/upload_finish",
             headers=self._headers(),
             data={"upload_id": upload_id, "block_num": str(block_num)},
@@ -240,10 +269,29 @@ class FeishuClient:
             "version": str(result.get("version") or ""),
         }
 
+    def _post_with_retry(self, url: str, *, attempts: int = 3, **kwargs) -> requests.Response:
+        last_error: Exception | None = None
+        for attempt in range(1, max(1, attempts) + 1):
+            try:
+                response = requests.post(url, **kwargs)
+                if response.status_code not in RETRYABLE_HTTP_STATUSES or attempt >= attempts:
+                    return response
+                last_error = requests.HTTPError(
+                    f"retryable HTTP status {response.status_code} for {url}",
+                    response=response,
+                )
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_error = exc
+                if attempt >= attempts:
+                    raise
+            time.sleep(min(2 ** (attempt - 1), 4))
+        assert last_error is not None
+        raise last_error
+
     def grant_drive_file_to_chat(self, file_token: str, chat_id: str, perm: str = "full_access") -> None:
         if not file_token or not chat_id:
             return
-        response = requests.post(
+        response = self._post_with_retry(
             f"{FEISHU_BASE}/drive/v1/permissions/{file_token}/members",
             headers={**self._headers(), "Content-Type": "application/json"},
             params={"type": "file"},

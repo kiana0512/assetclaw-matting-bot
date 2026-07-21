@@ -136,7 +136,8 @@ def resend_zip(run_id: str | None = None, **_: Any) -> dict[str, Any]:
     zip_path = Path(zip_path_text)
     if not zip_path.exists():
         return {"ok": False, "error": f"zip not found: {zip_path}"}
-    _send_zip(run, zip_path)
+    _verify_zip(zip_path)
+    _send_zip_with_retries(run, zip_path)
     run["status"] = "DONE"
     run["stage"] = "done"
     run["error"] = ""
@@ -206,23 +207,33 @@ def _worker(run_id: str) -> None:
         _mark(run, "RUNNING", "zip")
         zip_path = _make_zip(run)
         run["zip_path"] = str(zip_path)
-        run["status"] = "DONE"
-        run["stage"] = "done"
-        run["updated_at"] = _now()
-        _save(run)
+        _mark(run, "RUNNING", "delivery")
         plan = _cherry_plan_summary(run.get("videos") or [])
         suffix = f"，{plan}" if plan else ""
         _notify(run, f"动画完成：{run['id']}，正在发送 zip{suffix}。")
-        _send_zip(run, zip_path)
+        _send_zip_with_retries(run, zip_path)
+        run["status"] = "DONE"
+        run["stage"] = "done"
+        run["error"] = ""
+        run["updated_at"] = _now()
+        _append_log(run, f"zip 发送完成：{zip_path.name}，{zip_path.stat().st_size} bytes")
+        _save(run)
     except Exception as exc:
         run = _load(run_id) or run
         if run.get("status") != "CANCELED":
-            run["status"] = "FAILED"
+            delivery_failed = run.get("stage") == "delivery" and Path(str(run.get("zip_path") or "")).is_file()
+            run["status"] = "DONE_WITH_ERRORS" if delivery_failed else "FAILED"
             run["error"] = str(exc)
             run["updated_at"] = _now()
-            _append_log(run, f"任务失败：{exc}")
+            if delivery_failed:
+                _append_log(run, f"处理和打包已完成，仅文件发送失败：{exc}")
+            else:
+                _append_log(run, f"任务失败：{exc}")
             _save(run)
-            _notify(run, f"动画处理任务失败：{run_id}\n{exc}")
+            if delivery_failed:
+                _notify(run, f"动画处理和打包已完成，但自动发送多次未成功：{run_id}\n结果已保留，可直接重发，无需重新抽帧、抠图和后处理。\n{exc}")
+            else:
+                _notify(run, f"动画处理任务失败：{run_id}\n{exc}")
     finally:
         _WORKERS.discard(run_id)
 
@@ -362,7 +373,15 @@ def _make_zip(run: dict[str, Any]) -> Path:
             for path in root.rglob("*"):
                 if path.is_file():
                     zf.write(path, arcname=str(path.relative_to(run_dir)).replace("\\", "/"))
+    _verify_zip(zip_path)
     return zip_path
+
+
+def _verify_zip(zip_path: Path) -> None:
+    with zipfile.ZipFile(zip_path, "r") as archive:
+        damaged = archive.testzip()
+    if damaged:
+        raise RuntimeError(f"zip integrity check failed: {damaged}")
 
 
 def _send_zip(run: dict[str, Any], zip_path: Path) -> None:
@@ -377,7 +396,24 @@ def _send_zip(run: dict[str, Any], zip_path: Path) -> None:
     if sent:
         run["drive_file"] = sent
         _append_log(run, f"Drive 文件已授权并发送：{sent.get('url') or sent.get('file_token')}")
-        _save(run)
+    else:
+        _append_log(run, f"飞书附件已发送：{zip_path.name}")
+    _save(run)
+
+
+def _send_zip_with_retries(run: dict[str, Any], zip_path: Path, attempts: int = 5) -> None:
+    errors: list[str] = []
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            _send_zip(run, zip_path)
+            return
+        except Exception as exc:
+            errors.append(str(exc))
+            _append_log(run, f"zip 发送第 {attempt}/{attempts} 次失败：{exc}")
+            _save(run)
+            if attempt < attempts:
+                time.sleep(min(5 * attempt, 15))
+    raise RuntimeError(f"zip delivery failed after {attempts} attempts: {errors[-1] if errors else 'unknown error'}")
 
 
 def _handle_extract_log(run: dict[str, Any], raw: str) -> None:
@@ -488,7 +524,11 @@ def _notify(run: dict[str, Any], text: str) -> None:
         return
     from assetclaw_matting.services.notification_service import send_text
 
-    send_text(chat_id, text)
+    try:
+        send_text(chat_id, text)
+    except Exception as exc:
+        _append_log(run, f"通知发送失败（不影响主任务）：{exc}")
+        _save(run)
 
 
 def _start_worker(run_id: str) -> None:

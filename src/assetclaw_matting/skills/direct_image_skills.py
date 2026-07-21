@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from assetclaw_matting.config import settings
 from assetclaw_matting.runtime_context import get_runtime_context
@@ -74,6 +74,9 @@ def start(
                 "aspect": aspect,
                 "cherry_profile": "half" if aspect == "square" else "full",
                 "cherry_output_size": _cherry_output_size("half" if aspect == "square" else "full"),
+                "matte_result_path": "",
+                "postprocessed_result_path": "",
+                "comparison_path": "",
                 "result_path": "",
             }
         )
@@ -164,7 +167,7 @@ def _worker(run_id: str) -> None:
         _save(run)
         plan = _cherry_plan_summary(run.get("images") or [])
         suffix = f"，{plan}" if plan else ""
-        _notify(run, f"图片完成：{run['id']}，已发回 {len(sent)} 个附件{suffix}。")
+        _notify(run, f"图片完成：{run['id']}，已发回 {len(sent)} 份结果（抠图、后处理、三联对比）{suffix}。")
     except Exception as exc:
         run = _load(run_id) or run
         if run.get("status") != "CANCELED":
@@ -255,17 +258,115 @@ def _send_results(run: dict[str, Any]) -> list[str]:
 
     sent: list[str] = []
     for item in run.get("images") or []:
+        matte_dir = Path(str(item["matte_dir"]))
         smooth_dir = Path(str(item["smooth_dir"]))
-        result = _latest_image(smooth_dir)
-        if not result:
+        original = Path(str(item.get("original_path") or ""))
+        matte = _latest_image(matte_dir)
+        processed = _latest_image(smooth_dir)
+        if not original.is_file():
+            raise RuntimeError(f"original image is missing: {original}")
+        if not matte:
+            raise RuntimeError(f"matte_dir has no result image: {matte_dir}")
+        if not processed:
             raise RuntimeError(f"smooth_dir has no result image: {smooth_dir}")
-        send_name = f"{Path(str(item.get('name') or result.name)).stem}_processed{result.suffix.lower()}"
-        feishu_client.send_file_to_chat(chat_id, result, send_name)
-        item["result_path"] = str(result)
-        sent.append(str(result))
-        _append_log(run, f"已发送结果附件：{result.name}")
+
+        base_name = Path(str(item.get("name") or processed.name)).stem
+        comparison = _run_dir(run) / "comparison" / f"{base_name}_comparison.png"
+        _create_comparison_image(original, matte, processed, comparison)
+
+        matte_send_name = f"{base_name}_matte{matte.suffix.lower()}"
+        processed_send_name = f"{base_name}_processed{processed.suffix.lower()}"
+        feishu_client.send_file_to_chat(chat_id, matte, matte_send_name)
+        feishu_client.send_file_to_chat(chat_id, processed, processed_send_name)
+        feishu_client.send_image_to_chat(chat_id, comparison)
+
+        item["matte_result_path"] = str(matte)
+        item["postprocessed_result_path"] = str(processed)
+        item["comparison_path"] = str(comparison)
+        item["result_path"] = str(processed)
+        sent.extend([str(matte), str(processed), str(comparison)])
+        _append_log(run, f"已发送三份图片结果：{matte.name}、{processed.name}、{comparison.name}")
         _save(run)
     return sent
+
+
+def _create_comparison_image(original_path: Path, matte_path: Path, processed_path: Path, output_path: Path) -> Path:
+    """Create a readable original/matte/post-process triptych for Feishu preview."""
+    labels = ("原图", "抠图结果", "后处理结果")
+    paths = (original_path, matte_path, processed_path)
+    panel_width = 480
+    image_height = 520
+    label_height = 64
+    outer_margin = 24
+    gap = 18
+    panel_height = label_height + image_height
+    canvas_width = outer_margin * 2 + panel_width * 3 + gap * 2
+    canvas_height = outer_margin * 2 + panel_height
+    canvas = Image.new("RGB", (canvas_width, canvas_height), (25, 27, 32))
+    draw = ImageDraw.Draw(canvas)
+    font = _comparison_font(28)
+
+    for index, (label, path) in enumerate(zip(labels, paths)):
+        left = outer_margin + index * (panel_width + gap)
+        top = outer_margin
+        draw.rounded_rectangle(
+            (left, top, left + panel_width - 1, top + panel_height - 1),
+            radius=12,
+            fill=(245, 246, 248),
+            outline=(73, 77, 87),
+            width=2,
+        )
+        label_box = draw.textbbox((0, 0), label, font=font)
+        label_width = label_box[2] - label_box[0]
+        draw.text(
+            (left + (panel_width - label_width) // 2, top + 14),
+            label,
+            font=font,
+            fill=(34, 37, 44),
+        )
+
+        image_top = top + label_height
+        checker = _checkerboard((panel_width - 4, image_height - 4))
+        canvas.paste(checker, (left + 2, image_top + 2))
+        with Image.open(path) as source:
+            rgba = ImageOps.exif_transpose(source).convert("RGBA")
+            fitted = ImageOps.contain(rgba, (panel_width - 28, image_height - 28), Image.Resampling.LANCZOS)
+        x = left + (panel_width - fitted.width) // 2
+        y = image_top + (image_height - fitted.height) // 2
+        canvas.paste(fitted, (x, y), fitted)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(output_path, format="PNG", optimize=True)
+    return output_path
+
+
+def _checkerboard(size: tuple[int, int], cell: int = 20) -> Image.Image:
+    board = Image.new("RGB", size, (235, 235, 235))
+    draw = ImageDraw.Draw(board)
+    alternate = (207, 207, 207)
+    width, height = size
+    for y in range(0, height, cell):
+        for x in range(0, width, cell):
+            if (x // cell + y // cell) % 2:
+                draw.rectangle((x, y, min(x + cell - 1, width - 1), min(y + cell - 1, height - 1)), fill=alternate)
+    return board
+
+
+def _comparison_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    candidates = (
+        Path("C:/Windows/Fonts/msyh.ttc"),
+        Path("C:/Windows/Fonts/msyhbd.ttc"),
+        Path("C:/Windows/Fonts/simhei.ttf"),
+        Path("C:/Windows/Fonts/arial.ttf"),
+    )
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            return ImageFont.truetype(str(candidate), size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
 
 
 def resume_from_postprocess(run_id: str | None = None, **_: Any) -> dict[str, Any]:
@@ -358,7 +459,11 @@ def _notify(run: dict[str, Any], text: str) -> None:
         return
     from assetclaw_matting.services.notification_service import send_text
 
-    send_text(chat_id, text)
+    try:
+        send_text(chat_id, text)
+    except Exception as exc:
+        _append_log(run, f"通知发送失败（不影响主任务）：{exc}")
+        _save(run)
 
 
 def _start_worker(run_id: str) -> None:

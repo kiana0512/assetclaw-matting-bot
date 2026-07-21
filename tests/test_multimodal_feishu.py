@@ -140,6 +140,55 @@ def test_feishu_send_file_falls_back_to_drive_link_on_size_error(monkeypatch, tm
     assert grants == {"file_token": "drive_token", "chat_id": "oc_test", "perm": "full_access"}
 
 
+def test_feishu_send_large_file_uses_drive_without_message_upload(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.feishu.client import DIRECT_MESSAGE_UPLOAD_MAX_BYTES, FeishuClient
+
+    target = tmp_path / "large-result.zip"
+    with target.open("wb") as handle:
+        handle.truncate(DIRECT_MESSAGE_UPLOAD_MAX_BYTES + 1)
+    sent: dict[str, str] = {}
+    client = FeishuClient()
+
+    monkeypatch.setattr(client, "upload_file", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("message upload must not be used")))
+    monkeypatch.setattr(
+        client,
+        "upload_drive_file",
+        lambda path, file_name=None: {"file_token": "drive_token", "url": "https://lilithgames.feishu.cn/file/large"},
+    )
+    monkeypatch.setattr(client, "grant_drive_file_to_chat", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(client, "send_text_to_chat", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}))
+
+    result = client.send_file_to_chat("oc_large", target, target.name)
+
+    assert result == {"file_token": "drive_token", "url": "https://lilithgames.feishu.cn/file/large"}
+    assert sent == {"chat_id": "oc_large", "text": "文件已生成：large-result.zip\nhttps://lilithgames.feishu.cn/file/large"}
+
+
+def test_feishu_drive_request_retries_write_timeout(monkeypatch) -> None:
+    import requests
+
+    from assetclaw_matting.feishu.client import FeishuClient
+
+    attempts: list[str] = []
+
+    class Response:
+        status_code = 200
+
+    def fake_post(url: str, **_kwargs):
+        attempts.append(url)
+        if len(attempts) == 1:
+            raise requests.ConnectionError("write operation timed out")
+        return Response()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    monkeypatch.setattr("assetclaw_matting.feishu.client.time.sleep", lambda _seconds: None)
+
+    response = FeishuClient()._post_with_retry("https://example.invalid/upload", attempts=3)
+
+    assert response.status_code == 200
+    assert len(attempts) == 2
+
+
 def test_feishu_client_add_message_reaction(monkeypatch) -> None:
     from assetclaw_matting.feishu.client import FeishuClient
 
@@ -859,34 +908,64 @@ def test_direct_image_start_uses_exact_square_rule(monkeypatch) -> None:
     assert [item["cherry_output_size"] for item in result["images"]] == ["256x256", "384x512"]
 
 
-def test_direct_image_send_results_uses_file_attachment(monkeypatch, tmp_path: Path) -> None:
+def test_direct_image_send_results_returns_matte_processed_and_comparison(monkeypatch, tmp_path: Path) -> None:
     from assetclaw_matting.feishu.client import feishu_client
     from assetclaw_matting.skills import direct_image_skills
 
+    original = tmp_path / "original_images" / "image_01" / "source.png"
+    matte = tmp_path / "matte" / "image_01" / "0000.png"
     smooth = tmp_path / "smooth" / "image_01"
-    smooth.mkdir(parents=True, exist_ok=True)
+    original.parent.mkdir(parents=True, exist_ok=True)
+    matte.parent.mkdir(parents=True, exist_ok=True)
     result_image = smooth / "0000.png"
+    smooth.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (320, 240), (255, 255, 255)).save(original)
+    Image.new("RGBA", (320, 240), (255, 0, 0, 128)).save(matte)
     Image.new("RGBA", (256, 256), (255, 0, 0, 255)).save(result_image)
     calls: list[tuple[str, Path, str]] = []
+    inline_calls: list[tuple[str, Path]] = []
 
     def fake_send_file(chat_id: str, path: Path, file_name: str) -> dict[str, object]:
         calls.append((chat_id, Path(path), file_name))
         return {"ok": True}
 
+    def fake_send_image(chat_id: str, path: Path) -> None:
+        inline_calls.append((chat_id, Path(path)))
+
     monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", tmp_path / "runs")
     monkeypatch.setattr(feishu_client, "send_file_to_chat", fake_send_file)
+    monkeypatch.setattr(feishu_client, "send_image_to_chat", fake_send_image)
     run = {
         "id": "IMG_SEND_TEST",
         "chat_id": "oc_test",
         "updated_at": "",
-        "images": [{"smooth_dir": str(smooth), "name": "source.png"}],
+        "images": [
+            {
+                "original_path": str(original),
+                "matte_dir": str(matte.parent),
+                "smooth_dir": str(smooth),
+                "name": "source.png",
+            }
+        ],
         "log": [],
     }
 
     sent = direct_image_skills._send_results(run)
 
-    assert sent == [str(result_image)]
-    assert calls == [("oc_test", result_image, "source_processed.png")]
+    comparison = tmp_path / "runs" / "IMG_SEND_TEST" / "comparison" / "source_comparison.png"
+    assert sent == [str(matte), str(result_image), str(comparison)]
+    assert calls == [
+        ("oc_test", matte, "source_matte.png"),
+        ("oc_test", result_image, "source_processed.png"),
+    ]
+    assert inline_calls == [("oc_test", comparison)]
+    assert comparison.is_file()
+    with Image.open(comparison) as triptych:
+        assert triptych.size == (1524, 632)
+        assert triptych.mode == "RGB"
+    assert run["images"][0]["matte_result_path"] == str(matte)
+    assert run["images"][0]["postprocessed_result_path"] == str(result_image)
+    assert run["images"][0]["comparison_path"] == str(comparison)
     assert run["images"][0]["result_path"] == str(result_image)
 
 
@@ -924,6 +1003,87 @@ def test_direct_video_zip_contains_required_sections(monkeypatch, tmp_path: Path
     assert "frames/video_01/0000.png" in names
     assert "matte/video_01/0000.png" in names
     assert "smooth/video_01/0000.png" in names
+
+
+def test_direct_video_resend_zip_reuses_saved_result(monkeypatch, tmp_path: Path) -> None:
+    import zipfile
+
+    from assetclaw_matting.skills import direct_video_skills
+
+    monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", tmp_path / "runs")
+    run = {
+        "id": "VID_RESEND_TEST",
+        "status": "DONE_WITH_ERRORS",
+        "stage": "delivery",
+        "chat_id": "oc_original",
+        "zip_path": "",
+        "error": "timeout",
+        "videos": [],
+        "children": {},
+        "log": [],
+    }
+    run_dir = direct_video_skills._run_dir(run)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = run_dir / "result.zip"
+    with zipfile.ZipFile(zip_path, "w") as archive:
+        archive.writestr("manifest.json", "{}")
+    run["zip_path"] = str(zip_path)
+    direct_video_skills._save(run)
+    sent: list[tuple[str, Path]] = []
+    monkeypatch.setattr(direct_video_skills, "_send_zip_with_retries", lambda payload, path: sent.append((payload["chat_id"], path)))
+
+    result = direct_video_skills.resend_zip("VID_RESEND_TEST")
+
+    assert result["ok"] is True
+    assert sent == [("oc_original", zip_path)]
+    saved = direct_video_skills._load("VID_RESEND_TEST")
+    assert saved is not None
+    assert saved["status"] == "DONE"
+    assert saved["stage"] == "done"
+    assert saved["error"] == ""
+
+
+def test_direct_video_delivery_failure_keeps_completed_zip_for_resend(monkeypatch, tmp_path: Path) -> None:
+    import zipfile
+
+    from assetclaw_matting.skills import direct_video_skills
+
+    monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", tmp_path / "runs")
+    run = {
+        "id": "VID_DELIVERY_TEST",
+        "status": "RUNNING",
+        "stage": "queued",
+        "chat_id": "oc_original",
+        "videos": [],
+        "children": {},
+        "zip_path": "",
+        "error": "",
+        "log": [],
+    }
+    direct_video_skills._save(run)
+    monkeypatch.setattr(direct_video_skills, "_extract_all", lambda _run: None)
+    monkeypatch.setattr(direct_video_skills, "_run_comfyui", lambda _run: None)
+    monkeypatch.setattr(direct_video_skills, "_run_cherry", lambda _run: None)
+
+    def fake_make_zip(payload):
+        path = direct_video_skills._run_dir(payload) / "result.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("manifest.json", "{}")
+        return path
+
+    notices: list[str] = []
+    monkeypatch.setattr(direct_video_skills, "_make_zip", fake_make_zip)
+    monkeypatch.setattr(direct_video_skills, "_send_zip_with_retries", lambda *_args: (_ for _ in ()).throw(TimeoutError("write timeout")))
+    monkeypatch.setattr(direct_video_skills, "_notify", lambda _run, text: notices.append(text))
+
+    direct_video_skills._worker("VID_DELIVERY_TEST")
+
+    saved = direct_video_skills._load("VID_DELIVERY_TEST")
+    assert saved is not None
+    assert saved["status"] == "DONE_WITH_ERRORS"
+    assert saved["stage"] == "delivery"
+    assert Path(saved["zip_path"]).is_file()
+    assert "无需重新抽帧、抠图和后处理" in notices[-1]
 
 
 def test_direct_video_cancel_cancels_child_comfyui_and_cherry(monkeypatch, tmp_path: Path) -> None:

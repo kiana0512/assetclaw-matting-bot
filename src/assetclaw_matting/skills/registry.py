@@ -2063,7 +2063,7 @@ SKILLS: list[dict[str, Any]] = [
     ),
     _skill(
         "direct_image.start",
-        "Process Feishu-uploaded image attachments directly: run ComfyUI matting, run Cherry post-processing, and send final images back as file attachments.",
+        "Process Feishu-uploaded image attachments directly: run ComfyUI matting and Cherry post-processing, then return the matte PNG, post-processed PNG, and an inline original/matte/post-process comparison image for each input.",
         True,
         direct_image_skills.start,
         {
@@ -2109,7 +2109,7 @@ SKILLS: list[dict[str, Any]] = [
     ),
     _skill(
         "direct_image.resume_postprocess",
-        "Resume a direct image run from existing ComfyUI matte outputs, then run Cherry post-processing and send final images as file attachments.",
+        "Resume a direct image run from existing ComfyUI matte outputs, run Cherry post-processing, then return the matte PNG, post-processed PNG, and an inline three-way comparison image for each input.",
         True,
         direct_image_skills.resume_from_postprocess,
         {"run_id": "string optional"},

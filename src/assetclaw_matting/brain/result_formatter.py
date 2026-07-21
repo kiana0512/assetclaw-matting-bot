@@ -1535,7 +1535,7 @@ def _format_direct_image(skill: str, payload: dict[str, Any], max_items: int) ->
         lines.append(f"整体后处理：{cherry.get('completed', 0)}/{cherry.get('total', 0)}")
     sent = payload.get("sent_files") or []
     if sent:
-        lines.append(f"已发回附件：{len(sent)} 个")
+        lines.append(f"已发回结果：{len(sent)} 份（每张图包含抠图、后处理、三联对比）")
     if payload.get("error"):
         lines.append(f"错误：{payload.get('error')}")
     return lines
@@ -1589,6 +1589,8 @@ def _direct_image_status_item(payload: dict[str, Any], item: dict[str, Any]) -> 
 def _media_status_from_stage(run_status: str, stage: str, total: int, matte_done: int, smooth_done: int) -> str:
     if run_status == "DONE":
         return "完成"
+    if run_status == "DONE_WITH_ERRORS" and stage == "delivery":
+        return "处理完成，待重发"
     if run_status in {"FAILED", "CANCELED", "DONE_WITH_ERRORS"}:
         return {"FAILED": "失败", "CANCELED": "已取消", "DONE_WITH_ERRORS": "部分完成"}.get(run_status, run_status)
     if stage == "extract_frames":
