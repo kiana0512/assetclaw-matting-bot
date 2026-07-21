@@ -38,7 +38,10 @@ const state = reactive({
   comfyRuns: [],
   frameRuns: [],
   cherryRuns: [],
+  directImageRuns: [],
+  directVideoRuns: [],
   jobs: [],
+  taskFilter: "all",
   runtimeConfig: { animation_root: "", unity_project: "" },
   detail: null,
   toasts: [],
@@ -70,7 +73,11 @@ const state = reactive({
 
 let timer = null;
 
-const currentFlowBase = computed(() => state.flows.current || state.flows.items[0] || null);
+const recentFlow = computed(() => state.flows.current || state.flows.items[0] || null);
+const currentFlowBase = computed(() => {
+  const candidates = [state.flows.current, ...(state.flows.items || [])].filter(Boolean);
+  return candidates.find((item) => isActiveStatus(flowDisplay(item).status)) || null;
+});
 const currentFlow = computed(() => {
   const base = currentFlowBase.value;
   const detail = state.currentFlowStatus;
@@ -94,7 +101,7 @@ const currentStageIndex = computed(() => {
   return index >= 0 ? index : 0;
 });
 const stageProgress = computed(() => flowStageProgress(currentFlow.value));
-const allTasks = computed(() => {
+const childTasks = computed(() => {
   const currentId = currentFlow.value?.run_id || currentFlow.value?.id || "";
   const flowTasks = (state.flows.items || []).map((item) => normalizeTask(
     "AFLOW",
@@ -105,13 +112,45 @@ const allTasks = computed(() => {
   const cherry = state.cherryRuns.map((item) => normalizeTask("CHERRY", item));
   return mergeCurrentTasks([...flowTasks, ...comfy, ...frame, ...cherry]).sort((a, b) => b.timeValue - a.timeValue);
 });
+const managedParentTasks = computed(() => [
+  ...[state.flows.current, ...(state.flows.items || [])]
+    .filter((item, index, list) => item && list.findIndex((candidate) => (candidate?.run_id || candidate?.id) === (item.run_id || item.id)) === index)
+    .map((item) => normalizeTask("AFLOW", (item.run_id || item.id) === (currentFlow.value?.run_id || currentFlow.value?.id) ? currentFlow.value : item)),
+  ...state.directImageRuns.map((item) => normalizeDirectTask("DIRECT_IMAGE", item)),
+  ...state.directVideoRuns.map((item) => normalizeDirectTask("DIRECT_VIDEO", item)),
+]);
+const allTasks = computed(() => {
+  const claimed = new Set(managedParentTasks.value.flatMap((task) => parentChildIds(task.raw)));
+  const parentIds = new Set(managedParentTasks.value.map((task) => task.id));
+  const standalone = childTasks.value.filter((task) => {
+    if (task.module === "AFLOW" || claimed.has(task.id)) return false;
+    const inferredParent = parentIdFromTask(task);
+    return !inferredParent || !parentIds.has(inferredParent);
+  });
+  return [...managedParentTasks.value, ...standalone].sort((a, b) => b.timeValue - a.timeValue);
+});
 const activeTasks = computed(() => allTasks.value.filter((task) => !FINISHED.has(task.status)));
+const taskCategories = computed(() => buildTaskCategories(activeTasks.value));
+const filteredTasks = computed(() => state.taskFilter === "all" ? allTasks.value : allTasks.value.filter((task) => task.category === state.taskFilter));
+const unifiedQueue = computed(() => [...activeTasks.value]
+  .filter(isMeaningfulActiveTask)
+  .sort((a, b) => {
+    const stateDelta = queueStateRank(a) - queueStateRank(b);
+    if (stateDelta) return stateDelta;
+    const positionDelta = queuePosition(a) - queuePosition(b);
+    if (positionDelta) return positionDelta;
+    return a.timeValue - b.timeValue;
+  })
+  .map((task, index) => ({ ...task, queueIndex: index + 1, queueLabel: queueStateLabel(task) })));
+const queueSummary = computed(() => {
+  const tasks = unifiedQueue.value;
+  const running = tasks.filter((task) => queueStateRank(task) === 0).length;
+  const waiting = Math.max(0, tasks.length - running);
+  const progress = tasks.length ? Math.round(tasks.reduce((sum, task) => sum + Number(task.progress || 0), 0) / tasks.length) : 0;
+  return { total: tasks.length, running, waiting, progress };
+});
 const primaryTask = computed(() => {
-  const meaningful = activeTasks.value.filter(isMeaningfulActiveTask);
-  return meaningful.find((task) => task.module === "AFLOW")
-    || meaningful.find((task) => task.module === "COMFY")
-    || meaningful[0]
-    || null;
+  return unifiedQueue.value[0] || null;
 });
 const failedTasks = computed(() => allTasks.value.filter((task) => ["FAILED", "BLOCKED", "DONE_WITH_ERRORS"].includes(task.status)));
 const workspaceCards = computed(() => buildWorkspaceCards());
@@ -123,7 +162,7 @@ const activeStageRun = computed(() => flowActiveChild(currentFlow.value)?.raw ||
 const activeStageProgress = computed(() => progressFrom(activeStageRun.value || {}));
 const primaryIsFlow = computed(() => primaryTask.value?.module === "AFLOW");
 const focusProgress = computed(() => primaryIsFlow.value ? currentFlowUi.value.progress : (primaryTask.value?.progress || 0));
-const focusLabel = computed(() => primaryIsFlow.value ? "总体流程" : `${primaryTask.value?.module || "任务"} 进度`);
+const focusLabel = computed(() => primaryIsFlow.value ? "总体流程" : (primaryTask.value?.stageLabel || `${primaryTask.value?.module || "任务"} 进度`));
 const fpsValid = computed(() => Number.isInteger(Number(state.form.fps)) && Number(state.form.fps) > 0);
 const connectionText = computed(() => state.health?.ok === false ? "后端异常" : state.health ? "后端在线" : "连接中");
 const launchCommand = computed(() => {
@@ -161,7 +200,7 @@ async function refreshAll(silent = false) {
   state.refreshing = true;
   if (!silent) state.error = "";
   try {
-    const [health, flows, workspaceSummary, animation, comfyStatus, frameStatus, cherryStatus, comfyRuns, frameRuns, cherryRuns, jobs] = await Promise.allSettled([
+    const [health, flows, workspaceSummary, animation, comfyStatus, frameStatus, cherryStatus, comfyRuns, frameRuns, cherryRuns, directImageRuns, directVideoRuns, jobs] = await Promise.allSettled([
       jsonFetch("/api/health", { timeoutMs: 7000 }),
       jsonFetch("/api/local/animation-flow-runs?limit=20&include_finished=true", { timeoutMs: 7000 }),
       jsonFetch(`/api/local/workspace-summary?root=${encodeURIComponent(currentWorkspaceRoot())}`, { timeoutMs: 10000 }),
@@ -172,6 +211,8 @@ async function refreshAll(silent = false) {
       skillCall("comfyui.run_list", { limit: 10, include_finished: true }, true),
       skillCall("frame.run_list", { limit: 8, include_finished: true, include_archived: false }, true),
       skillCall("cherry.run_list", { limit: 8, include_finished: true, include_archived: false }, true),
+      skillCall("direct_image.list", { limit: 20, include_finished: true }, true),
+      skillCall("direct_video.list", { limit: 20, include_finished: true }, true),
       jsonFetch("/api/brain/jobs?limit=12", { timeoutMs: 7000 }),
     ]);
 
@@ -185,8 +226,11 @@ async function refreshAll(silent = false) {
     state.comfyRuns = unwrapSkill(valueOf(comfyRuns))?.items || [];
     state.frameRuns = unwrapSkill(valueOf(frameRuns))?.items || [];
     state.cherryRuns = unwrapSkill(valueOf(cherryRuns))?.items || [];
+    state.directImageRuns = unwrapSkill(valueOf(directImageRuns))?.items || [];
+    state.directVideoRuns = unwrapSkill(valueOf(directVideoRuns))?.items || [];
     state.jobs = valueOf(jobs)?.items || [];
-    const flowId = state.flows?.current?.run_id || state.flows?.current?.id || state.flows?.items?.[0]?.run_id || "";
+    const activeFlow = [state.flows?.current, ...(state.flows?.items || [])].filter(Boolean).find((item) => isActiveStatus(flowDisplay(item).status));
+    const flowId = activeFlow?.run_id || activeFlow?.id || "";
     if (flowId) {
       try {
         const detail = unwrapSkill(await skillCall("animation_flow.status", { run_id: flowId }, true));
@@ -477,6 +521,8 @@ function normalizeTask(module, raw) {
   const activeCount = activeChild ? countText(activeChild.raw) : "";
   return {
     module,
+    category: module === "AFLOW" ? "feishu" : "standalone",
+    label: module === "AFLOW" ? "飞书动画" : module,
     id,
     status,
     stage: flowUi?.stage || raw.current_stage || raw.current_step || "",
@@ -509,6 +555,29 @@ function flowActiveChild(run) {
     if (raw) return { module: "CHERRY", raw };
   }
   return null;
+}
+
+async function cancelManagedTask(task) {
+  if (!task?.id || !window.confirm(`确认取消 ${task.label || task.module} ${task.id}？`)) return;
+  const skills = {
+    AFLOW: "animation_flow.cancel",
+    DIRECT_IMAGE: "direct_image.cancel",
+    DIRECT_VIDEO: "direct_video.cancel",
+    COMFY: "comfyui.run_cancel",
+    FRAME: "frame.run_cancel",
+    CHERRY: "cherry.run_cancel",
+  };
+  const skill = skills[task.module];
+  if (!skill) return;
+  try {
+    const args = { run_id: task.id };
+    if (task.module === "COMFY") args.interrupt_current = true;
+    await skillCall(skill, args, false);
+    toast(`${task.label || task.module} 已发送取消请求`);
+    await refreshAll(true);
+  } catch (error) {
+    toast(String(error?.message || error), "bad");
+  }
 }
 
 function progressFrom(raw) {
@@ -843,6 +912,131 @@ function flowDisplay(run) {
   };
 }
 
+function normalizeDirectTask(module, raw) {
+  const isImage = module === "DIRECT_IMAGE";
+  const items = isImage ? (raw.images || []) : (raw.videos || []);
+  const sourcePaths = items.map((item) => item.original_path || item.source_path || item.name).filter(Boolean);
+  const status = String(raw.status || "UNKNOWN").toUpperCase();
+  const stage = String(raw.stage || raw.current_stage || "");
+  const stageInfo = directStageProgress(raw, isImage);
+  const created = raw.created_at || raw.updated_at || "";
+  return {
+    module,
+    category: isImage ? "image" : "video",
+    label: isImage ? "图片直发" : "视频直发",
+    id: raw.run_id || raw.id || "",
+    status,
+    stage,
+    stageLabel: stageInfo.label,
+    input: sourcePaths.length > 1 ? `${sourcePaths[0]} · 另 ${sourcePaths.length - 1} 项` : (sourcePaths[0] || ""),
+    output: raw.sequence_zip_path || raw.zip_path || raw.run_dir || "",
+    progress: stageInfo.overall,
+    stageProgress: stageInfo.progress,
+    count: stageInfo.count,
+    last: raw.last_log || "",
+    position: stageInfo.position || raw.last_log || "",
+    eta: etaText(stageInfo.raw || {}),
+    detail: `${items.length} ${isImage ? "张图片" : "个视频"} · ${stageInfo.label} ${stageInfo.count}`,
+    time: formatDateTime(created),
+    timeValue: Date.parse(created) || 0,
+    raw,
+  };
+}
+
+function directStageProgress(run, isImage) {
+  const stage = String(run.stage || "").toLowerCase();
+  const children = run.children || {};
+  const comfy = children.comfyui && typeof children.comfyui === "object" ? children.comfyui : {};
+  const cherryRuns = children.cherry_runs && typeof children.cherry_runs === "object" ? Object.values(children.cherry_runs) : [];
+  const expected = isImage
+    ? (run.images || []).length
+    : (run.videos || []).reduce((sum, item) => sum + Number(item.frame_count || 0), 0);
+  const comfyTotal = Number(comfy.total || expected || 0);
+  const comfyDone = Math.min(comfyTotal, Number(comfy.completed || 0));
+  const cherryRunTotal = cherryRuns.reduce((sum, item) => sum + Number(item?.total || 0), 0);
+  const cherryRunDone = cherryRuns.reduce((sum, item) => sum + Number(item?.completed || (String(item?.status || "").toUpperCase() === "DONE" ? item?.total || 1 : 0)), 0);
+  const cherryTotal = cherryRunTotal || expected || cherryRuns.length || Number(children.cherry?.total || 0);
+  const cherryDone = cherryRuns.length
+    ? Math.min(cherryTotal, cherryRunDone)
+    : Math.min(cherryTotal, Number(children.cherry?.completed || 0));
+  const cherryCurrent = cherryRuns.find((item) => isActiveStatus(item?.status)) || children.cherry || {};
+  const doneStatus = String(run.status || "").toUpperCase() === "DONE";
+  if (doneStatus) return { label: "全部完成", progress: 100, overall: 100, count: `${expected}/${expected}`, raw: run };
+  if (stage.includes("send") || stage.includes("pack")) return { label: "打包与发送", progress: 50, overall: 98, count: "处理中", raw: run };
+  if (stage.includes("cherry") || stage.includes("smooth") || cherryRuns.length) {
+    const progress = cherryTotal > 0 ? Math.round((cherryDone / cherryTotal) * 100) : progressFrom(cherryCurrent);
+    const overall = isImage ? 50 + Math.round(progress * 0.46) : 60 + Math.round(progress * 0.36);
+    return { label: "Cherry 后处理", progress, overall: Math.min(96, overall), count: `${cherryDone}/${cherryTotal || "-"}`, position: taskPosition("CHERRY", cherryCurrent), raw: cherryCurrent };
+  }
+  if (stage.includes("mat") || stage.includes("comfy") || comfyTotal) {
+    const progress = comfyTotal > 0 ? Math.round((comfyDone / comfyTotal) * 100) : progressFrom(comfy);
+    const overall = isImage ? Math.round(progress * 0.5) : 20 + Math.round(progress * 0.4);
+    return { label: "ComfyUI 抠图", progress, overall: Math.min(60, overall), count: `${comfyDone}/${comfyTotal || "-"}`, position: taskPosition("COMFY", comfy), raw: comfy };
+  }
+  if (stage.includes("frame") || stage.includes("extract")) return { label: "视频抽帧", progress: 0, overall: 5, count: `${expected || 0} 帧`, raw: run };
+  return { label: formatStage(stage) || "准备中", progress: 0, overall: 0, count: "等待", raw: run };
+}
+
+function parentChildIds(raw) {
+  const children = raw?.children || {};
+  return [
+    children.pipeline_run_id,
+    children.frame_run_id,
+    children.comfyui_run_id,
+    children.cherry_run_id,
+    ...(children.cherry_run_ids || []),
+  ].filter(Boolean);
+}
+
+function parentIdFromTask(task) {
+  const match = `${task.input || ""} ${task.output || ""}`.match(/\b(?:IMG|VID)_[A-Z0-9]+\b/i);
+  return match?.[0] || "";
+}
+
+function buildTaskCategories(tasks) {
+  const specs = [
+    ["image", "图片直发", "单图、批量图片与 ZIP 序列"],
+    ["video", "视频直发", "聊天视频的抽帧、抠图与后处理"],
+    ["feishu", "飞书动画", "Timo 表格下载与完整 AFLOW"],
+    ["standalone", "独立任务", "单独启动的抠图、抽帧或后处理"],
+  ];
+  return specs.map(([key, label, hint]) => ({ key, label, hint, tasks: tasks.filter((task) => task.category === key) }));
+}
+
+function queuePosition(task) {
+  const raw = task?.raw || {};
+  const children = raw.children || {};
+  const child = children.comfyui || children.frame || children.cherry || {};
+  const value = firstNumber(raw.queue_position, raw.position, child.queue_position, child.position);
+  return value === null ? Number.MAX_SAFE_INTEGER : value;
+}
+
+function queueStateRank(task) {
+  const status = String(task?.status || "").toUpperCase();
+  const stage = String(task?.stage || "").toLowerCase();
+  const raw = task?.raw || {};
+  const children = raw.children || {};
+  const child = stage.includes("post") || stage.includes("cherry") || stage.includes("smooth")
+    ? (children.cherry || {})
+    : stage.includes("frame") || stage.includes("extract")
+      ? (children.frame || raw.pipeline?.frame || {})
+      : (children.comfyui || raw.pipeline?.comfyui || {});
+  const childStatus = String(child.status || "").toUpperCase();
+  if (status === "PAUSED" || childStatus === "PAUSED") return 2;
+  if (["QUEUED", "PENDING"].includes(status) || ["QUEUED", "PENDING"].includes(childStatus) || stage.includes("waiting") || stage.includes("queue")) return 1;
+  return 0;
+}
+
+function queueStateLabel(task) {
+  const rank = queueStateRank(task);
+  if (rank === 2) return "已暂停";
+  if (rank === 1) {
+    const position = queuePosition(task);
+    return Number.isFinite(position) && position < Number.MAX_SAFE_INTEGER ? `排队第 ${position}` : "等待中";
+  }
+  return "正在处理";
+}
+
 function flowP4Summary(run) {
   const p4 = run?.children?.p4;
   if (!p4) return null;
@@ -982,7 +1176,7 @@ function toast(message, type = "ok") {
       <section v-if="state.error" class="alert bad">{{ state.error }}</section>
 
       <section v-if="state.tab === 'overview'" class="view overview">
-        <section class="hero-panel">
+        <section v-if="currentFlow" class="hero-panel">
           <div>
             <p class="eyebrow">CURRENT FLOW</p>
             <h2>{{ currentFlow?.run_id || "暂无完整流程" }}</h2>
@@ -997,6 +1191,18 @@ function toast(message, type = "ok") {
             <span :class="['status-pill', statusClass(currentFlowUi.status)]">{{ currentFlowUi.status }}</span>
             <b>{{ currentFlowUi.label || formatStage(currentStage) }}</b>
             <small>总体 {{ currentFlowUi.progress ?? stageProgress }}%</small>
+          </div>
+        </section>
+        <section v-else class="hero-panel flow-empty-state">
+          <div>
+            <p class="eyebrow">ANIMATION FLOW</p>
+            <h2>当前没有运行中的动画全流程</h2>
+            <p>已结束或已取消的 AFLOW 不再占用当前生产链路；其他类型任务仍在下方独立显示。</p>
+          </div>
+          <div v-if="recentFlow" class="recent-flow">
+            <span>最近流程</span>
+            <b>{{ recentFlow.run_id || recentFlow.id }}</b>
+            <small :class="['status-text', statusClass(flowDisplay(recentFlow).status)]">{{ flowDisplay(recentFlow).status }}</small>
           </div>
         </section>
 
@@ -1018,13 +1224,17 @@ function toast(message, type = "ok") {
           <div class="focus-head">
             <div>
               <p class="eyebrow">RUNNING NOW</p>
-              <h2>{{ primaryTask.module }} <span>{{ primaryTask.id }}</span></h2>
+              <h2>{{ primaryTask.label || primaryTask.module }} <span>{{ primaryTask.id }}</span></h2>
             </div>
             <span :class="['status-pill', statusClass(primaryTask.status)]">{{ primaryTask.status }}</span>
           </div>
           <div class="focus-progress">
             <div class="progress-copy"><span>{{ focusLabel }}</span><b>{{ focusProgress }}%</b></div>
             <div class="progress"><i :style="{ width: `${focusProgress}%` }"></i></div>
+            <div v-if="!primaryIsFlow && primaryTask.stageProgress !== undefined" class="stage-progress-row">
+              <div class="progress-copy"><span>{{ primaryTask.stageLabel }} · {{ primaryTask.count }}</span><b>{{ primaryTask.stageProgress }}%</b></div>
+              <div class="progress secondary"><i :style="{ width: `${primaryTask.stageProgress}%` }"></i></div>
+            </div>
             <div v-if="primaryIsFlow && activeStageRun" class="stage-progress-row">
               <div class="progress-copy"><span>{{ currentFlowUi.label }} · {{ primaryTask.count || "计算中" }}</span><b>{{ activeStageProgress }}%</b></div>
               <div class="progress secondary"><i :style="{ width: `${activeStageProgress}%` }"></i></div>
@@ -1037,7 +1247,30 @@ function toast(message, type = "ok") {
           </div>
         </section>
 
-        <section class="stats-grid production-metrics">
+        <section class="panel queue-panel">
+          <div class="panel-title">
+            <div><h3>统一任务队列</h3><span>跨来源按先后顺序汇总；各来源仍保持独立分类</span></div>
+            <div class="queue-overall"><span>总体进度</span><b>{{ queueSummary.progress }}%</b></div>
+          </div>
+          <div class="queue-summary">
+            <span><b>{{ queueSummary.total }}</b> 队列任务</span>
+            <span><b>{{ queueSummary.running }}</b> 正在处理</span>
+            <span><b>{{ queueSummary.waiting }}</b> 等待 / 暂停</span>
+            <div class="progress"><i :style="{ width: `${queueSummary.progress}%` }"></i></div>
+          </div>
+          <div v-if="!unifiedQueue.length" class="empty">当前队列为空。</div>
+          <div v-else class="queue-track">
+            <button v-for="task in unifiedQueue" :key="task.module + task.id" class="queue-item" @click="state.detail = task.raw">
+              <strong>{{ task.queueIndex }}</strong>
+              <span><b>{{ task.label || task.module }}</b><small>{{ task.id }}</small></span>
+              <em>{{ task.queueLabel }}</em>
+              <span class="queue-stage"><b>{{ task.stageLabel || formatStage(task.stage) }}</b><small>{{ task.count || `${task.progress}%` }}</small></span>
+              <i>{{ task.progress }}%</i>
+            </button>
+          </div>
+        </section>
+
+        <section v-if="currentFlow" class="stats-grid production-metrics">
           <article v-for="metric in overviewMetrics" :key="metric.key" class="stat">
             <span>{{ metric.label }}</span>
             <b>{{ metric.value }}</b>
@@ -1045,7 +1278,27 @@ function toast(message, type = "ok") {
           </article>
         </section>
 
-        <section class="panel">
+        <section class="panel task-center-panel">
+          <div class="panel-title">
+            <div><h3>正在处理</h3><span>不同来源分开管理，父任务汇总真实子任务进度</span></div>
+            <button class="ghost" @click="state.tab = 'tasks'">任务中心</button>
+          </div>
+          <div class="task-category-grid">
+            <article v-for="category in taskCategories" :key="category.key" :class="['task-category', { active: category.tasks.length }]">
+              <div class="category-head">
+                <div><b>{{ category.label }}</b><small>{{ category.hint }}</small></div>
+                <strong>{{ category.tasks.length }}</strong>
+              </div>
+              <div v-if="!category.tasks.length" class="category-empty">当前无任务</div>
+              <button v-for="task in category.tasks.slice(0, 3)" :key="task.id" class="category-task" @click="state.detail = task.raw">
+                <span><b>{{ task.id }}</b><small>{{ task.stageLabel || formatStage(task.stage) }}</small></span>
+                <em>{{ task.count || `${task.progress}%` }}</em>
+              </button>
+            </article>
+          </div>
+        </section>
+
+        <section v-if="currentFlow" class="panel">
           <div class="panel-title">
             <div><h3>生产链路</h3><span>所有进度均绑定当前 AFLOW 的真实子任务</span></div>
             <button v-if="currentFlow?.run_id && isActiveStatus(currentFlow.status)" class="danger" @click="cancelFlow(currentFlow.run_id)">终止流程</button>
@@ -1058,8 +1311,12 @@ function toast(message, type = "ok") {
             </article>
           </div>
         </section>
+        <section v-else class="panel flow-chain-empty">
+          <div><h3>动画生产链路</h3><p>只有运行中的飞书动画 AFLOW 才会在这里显示七步链路。</p></div>
+          <button class="ghost" @click="state.tab = 'launch'">启动动画流程</button>
+        </section>
 
-        <section class="panel process-panel">
+        <section v-if="currentFlow" class="panel process-panel">
           <div class="panel-title">
             <div><h3>本次处理配置</h3><span>来源、工作流与交付策略</span></div>
           </div>
@@ -1072,7 +1329,7 @@ function toast(message, type = "ok") {
           </div>
         </section>
 
-        <section class="content-grid">
+        <section v-if="currentFlow" class="content-grid">
           <article class="panel">
             <div class="panel-title"><h3>关键子任务</h3></div>
             <div v-if="!childRuns.length" class="empty">暂无子任务信息。</div>
@@ -1087,37 +1344,29 @@ function toast(message, type = "ok") {
           </article>
         </section>
 
-        <section class="panel">
-          <div class="panel-title"><h3>活动任务</h3><button class="ghost" @click="state.tab = 'tasks'">查看全部</button></div>
-          <div v-if="!activeTasks.length" class="empty">当前没有活动任务。</div>
-          <article v-for="task in activeTasks.slice(0, 5)" :key="task.module + task.id" class="task-row">
-            <div class="task-main compact">
-              <b>{{ task.module }}</b>
-              <span>{{ task.id }}</span>
-              <small>{{ task.count || task.time }}</small>
-            </div>
-            <span :class="['status-pill', statusClass(task.status)]">{{ task.status }}</span>
-            <div class="task-progress">
-              <div class="progress"><i :style="{ width: `${task.progress}%` }"></i></div>
-              <small>{{ task.position || task.detail || formatStage(task.stage) }}</small>
-              <small v-if="task.eta" class="task-eta">{{ task.eta }}</small>
-            </div>
-            <button class="ghost" @click="state.detail = task.raw">详情</button>
-          </article>
-        </section>
       </section>
 
       <section v-if="state.tab === 'tasks'" class="view">
+        <section class="panel queue-panel compact-queue">
+          <div class="panel-title"><div><h3>统一任务队列</h3><span>按先后顺序查看所有来源的父任务</span></div><div class="queue-overall"><span>总体进度</span><b>{{ queueSummary.progress }}%</b></div></div>
+          <div class="queue-summary"><span><b>{{ queueSummary.total }}</b> 队列任务</span><span><b>{{ queueSummary.running }}</b> 正在处理</span><span><b>{{ queueSummary.waiting }}</b> 等待 / 暂停</span><div class="progress"><i :style="{ width: `${queueSummary.progress}%` }"></i></div></div>
+          <div v-if="!unifiedQueue.length" class="empty">当前队列为空。</div>
+          <div v-else class="queue-track"><button v-for="task in unifiedQueue" :key="task.module + task.id" class="queue-item" @click="state.detail = task.raw"><strong>{{ task.queueIndex }}</strong><span><b>{{ task.label || task.module }}</b><small>{{ task.id }}</small></span><em>{{ task.queueLabel }}</em><span class="queue-stage"><b>{{ task.stageLabel || formatStage(task.stage) }}</b><small>{{ task.count || `${task.progress}%` }}</small></span><i>{{ task.progress }}%</i></button></div>
+        </section>
         <section class="panel">
-          <div class="panel-title"><h3>任务列表</h3><span>{{ allTasks.length }} 条</span></div>
-          <article v-for="task in allTasks" :key="task.module + task.id" class="task-row large">
+          <div class="panel-title"><div><h3>任务中心</h3><span>父任务管理视图；子任务明细可在详情中查看</span></div><span>{{ filteredTasks.length }} 条</span></div>
+          <div class="task-filters">
+            <button v-for="item in [{key:'all',label:'全部'}, {key:'image',label:'图片直发'}, {key:'video',label:'视频直发'}, {key:'feishu',label:'飞书动画'}, {key:'standalone',label:'独立任务'}]" :key="item.key" :class="{ active: state.taskFilter === item.key }" @click="state.taskFilter = item.key">{{ item.label }} <span>{{ item.key === 'all' ? allTasks.length : allTasks.filter(task => task.category === item.key).length }}</span></button>
+          </div>
+          <div v-if="!filteredTasks.length" class="empty">这个分类当前没有任务。</div>
+          <article v-for="task in filteredTasks" :key="task.module + task.id" class="task-row large">
             <div class="task-main">
-              <b>{{ task.module }}</b>
+              <b>{{ task.label || task.module }}</b>
               <span>{{ task.id }}</span>
               <small>{{ task.count || task.time }}</small>
             </div>
             <span :class="['status-pill', statusClass(task.status)]">{{ task.status }}</span>
-            <span class="stage-name">{{ task.last || formatStage(task.stage) }}</span>
+            <span class="stage-name">{{ task.stageLabel || task.last || formatStage(task.stage) }}</span>
             <div class="path-cell">
               <small><em>输入</em><span>{{ task.input || "-" }}</span></small>
               <small><em>输出</em><span>{{ task.output || "-" }}</span></small>
@@ -1128,8 +1377,7 @@ function toast(message, type = "ok") {
             <div class="task-actions">
               <button v-if="task.module === 'COMFY' && task.status === 'RUNNING'" class="ghost" @click="controlComfy('pause', task.id)">暂停</button>
               <button v-if="task.module === 'COMFY' && task.status === 'PAUSED'" class="ghost" @click="controlComfy('resume', task.id)">继续</button>
-              <button v-if="task.module === 'COMFY' && isActiveStatus(task.status)" class="danger" @click="controlComfy('cancel', task.id)">取消</button>
-              <button v-if="task.module === 'AFLOW' && isActiveStatus(task.status)" class="danger" @click="cancelFlow(task.id)">终止</button>
+              <button v-if="isActiveStatus(task.status)" class="danger" @click="cancelManagedTask(task)">取消</button>
               <button class="ghost" @click="state.detail = task.raw">详情</button>
             </div>
           </article>
