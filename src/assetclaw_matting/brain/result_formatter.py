@@ -20,7 +20,7 @@ def format_skill_results(results: list[dict[str, Any]], max_items: int = 8) -> s
         payload = item.get("result") or {}
         if skill.startswith("bot."):
             lines.append(str(payload.get("text") or "完成。"))
-        elif skill == "agent.current_work":
+        elif skill in {"agent.current_work", "agent.task_overview"}:
             lines.extend(_format_agent_current_work(payload))
         elif skill == "agent.diagnose":
             lines.extend(_format_agent_diagnose(payload))
@@ -869,6 +869,8 @@ def _format_animation_status(payload: dict[str, Any]) -> list[str]:
 
 
 def _format_agent_current_work(payload: dict[str, Any]) -> list[str]:
+    if str((payload.get("filters") or {}).get("task_view") or ""):
+        return _format_parent_task_overview(payload)
     active = payload.get("active") or []
     lines: list[str] = []
     media_lines = _format_direct_media_overview(payload)
@@ -1023,6 +1025,12 @@ def _stage_label(stage: str) -> str:
         "repair_failed": "修复失败",
         "recovery_queued": "重启恢复排队",
         "waiting_pipeline_queue": "等待独占流水线",
+        "feishu_download": "飞书下载",
+        "frame_extract": "抽帧",
+        "cherry_smooth": "Cherry 后处理",
+        "unity_ready": "整理 Unity 产物",
+        "unity_import": "Unity 导入",
+        "p4_shelve": "P4 Shelve",
         "queued": "排队",
         "pending": "排队",
     }.get(stage, stage or "-")
@@ -1139,6 +1147,100 @@ def _format_media_table(rows: list[dict[str, str]]) -> list[str]:
         lines.append(f"{icon} {index}. {name}")
         lines.append("   " + "  ·  ".join(details))
     return lines
+
+
+def _format_parent_task_overview(payload: dict[str, Any], max_items: int = 6) -> list[str]:
+    filters = payload.get("filters") or {}
+    media_type = str(filters.get("media_type") or "").lower()
+    task_view = str(filters.get("task_view") or "active").lower()
+    include_finished = bool(filters.get("include_finished"))
+    image_runs = payload.get("direct_images") or []
+    video_runs = payload.get("direct_videos") or []
+    flow_runs = payload.get("animation_flows") or []
+    active_children = payload.get("active") or []
+
+    claimed_ids: set[str] = set()
+    for run in [*image_runs, *video_runs]:
+        claimed_ids.update(str(item or "") for item in (run.get("child_run_ids") or []))
+        for item in run.get("items") or []:
+            claimed_ids.update(str(item.get(key) or "") for key in ("comfyui_run_id", "cherry_run_id"))
+    for run in flow_runs:
+        children = run.get("children") if isinstance(run.get("children"), dict) else {}
+        claimed_ids.update(str(children.get(key) or "") for key in ("pipeline_run_id", "frame_run_id", "comfyui_run_id", "cherry_run_id"))
+        claimed_ids.update(str(item or "") for item in (children.get("cherry_run_ids") or []))
+    claimed_ids.discard("")
+    standalone = [item for item in active_children if str(item.get("run_id") or "") not in claimed_ids]
+
+    scoped = media_type in {"image", "images", "图片", "图", "video", "videos", "视频", "动画", "animation_flow", "aflow", "飞书动画", "动画流程"}
+    groups: list[tuple[str, list[dict[str, Any]], str]] = []
+    if media_type in {"image", "images", "图片", "图"}:
+        groups.append(("图片直发", image_runs, "image"))
+    elif media_type in {"video", "videos", "视频", "动画"}:
+        groups.append(("视频直发", video_runs, "video"))
+    elif media_type in {"animation_flow", "aflow", "飞书动画", "动画流程"}:
+        groups.append(("飞书动画流程", flow_runs, "flow"))
+    else:
+        groups.extend([
+            ("图片直发", image_runs, "image"),
+            ("视频直发", video_runs, "video"),
+            ("飞书动画流程", flow_runs, "flow"),
+            ("独立任务", standalone, "standalone"),
+        ])
+
+    total = sum(len(items) for _label, items, _kind in groups)
+    if task_view in {"completed", "done"}:
+        title = f"已完成父任务：{total} 个"
+    elif task_view in {"queue", "queued", "pending"}:
+        title = f"当前排队任务：{total} 个"
+    elif task_view in {"running", "processing"}:
+        title = f"正在处理的父任务：{total} 个"
+    elif include_finished:
+        title = f"全部父任务列表：{total} 个"
+    else:
+        title = f"当前父任务：{total} 个运行或排队"
+    lines = [title]
+    for label, items, kind in groups:
+        lines.append(f"{label}：{len(items)} 个")
+        if not items:
+            lines.append("- 没有记录" if include_finished or task_view in {"completed", "done"} else "- 当前没有任务")
+            continue
+        for item in items[:max_items]:
+            if kind in {"image", "video"}:
+                lines.append(_format_parent_media_run(item, kind))
+            elif kind == "flow":
+                lines.append(_format_parent_flow_run(item))
+            else:
+                progress = _run_progress(item)
+                lines.append(
+                    f"- {_run_kind(item)} {item.get('run_id')}：{_run_status_label(str(item.get('status') or ''))}"
+                    f"{('，' + progress) if progress else ''}"
+                )
+        if len(items) > max_items:
+            lines.append(f"- 另有 {len(items) - max_items} 个未展开")
+    if scoped and total == 0:
+        # An explicit category question must never fall back to an unrelated component task.
+        return lines
+    return lines
+
+
+def _format_parent_media_run(run: dict[str, Any], kind: str) -> str:
+    items = run.get("items") or []
+    total = sum(int(item.get("total") or 0) for item in items)
+    matte_done = sum(int(item.get("matte_done") or 0) for item in items)
+    smooth_done = sum(int(item.get("smooth_done") or 0) for item in items)
+    label = str(run.get("run_label") or ((items[0] or {}).get("name") if items else "") or "未命名")
+    if len(label) > 36:
+        label = label[:33] + "..."
+    stage = _stage_label(str(run.get("stage") or ""))
+    status = _run_status_label(str(run.get("status") or ""))
+    progress = f"抠图 {matte_done}/{total}，后处理 {smooth_done}/{total}" if total else "等待统计"
+    return f"- {run.get('run_id')}：{status} · {stage} · {progress} · {label}"
+
+
+def _format_parent_flow_run(run: dict[str, Any]) -> str:
+    status = _run_status_label(str(run.get("status") or ""))
+    stage = _stage_label(str(run.get("current_stage") or ""))
+    return f"- {run.get('run_id')}：{status} · {stage}"
 
 
 def _latest_repair_batch(video_runs: list[dict[str, Any]], active_video_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:

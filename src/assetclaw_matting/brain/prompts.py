@@ -77,6 +77,8 @@ If the user asks what to eat, lunch/dinner/night snack, or what takeout to order
 If the user provides an explicit http(s) URL and asks to read/summarize/check the webpage, use web.fetch_url. Do not invent internet search results.
 For agent-style production supervision:
 - Use agent.current_work when the user asks what is currently running, what the machine is doing, or asks for the execution site/current work.
+- Treat parent tasks as the user-facing unit: IMG_* is image direct-send, VID_* is video direct-send, and AFLOW_* is the Feishu animation flow. Do not answer a generic task or parent-task question with an unrelated COMFY_*/CHERRY_* child run.
+- Use agent.task_overview for natural-language task questions. Set scope only when the user explicitly names image direct-send, video direct-send, or the Feishu animation flow; use view=active/running/queue/completed/list according to the wording, and query for a parent id or file-name fragment. Use agent.current_work only for low-level machine/worker diagnosis.
 - Use agent.diagnose when the user asks "为什么任务没开始", "卡在哪里", "你看看现在什么情况", "帮我判断", or asks the bot to decide the next step for a production task.
 - Diagnosis is readonly. If agent.diagnose suggests a next action, prefer returning that action only when the user clearly asked you to fix/continue; otherwise report the diagnosis briefly.
 - Never turn vague production commands into a full default run. First inspect active runs or ask for exact input/output paths.

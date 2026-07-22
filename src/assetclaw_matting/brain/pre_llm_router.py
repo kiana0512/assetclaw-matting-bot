@@ -36,6 +36,10 @@ class PreRouterProvider(Protocol):
 def handle_pre_llm_message(provider: PreRouterProvider, message: BrainMessage) -> BrainResponse | None:
     text = message.text.strip()
 
+    task_overview = _plan_task_overview(message)
+    if task_overview:
+        return _planned_response(provider, message, task_overview)
+
     direct_progress = _plan_direct_media_progress(message)
     if direct_progress:
         return _planned_response(provider, message, direct_progress)
@@ -97,6 +101,112 @@ def handle_pre_llm_message(provider: PreRouterProvider, message: BrainMessage) -
         return _planned_response(provider, message, planned)
 
     return None
+
+
+def _plan_task_overview(message: BrainMessage) -> tuple[list[ToolCall], str] | None:
+    """Understand common task-question paraphrases before component planners run."""
+    text = message.text.strip()
+    normalized = "".join(text.split())
+    lowered = normalized.lower()
+    if not normalized or any(word in normalized for word in ("取消", "终止", "停止", "开始", "启动", "继续", "恢复")):
+        return None
+    if any(word in lowered for word in ("comfyui", "comfy_", "cherry", "frame_")) or any(
+        word in normalized for word in ("抠图子任务", "后处理子任务", "抽帧子任务")
+    ):
+        return None
+    # Preserve the established shorthand for a previously discussed six-video batch.
+    if any(word in normalized for word in ("六个任务", "6个任务", "这批任务")):
+        return None
+
+    parent_id = re.search(
+        r"(?<![A-Za-z0-9_])(?:IMG|VID|AFLOW)_[A-Z0-9]+(?![A-Za-z0-9_])",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    image_scope = any(
+        word in normalized
+        for word in (
+            "直传图片", "图片直传", "图片直发", "直发图片", "图片直接发", "直接发图片", "图片任务", "图像任务", "图片那批",
+        )
+    )
+    video_scope = any(
+        word in normalized
+        for word in (
+            "直传视频", "视频直传", "视频直发", "直发视频", "视频直接发", "直接发视频", "视频任务", "视频那批",
+        )
+    )
+    flow_scope = any(
+        word in lowered
+        for word in ("aflow",)
+    ) or any(
+        word in normalized
+        for word in (
+            "飞书动画",
+            "完整动画流程",
+            "动画全流程",
+            "飞书下载任务",
+            "表格下载任务",
+            "飞书视频文件下载",
+            "表格视频处理",
+            "飞书那批",
+            "表格那批",
+            "下载抽帧",
+        )
+    )
+    question_words = (
+        "进度", "列表", "哪些", "有什么", "现在", "当前", "全部", "所有", "汇总", "情况", "怎么样", "如何", "到哪", "几个", "多少", "呢",
+    )
+    task_query = "任务" in normalized and any(
+        word in normalized
+        for word in question_words
+    )
+    scoped_question = (image_scope or video_scope or flow_scope) and any(word in normalized for word in question_words)
+    natural_task_query = any(
+        phrase in normalized
+        for phrase in (
+            "都在跑什么",
+            "正在跑什么",
+            "正在处理什么",
+            "机器在干什么",
+            "机器正在干嘛",
+            "还有多少没做完",
+            "还有几个没做完",
+            "做完了哪些",
+            "完成了哪些",
+            "队列里有什么",
+            "谁在排队",
+            "排队情况",
+            "工作进度",
+            "处理情况",
+        )
+    )
+    if not (parent_id or task_query or scoped_question or natural_task_query):
+        return None
+
+    if any(word in normalized for word in ("已完成", "完成了", "做完了", "处理完了", "已经完成")):
+        view = "completed"
+    elif any(word in normalized for word in ("排队", "队列", "等待处理", "还没开始")):
+        view = "queue"
+    elif any(word in normalized for word in ("全部", "所有", "历史", "已结束", "任务列表")):
+        view = "list"
+    elif any(word in normalized for word in ("正在跑的任务", "运行中的任务", "正在处理的任务")):
+        view = "running"
+    else:
+        view = "active"
+    args: dict[str, object] = {
+        "scope": "all",
+        "view": view,
+    }
+    if image_scope and not video_scope:
+        args["scope"] = "image"
+    elif video_scope and not image_scope:
+        args["scope"] = "video"
+    elif flow_scope:
+        args["scope"] = "animation_flow"
+    if parent_id:
+        args["query"] = parent_id.group(0).upper()
+    args["detail"] = any(word in normalized for word in ("详细", "明细", "具体"))
+    return [ToolCall(skill="agent.task_overview", arguments=args)], "parent task overview route"
 
 
 def _plan_direct_media_progress(message: BrainMessage) -> tuple[list[ToolCall], str] | None:

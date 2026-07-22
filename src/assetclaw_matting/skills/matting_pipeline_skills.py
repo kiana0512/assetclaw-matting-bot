@@ -384,7 +384,11 @@ def _sha256(path: Path) -> str:
 def _asset_plan() -> list[dict[str, Any]]:
     repo = _repo_dir()
     comfy = Path(settings.comfyui_dir)
-    configured_lora_sources = [repo / "loras" / settings.matting_pipeline_lora_name, repo / settings.matting_pipeline_lora_name]
+    configured_lora_sources = [
+        repo / "models" / "loras" / settings.matting_pipeline_lora_name,
+        repo / "loras" / settings.matting_pipeline_lora_name,
+        repo / settings.matting_pipeline_lora_name,
+    ]
     items = [
         {
             "name": settings.matting_pipeline_workflow_name,

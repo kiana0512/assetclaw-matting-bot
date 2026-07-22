@@ -4,11 +4,12 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 ACTIVE_STATUSES = {"RUNNING", "PAUSED", "QUEUED", "PENDING"}
 DONE_STATUSES = {"DONE", "DONE_WITH_ERRORS", "FAILED", "CANCELED"}
+COMPLETED_STATUSES = {"DONE", "DONE_WITH_ERRORS"}
 
 
 def current_work(
@@ -21,6 +22,7 @@ def current_work(
     media_type: str | None = None,
     include_finished: bool = True,
     all_conversations: bool = False,
+    task_view: str = "",
 ) -> dict[str, Any]:
     """Summarize the machine's current production context in one readonly call."""
     video_runs = _direct_video_runs(limit=40)
@@ -39,6 +41,12 @@ def current_work(
         image_runs = []
     elif media in {"image", "images", "图片", "图"}:
         video_runs = []
+    animation_flows = _animation_flow_runs(limit=20, include_finished=include_finished)
+    if media in {"animation_flow", "aflow", "飞书动画", "动画流程"}:
+        video_runs = []
+        image_runs = []
+    elif media:
+        animation_flows = []
     from assetclaw_matting.config import settings
 
     payload = {
@@ -52,9 +60,11 @@ def current_work(
             "media_type": media_type or "",
             "include_finished": bool(include_finished),
             "all_conversations": bool(all_conversations),
+            "task_view": str(task_view or ""),
         },
         "direct_videos": video_runs,
         "direct_images": image_runs,
+        "animation_flows": animation_flows,
         "comfyui": _latest_comfyui(),
         "cherry": _latest_cherry(),
         "frame": _latest_frame(),
@@ -70,6 +80,92 @@ def current_work(
     if include_gpu:
         payload["gpu"] = _safe_call("assetclaw_matting.skills.status_skills", "gpu_status")
     return payload
+
+
+def task_overview(
+    scope: str = "all",
+    view: str = "active",
+    query: str | None = None,
+    detail: bool = False,
+) -> dict[str, Any]:
+    """Return user-facing parent tasks grouped by source instead of raw worker runs."""
+    normalized_scope = str(scope or "all").strip().lower()
+    normalized_view = str(view or "active").strip().lower()
+    media_type = {
+        "image": "image",
+        "images": "image",
+        "video": "video",
+        "videos": "video",
+        "animation_flow": "animation_flow",
+        "flow": "animation_flow",
+        "aflow": "animation_flow",
+    }.get(normalized_scope)
+    include_finished = normalized_view in {"list", "all", "history", "completed", "done"}
+    payload = current_work(
+        include_gpu=False,
+        query=query,
+        detail=detail,
+        media_type=media_type,
+        include_finished=include_finished,
+        all_conversations=True,
+        task_view=normalized_view,
+    )
+    payload.setdefault("filters", {})["scope"] = normalized_scope
+    payload["filters"]["task_view"] = normalized_view
+
+    if query:
+        query_text = str(query).strip().lower()
+        payload["animation_flows"] = [
+            run for run in payload.get("animation_flows") or [] if _matches_animation_flow(run, query_text)
+        ]
+
+    if normalized_view in {"completed", "done"}:
+        _filter_parent_payload(payload, lambda run: str(run.get("status") or "").upper() in COMPLETED_STATUSES)
+        payload["active"] = []
+    elif normalized_view in {"queue", "queued", "pending"}:
+        _filter_parent_payload(payload, _is_queued_parent)
+        payload["active"] = [item for item in payload.get("active") or [] if _is_queued_parent(item)]
+    elif normalized_view in {"running", "processing"}:
+        _filter_parent_payload(
+            payload,
+            lambda run: str(run.get("status") or "").upper() == "RUNNING" and not _is_queued_parent(run),
+        )
+        payload["active"] = [
+            item for item in payload.get("active") or [] if str(item.get("status") or "").upper() == "RUNNING"
+        ]
+    return payload
+
+
+def _filter_parent_payload(payload: dict[str, Any], predicate: Callable[[dict[str, Any]], bool]) -> None:
+    for key in ("direct_images", "direct_videos", "animation_flows"):
+        payload[key] = [run for run in payload.get(key) or [] if predicate(run)]
+
+
+def _is_queued_parent(run: dict[str, Any]) -> bool:
+    status = str(run.get("status") or "").upper()
+    stage = str(run.get("stage") or run.get("current_stage") or "").lower()
+    return status in {"QUEUED", "PENDING"} or stage in {"queued", "pending", "waiting_pipeline_queue"}
+
+
+def _matches_animation_flow(run: dict[str, Any], query: str) -> bool:
+    values = (
+        run.get("run_id"),
+        run.get("date_root"),
+        run.get("current_stage"),
+        run.get("workflow_name"),
+        run.get("status"),
+    )
+    return query in " ".join(str(value or "") for value in values).lower()
+
+
+def _animation_flow_runs(limit: int = 20, include_finished: bool = False) -> list[dict[str, Any]]:
+    try:
+        from assetclaw_matting.skills.animation_flow_skills import run_list
+
+        payload = run_list(limit=limit, include_finished=include_finished)
+    except Exception:
+        return []
+    return payload.get("items") or []
 
 
 def diagnose(root: str | None = None, include_gpu: bool = True) -> dict[str, Any]:
@@ -294,6 +390,7 @@ def _direct_video_runs(limit: int = 8) -> list[dict[str, Any]]:
                 "run_label": run.get("run_label"),
                 "conversation_id": run.get("conversation_id") or "",
                 "repair_batch": run.get("repair_batch") or {},
+                "child_run_ids": _child_run_ids(run),
                 "created_at": run.get("created_at"),
                 "updated_at": run.get("updated_at"),
                 "items": videos,
@@ -323,6 +420,7 @@ def _direct_image_runs(limit: int = 8) -> list[dict[str, Any]]:
                 "stage": run.get("stage"),
                 "run_label": run.get("run_label"),
                 "conversation_id": run.get("conversation_id") or "",
+                "child_run_ids": _child_run_ids(run),
                 "created_at": run.get("created_at"),
                 "updated_at": run.get("updated_at"),
                 "items": images,
@@ -331,6 +429,13 @@ def _direct_image_runs(limit: int = 8) -> list[dict[str, Any]]:
         if len(items) >= limit:
             break
     return items
+
+
+def _child_run_ids(run: dict[str, Any]) -> list[str]:
+    children = run.get("children") if isinstance(run.get("children"), dict) else {}
+    values = [children.get(key) for key in ("frame_run_id", "pipeline_run_id", "comfyui_run_id", "cherry_run_id")]
+    values.extend(children.get("cherry_run_ids") or [])
+    return list(dict.fromkeys(str(value).strip() for value in values if str(value or "").strip()))
 
 
 def _status_files(root: Path, pattern: str, limit: int) -> list[Path]:

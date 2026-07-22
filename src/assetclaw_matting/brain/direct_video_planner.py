@@ -28,7 +28,9 @@ def plan_direct_video_task(message: BrainMessage) -> tuple[list[ToolCall], str] 
     text = (message.text or "").strip()
     if _asks_resend_zip(text):
         return [ToolCall(skill="direct_video.resend_zip", arguments={})], "direct video resend zip route"
-    if any(word in text for word in LIST_WORDS):
+    has_specific_batch_reference = any(word in text for word in ("这批任务", "六个任务", "6个任务", "所有视频进度"))
+    has_video_context = any(word in text for word in ("视频", "动画", "直传"))
+    if any(word in text for word in LIST_WORDS) and (has_specific_batch_reference or has_video_context):
         return [ToolCall(skill="direct_video.list", arguments={"limit": 10, "include_finished": True})], "direct video list route"
     if _asks_status(text):
         return [ToolCall(skill="direct_video.status", arguments={})], "direct video status route"
