@@ -2390,6 +2390,39 @@ SKILLS: list[dict[str, Any]] = [
 ]
 
 _MAP = {item["name"]: item for item in SKILLS}
+_POLLING_REQUESTERS = {"webui", "external_webui"}
+
+
+def _should_persist_skill_call(item: dict[str, Any] | None, result: dict[str, Any], requested_by: str) -> bool:
+    """Drop successful WebUI read polling while retaining writes and all failures."""
+    return not (
+        item
+        and requested_by in _POLLING_REQUESTERS
+        and item.get("risk_level") == "readonly"
+        and result.get("ok") is True
+    )
+
+
+def _persist_skill_call(
+    request_id: str,
+    skill_name: str,
+    arguments: dict[str, Any],
+    result: dict[str, Any],
+    requested_by: str,
+) -> None:
+    if not _should_persist_skill_call(_MAP.get(skill_name), result, requested_by):
+        return
+    from assetclaw_matting.db.repos import insert_skill_call
+
+    insert_skill_call(
+        request_id,
+        skill_name,
+        arguments,
+        result,
+        bool(result.get("ok")),
+        result.get("error"),
+        requested_by,
+    )
 
 
 def get_skill_meta(skill_name: str) -> dict[str, Any] | None:
@@ -2411,13 +2444,11 @@ def get_manifest() -> dict[str, Any]:
 
 
 def call_skill(skill_name: str, arguments: dict[str, Any], requested_by: str = "brain") -> dict[str, Any]:
-    from assetclaw_matting.db.repos import insert_skill_call
-
     request_id = str(uuid.uuid4())
     item = _MAP.get(skill_name)
     if not item:
         result = {"ok": False, "skill": skill_name, "error": f"unknown skill: {skill_name}"}
-        insert_skill_call(request_id, skill_name, arguments, result, False, result["error"], requested_by)
+        _persist_skill_call(request_id, skill_name, arguments, result, requested_by)
         return result
 
     try:
@@ -2429,11 +2460,11 @@ def call_skill(skill_name: str, arguments: dict[str, Any], requested_by: str = "
                 result = {"ok": False, "skill": skill_name, "error": payload.get("error", "skill returned ok=false"), "result": payload}
             else:
                 result = {"ok": True, "skill": skill_name, "result": payload}
-        insert_skill_call(request_id, skill_name, arguments, result, bool(result.get("ok")), result.get("error"), requested_by)
+        _persist_skill_call(request_id, skill_name, arguments, result, requested_by)
         return result
     except Exception as exc:
         error = redact_secrets(exc)
         log.warning("skill %s failed: %s", skill_name, error)
         result = {"ok": False, "skill": skill_name, "error": error}
-        insert_skill_call(request_id, skill_name, arguments, result, False, error, requested_by)
+        _persist_skill_call(request_id, skill_name, arguments, result, requested_by)
         return result

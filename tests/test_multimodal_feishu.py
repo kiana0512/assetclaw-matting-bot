@@ -1131,6 +1131,29 @@ def test_direct_image_start_uses_exact_square_rule(monkeypatch) -> None:
     assert [item["cherry_output_size"] for item in result["images"]] == ["256x256", "384x512"]
 
 
+def test_direct_image_recovery_closes_orphaned_parent(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.skills import direct_image_skills
+
+    monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", tmp_path / "runs")
+    run = {
+        "id": "IMG_ORPHANED",
+        "status": "RUNNING",
+        "stage": "queued",
+        "worker_pid": 0,
+        "children": {},
+        "images": [],
+        "log": [],
+    }
+    direct_image_skills._save(run)
+
+    result = direct_image_skills.recover_incomplete_runs()
+    saved = direct_image_skills._load("IMG_ORPHANED")
+
+    assert result["closed"] == ["IMG_ORPHANED"]
+    assert saved["status"] == "FAILED"
+    assert "已自动清除僵死运行状态" in saved["error"]
+
+
 def test_direct_image_send_results_returns_matte_processed_and_comparison(monkeypatch, tmp_path: Path) -> None:
     from assetclaw_matting.feishu.client import feishu_client
     from assetclaw_matting.skills import direct_image_skills

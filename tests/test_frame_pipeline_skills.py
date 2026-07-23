@@ -26,8 +26,15 @@ def test_frame_tool_info_and_preview_are_safe() -> None:
     assert info["exists"] is True
     assert info["fps"] == 24
 
-    preview = frame_preview(download_dir="E:\\raw_videos", export_dir="E:\\output_frames", fps=24, diff_threshold=0.2)
-    assert preview["export_dir"] == "E:\\output_frames"
+    download_dir = Path.cwd() / "storage" / "test_frame_preview" / "raw_videos"
+    export_dir = Path.cwd() / "storage" / "test_frame_preview" / "output_frames"
+    preview = frame_preview(
+        download_dir=str(download_dir),
+        export_dir=str(export_dir),
+        fps=24,
+        diff_threshold=0.2,
+    )
+    assert Path(preview["export_dir"]) == export_dir
     assert preview["diff_threshold"] == 0.2
     assert preview["dedup_enabled"] is False
 

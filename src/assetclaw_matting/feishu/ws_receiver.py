@@ -11,13 +11,56 @@ Run:
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import sys
+from pathlib import Path
+from typing import BinaryIO
 from concurrent.futures import ThreadPoolExecutor
 
 log = logging.getLogger(__name__)
 
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="feishu_ws_proc")
+_instance_lock: BinaryIO | None = None
+
+
+def _acquire_instance_lock(path: Path) -> BinaryIO | None:
+    """Acquire a non-blocking process-lifetime lock for the WS receiver."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, BlockingIOError):
+        handle.close()
+        return None
+    return handle
+
+
+def _release_instance_lock(handle: BinaryIO | None) -> None:
+    if handle is None or handle.closed:
+        return
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    finally:
+        handle.close()
 
 
 def _build_event_handler(settings):
@@ -74,16 +117,25 @@ def _build_ws_client(settings, event_handler):
 
 
 def main() -> None:
+    global _instance_lock
+
     from assetclaw_matting.config import settings
     from assetclaw_matting.db.schema import create_tables
     from assetclaw_matting.db.sqlite import init_db
     from assetclaw_matting.logging_setup import setup_logging
 
     settings.ensure_dirs()
+    lock_path = Path(settings.storage_dir) / ".feishu_ws_receiver.lock"
+    _instance_lock = _acquire_instance_lock(lock_path)
+    if _instance_lock is None:
+        print("ERROR: another Feishu WS receiver is already running; refusing duplicate startup")
+        raise SystemExit(2)
     setup_logging(settings.log_dir, name="feishu_ws")
     init_db(settings.data_db_path)
     create_tables()
 
+    from assetclaw_matting.skills.animation_flow_skills import recover_incomplete_runs as recover_animation_flows
+    from assetclaw_matting.skills.direct_image_skills import recover_incomplete_runs as recover_direct_images
     from assetclaw_matting.skills.direct_video_skills import recover_incomplete_runs
 
     recovery = recover_incomplete_runs()
@@ -91,6 +143,18 @@ def main() -> None:
         "direct video recovery scan recovered=%s still_running=%s",
         recovery.get("recovered"),
         recovery.get("still_running"),
+    )
+    flow_recovery = recover_animation_flows()
+    log.info(
+        "animation flow recovery scan closed=%s still_running=%s",
+        flow_recovery.get("closed"),
+        flow_recovery.get("still_running"),
+    )
+    image_recovery = recover_direct_images()
+    log.info(
+        "direct image recovery scan closed=%s still_running=%s",
+        image_recovery.get("closed"),
+        image_recovery.get("still_running"),
     )
 
     log.info("Feishu WS receiver initializing")
@@ -138,6 +202,8 @@ def main() -> None:
         sys.exit(1)
     finally:
         _executor.shutdown(wait=False)
+        _release_instance_lock(_instance_lock)
+        _instance_lock = None
 
 
 if __name__ == "__main__":

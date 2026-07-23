@@ -21,6 +21,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     setup_logging(settings.log_dir, name="gateway")
     init_db(settings.data_db_path)
     create_tables()
+    from assetclaw_matting.skills.animation_flow_skills import recover_incomplete_runs as recover_animation_flows
+    from assetclaw_matting.skills.direct_image_skills import recover_incomplete_runs as recover_direct_images
+
+    flow_recovery = recover_animation_flows()
+    if flow_recovery.get("closed"):
+        log.warning("closed stale animation flows: %s", flow_recovery["closed"])
+    image_recovery = recover_direct_images()
+    if image_recovery.get("closed"):
+        log.warning("closed stale direct image runs: %s", image_recovery["closed"])
     log.info("AssetClaw gateway started on %s:%s", settings.gateway_host, settings.gateway_port)
     yield
 

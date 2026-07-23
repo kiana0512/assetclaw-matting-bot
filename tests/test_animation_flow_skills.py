@@ -132,6 +132,27 @@ def test_animation_flow_locks_configured_comfyui_workflow(monkeypatch) -> None:
     assert started["workflow_name"] == workflow.name
 
 
+def test_animation_flow_recovery_closes_orphaned_running_record(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(animation_flow_skills, "RUN_DIR", tmp_path)
+    run = {
+        "id": "AFLOW_ORPHANED",
+        "status": "RUNNING",
+        "current_stage": "feishu_download",
+        "worker_pid": 0,
+        "stages": [],
+        "children": {},
+        "error": "",
+    }
+    animation_flow_skills._save(run)
+
+    result = animation_flow_skills.recover_incomplete_runs()
+    saved = animation_flow_skills._load("AFLOW_ORPHANED")
+
+    assert result["closed"] == ["AFLOW_ORPHANED"]
+    assert saved["status"] == "FAILED"
+    assert "已自动清除僵死运行状态" in saved["error"]
+
+
 def test_unity_import_preview_reads_unity_ready_and_refuses_when_mcp_off() -> None:
     ready = _unity_ready_fixture()
     project = ready.parent / "UnityProject"

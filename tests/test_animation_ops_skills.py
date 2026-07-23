@@ -39,6 +39,16 @@ def test_animation_status_counts_workspace_and_formats_result() -> None:
     assert "matte 对齐 frames：否" in text
 
 
+def test_animation_status_treats_missing_daily_workspace_as_empty(tmp_path) -> None:
+    missing = tmp_path / "2026-07-23"
+
+    payload = status(str(missing), include_runs=False)
+
+    assert payload["ok"] is True
+    assert payload["exists"] is False
+    assert payload["counts"] == {"videos": 0, "frames": 0, "matte": 0, "smooth": 0}
+
+
 def test_animation_ops_registry_requires_confirmation_for_writes() -> None:
     assert get_skill_meta("animation.status")["requires_confirmation"] is False
     assert get_skill_meta("animation.manual_smooth_current")["requires_confirmation"] is True

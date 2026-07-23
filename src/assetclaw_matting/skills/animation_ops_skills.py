@@ -19,7 +19,7 @@ def _default_root() -> str:
 
 def status(root: str | None = None, include_runs: bool = True) -> dict[str, Any]:
     root = root or _default_root()
-    workspace = _workspace(root, must_exist=True)
+    workspace = _workspace(root, must_exist=False)
     dirs = _standard_dirs(workspace)
     counts = {
         "videos": _count_files(dirs["videos"], VIDEO_EXTS),
@@ -34,6 +34,7 @@ def status(root: str | None = None, include_runs: bool = True) -> dict[str, Any]
     payload: dict[str, Any] = {
         "ok": True,
         "root": str(workspace),
+        "exists": workspace.is_dir(),
         "dirs": {name: str(path) for name, path in dirs.items()},
         "counts": counts,
         "sequences": sequences,

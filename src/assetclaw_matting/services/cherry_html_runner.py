@@ -389,6 +389,13 @@ def _start_chrome(
             [
                 str(chrome),
                 "--headless=new",
+                # The bot is often launched from an elevated PowerShell window
+                # on Windows. --enable-automation prevents Chromium's automatic
+                # de-elevation restart from discarding the DevTools launch;
+                # no-sandbox keeps that elevated headless instance runnable.
+                "--enable-automation",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
                 "--disable-gpu",
                 "--no-first-run",
                 "--no-default-browser-check",
@@ -429,12 +436,20 @@ def _stop_chrome(proc: subprocess.Popen[Any]) -> None:
 def _wait_for_page_ws(port: int, proc: subprocess.Popen[Any] | None = None) -> str:
     deadline = time.time() + 30
     last_error: Exception | None = None
+    clean_launcher_exit_at: float | None = None
     session = requests.Session()
     session.trust_env = False
     try:
         while time.time() < deadline:
-            if proc is not None and proc.poll() is not None:
-                raise RuntimeError(f"browser exited before debugger became ready (exit_code={proc.returncode})")
+            if proc is not None:
+                return_code = proc.poll()
+                if return_code is not None:
+                    if return_code != 0:
+                        raise RuntimeError(f"browser exited before debugger became ready (exit_code={return_code})")
+                    # chrome.exe/msedge.exe may be a Windows launcher stub. It
+                    # can hand the real headless browser to another process and
+                    # exit with code 0 before the debugger starts listening.
+                    clean_launcher_exit_at = clean_launcher_exit_at or time.time()
             try:
                 pages = session.get(f"http://127.0.0.1:{port}/json/list", timeout=(0.5, 1.5)).json()
                 for page in pages:
@@ -442,6 +457,11 @@ def _wait_for_page_ws(port: int, proc: subprocess.Popen[Any] | None = None) -> s
                         return str(page["webSocketDebuggerUrl"])
             except Exception as exc:
                 last_error = exc
+            if clean_launcher_exit_at is not None and time.time() - clean_launcher_exit_at >= 5:
+                raise RuntimeError(
+                    "browser launcher exited cleanly, but debugger did not become ready "
+                    f"within 5s (exit_code=0, last_error={last_error})"
+                )
             time.sleep(0.2)
     finally:
         session.close()

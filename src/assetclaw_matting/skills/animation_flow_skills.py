@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -128,6 +129,7 @@ def run_start(
         "stages": _stage_payload("feishu_download"),
         "children": {},
         "error": "",
+        "worker_pid": os.getpid(),
     }
     _save(run)
     notice = f"\n{pipeline_notice}" if pipeline_notice else ""
@@ -170,6 +172,33 @@ def run_list(limit: int = 10, include_finished: bool = False, **_: Any) -> dict[
         if len(items) >= max(1, min(int(limit), 50)):
             break
     return {"ok": True, "count": len(items), "items": items}
+
+
+def recover_incomplete_runs() -> dict[str, Any]:
+    """Close flow records whose owning process no longer has a worker."""
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    closed: list[str] = []
+    still_running: list[str] = []
+    for path in sorted(RUN_DIR.glob("AFLOW_*.json"), key=lambda item: item.stat().st_mtime):
+        try:
+            run = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(run.get("status") or "").upper() != "RUNNING":
+            continue
+        run_id = str(run.get("id") or path.stem)
+        worker_pid = int(run.get("worker_pid") or 0)
+        local_worker = run_id in _WORKERS
+        remote_worker = worker_pid > 0 and worker_pid != os.getpid() and _process_alive(worker_pid)
+        if local_worker or remote_worker:
+            still_running.append(run_id)
+            continue
+        run["status"] = "FAILED"
+        run["worker_pid"] = 0
+        run["error"] = "检测到动画流程执行进程已退出，已自动清除僵死运行状态。"
+        _save(run)
+        closed.append(run_id)
+    return {"ok": True, "closed": closed, "still_running": still_running}
 
 
 def run_cancel(run_id: str | None = None, **_: Any) -> dict[str, Any]:
@@ -349,6 +378,10 @@ def _worker(run_id: str) -> None:
     finally:
         if token is not None:
             reset_runtime_context(token)
+        latest = _load(run_id)
+        if latest and int(latest.get("worker_pid") or 0) == os.getpid():
+            latest["worker_pid"] = 0
+            _save(latest)
         _WORKERS.discard(run_id)
 
 
@@ -378,6 +411,10 @@ def _resume_worker(run_id: str) -> None:
     finally:
         if token is not None:
             reset_runtime_context(token)
+        latest = _load(run_id)
+        if latest and int(latest.get("worker_pid") or 0) == os.getpid():
+            latest["worker_pid"] = 0
+            _save(latest)
         _WORKERS.discard(run_id)
 
 
@@ -868,6 +905,16 @@ def _start_resume_worker(run_id: str) -> None:
         return
     _WORKERS.add(run_id)
     threading.Thread(target=_resume_worker, args=(run_id,), daemon=True).start()
+
+
+def _process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, SystemError, ValueError):
+        return False
 
 
 def _notify(run: dict[str, Any], text: str) -> None:

@@ -56,3 +56,51 @@ def test_wait_for_page_ws_reports_early_browser_exit(monkeypatch: pytest.MonkeyP
     with pytest.raises(RuntimeError, match="exit_code=9"):
         cherry_html_runner._wait_for_page_ws(13543, FakeProcess())  # type: ignore[arg-type]
     assert session.trust_env is False
+
+
+def test_wait_for_page_ws_allows_clean_windows_launcher_handoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeProcess:
+        returncode = 0
+
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+    class FakeResponse:
+        @staticmethod
+        def json():
+            return [{"type": "page", "webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/1"}]
+
+    class FakeSession:
+        trust_env = True
+
+        @staticmethod
+        def get(*_args, **_kwargs):
+            return FakeResponse()
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    session = FakeSession()
+    monkeypatch.setattr(cherry_html_runner.requests, "Session", lambda: session)
+
+    assert cherry_html_runner._wait_for_page_ws(13543, FakeProcess()) == "ws://127.0.0.1/devtools/page/1"  # type: ignore[arg-type]
+    assert session.trust_env is False
+
+
+def test_start_chrome_uses_elevated_headless_safe_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(cherry_html_runner.subprocess, "Popen", fake_popen)
+
+    cherry_html_runner._start_chrome(tmp_path / "chrome.exe", 9222, tmp_path / "profile")
+
+    assert "--enable-automation" in captured["args"]
+    assert "--no-sandbox" in captured["args"]
+    assert "--disable-setuid-sandbox" in captured["args"]

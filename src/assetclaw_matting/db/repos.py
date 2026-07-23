@@ -15,6 +15,38 @@ def _now() -> str:
 
 
 _memory_compaction_notify_at: dict[str, float] = {}
+_AUDIT_JSON_MAX_CHARS = 32_000
+
+
+def _audit_json(value: Any, *, kind: str) -> str:
+    """Serialize audit data without letting large status payloads bloat SQLite."""
+    redacted = redact_secrets(json.dumps(value, ensure_ascii=False, default=str))
+    if len(redacted) <= _AUDIT_JSON_MAX_CHARS:
+        return redacted
+    summary: dict[str, Any] = {
+        "audit_truncated": True,
+        "kind": kind,
+        "original_chars": len(redacted),
+    }
+    if isinstance(value, dict):
+        for key in ("ok", "skill", "status", "run_id", "id", "count", "error"):
+            item = value.get(key)
+            if isinstance(item, (str, int, float, bool)) or item is None:
+                summary[key] = item
+        payload = value.get("result")
+        if isinstance(payload, dict):
+            result_summary: dict[str, Any] = {}
+            for key, item in payload.items():
+                if isinstance(item, (bool, int, float)) or item is None:
+                    result_summary[key] = item
+                elif isinstance(item, str):
+                    result_summary[key] = item[:500]
+                elif isinstance(item, (list, tuple, set)):
+                    result_summary[f"{key}_count"] = len(item)
+                elif isinstance(item, dict):
+                    result_summary[f"{key}_keys"] = list(item)[:20]
+            summary["result_summary"] = result_summary
+    return redact_secrets(json.dumps(summary, ensure_ascii=False, default=str))
 
 
 # ---------------------------------------------------------------------------
@@ -101,8 +133,8 @@ def insert_skill_call(
             (
                 request_id,
                 skill,
-                redact_secrets(json.dumps(arguments, ensure_ascii=False, default=str)),
-                redact_secrets(json.dumps(result, ensure_ascii=False, default=str)),
+                _audit_json(arguments, kind="arguments"),
+                _audit_json(result, kind="result"),
                 1 if ok else 0,
                 redact_secrets(error or ""),
                 requested_by,

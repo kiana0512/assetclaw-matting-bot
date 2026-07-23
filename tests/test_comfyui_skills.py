@@ -174,6 +174,50 @@ def test_prepare_api_prompt_does_not_rewire_workflow() -> None:
     assert prompt["2"]["inputs"]["images"] == ["1", 0]
 
 
+def test_prepare_api_prompt_replaces_cherry_mirror_machine_path() -> None:
+    workflow = {
+        "20": {
+            "class_type": "CherryMirrorSave",
+            "inputs": {
+                "图像": ["19", 0],
+                "输出根目录": r"D:\comfyui-qiuye\ComfyUI-aki-v1.6\ComfyUI\output\抠图",
+                "格式": "PNG",
+            },
+        },
+        "25": {"class_type": "SaveImage", "inputs": {"filename_prefix": "ComfyUI"}},
+    }
+
+    prompt = prepare_api_prompt_for_run(
+        workflow,
+        auxiliary_output_root=r"C:\ComfyUI\output\assetclaw_aux\COMFY_TEST",
+    )
+
+    assert prompt["20"]["inputs"]["输出根目录"] == r"C:\ComfyUI\output\assetclaw_aux\COMFY_TEST"
+    assert prompt["25"]["inputs"]["filename_prefix"] == "ComfyUI"
+
+
+def test_queue_status_omits_full_prompt_graph(monkeypatch) -> None:
+    from assetclaw_matting.comfyui.client import comfyui_client
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.skills.comfyui_skills import queue_status
+
+    monkeypatch.setattr(settings, "comfyui_fake_mode", False)
+    monkeypatch.setattr(
+        comfyui_client,
+        "get_queue",
+        lambda: {
+            "queue_running": [[1, "prompt-1", {"huge": "workflow"}, {"client_id": "client-1"}, ["25"]]],
+            "queue_pending": [],
+        },
+    )
+
+    payload = queue_status()
+
+    assert payload["running"] == [{"position": 1, "prompt_id": "prompt-1", "client_id": "client-1"}]
+    assert payload["running_count"] == 1
+    assert "raw" not in payload
+
+
 def test_find_save_image_outputs_prefers_final_output_over_temp() -> None:
     history = {
         "pid": {
@@ -258,6 +302,19 @@ def test_primary_save_image_node_prefers_cherry_color_restore_rgba_output() -> N
     }
 
     assert find_primary_save_image_node_id(workflow) == "210"
+
+
+def test_primary_save_image_node_prefers_final_foot_region_rgba_composite() -> None:
+    workflow = {
+        "8": {"class_type": "SaveImage", "inputs": {"images": ["29", 0], "filename_prefix": "ComfyUI"}},
+        "29": {"class_type": "VAEDecodeTiled", "inputs": {}},
+        "22": {"class_type": "SaveImage", "inputs": {"images": ["13", 0], "filename_prefix": "double"}},
+        "13": {"class_type": "CherrySelfComposite", "inputs": {}},
+        "25": {"class_type": "SaveImage", "inputs": {"images": ["52", 0], "filename_prefix": "ComfyUI"}},
+        "52": {"class_type": "122_FootRegionPaste", "inputs": {}},
+    }
+
+    assert find_primary_save_image_node_id(workflow) == "25"
 
 
 def test_resolve_best_output_rejects_bad_primary_save_even_if_preview_mask_is_transparent(tmp_path) -> None:
@@ -447,6 +504,52 @@ def test_run_status_without_id_prefers_active_run(monkeypatch) -> None:
     status = run_status(None, include_gpu=False)
 
     assert status["run_id"] == "COMFY_ACTIVE000"
+
+
+def test_run_status_does_not_finish_before_validated_output_exists(monkeypatch) -> None:
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.db.sqlite import get_connection
+
+    run_id = "COMFY_VALIDATE001"
+    now = "2026-07-23T00:00:00+00:00"
+    monkeypatch.setattr(settings, "comfyui_fake_mode", False)
+    monkeypatch.setattr(
+        "assetclaw_matting.comfyui.client.comfyui_client.get_history",
+        lambda prompt_id: {
+            prompt_id: {"status": {"completed": True, "status_str": "success"}}
+        },
+    )
+    monkeypatch.setattr(
+        "assetclaw_matting.comfyui.client.comfyui_client.get_queue",
+        lambda: {"queue_running": [], "queue_pending": []},
+    )
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO comfyui_runs
+            (id, status, workflow_path, input_dir, output_dir, total, files_json, prompt_ids_json, options_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                "RUNNING",
+                "workflow.json",
+                str(Path.cwd()),
+                str(Path.cwd() / "storage" / "missing_validated_output"),
+                1,
+                json.dumps(["source.png"]),
+                json.dumps(["prompt-1"]),
+                json.dumps({"prompt_map": []}),
+                now,
+                now,
+            ),
+        )
+
+    status = run_status(run_id, include_gpu=False)
+
+    assert status["status"] == "RUNNING"
+    assert status["completed"] == 0
+    assert status["running_or_pending"] == 1
 
 
 def test_progress_notification_is_quiet_between_large_steps() -> None:

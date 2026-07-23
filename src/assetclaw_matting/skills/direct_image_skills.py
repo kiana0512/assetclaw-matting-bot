@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import threading
 import time
@@ -103,6 +104,7 @@ def start(
         "sent_files": [],
         "error": "",
         "log": [],
+        "worker_pid": os.getpid(),
     }
     _save(run)
     _start_worker(run_id)
@@ -113,6 +115,7 @@ def status(run_id: str | None = None, **_: Any) -> dict[str, Any]:
     run = _load(run_id)
     if not run:
         return {"ok": False, "error": "direct image run not found"}
+    run = _reconcile_terminal_child(run)
     return {"ok": True, "run_id": run["id"], **_public(run)}
 
 
@@ -121,12 +124,48 @@ def list_runs(limit: int = 10, include_finished: bool = True, **_: Any) -> dict[
     items = []
     for path in sorted(RUNS_ROOT.glob("IMG_*/status.json"), key=lambda item: item.stat().st_mtime, reverse=True):
         run = json.loads(path.read_text(encoding="utf-8"))
+        run = _reconcile_terminal_child(run)
         if run.get("status") in FINISHED and not include_finished:
             continue
         items.append({"run_id": run["id"], **_public(run)})
         if len(items) >= max(1, min(int(limit), 50)):
             break
     return {"ok": True, "count": len(items), "items": items}
+
+
+def recover_incomplete_runs() -> dict[str, Any]:
+    """Close image parents orphaned by a Gateway or Feishu process restart."""
+    RUNS_ROOT.mkdir(parents=True, exist_ok=True)
+    closed: list[str] = []
+    still_running: list[str] = []
+    for status_path in sorted(RUNS_ROOT.glob("IMG_*/status.json"), key=lambda item: item.stat().st_mtime):
+        try:
+            run = json.loads(status_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(run.get("status") or "").upper() not in {"RUNNING", "QUEUED", "PENDING"}:
+            continue
+        run = _reconcile_terminal_child(run)
+        if str(run.get("status") or "").upper() in FINISHED:
+            closed.append(str(run.get("id") or status_path.parent.name))
+            continue
+        run_id = str(run.get("id") or status_path.parent.name)
+        worker_pid = int(run.get("worker_pid") or 0)
+        local_worker = run_id in _WORKERS
+        remote_worker = worker_pid > 0 and worker_pid != os.getpid() and _process_alive(worker_pid)
+        if local_worker or remote_worker:
+            still_running.append(run_id)
+            continue
+        cancel_results = _cancel_child_runs(run)
+        run["status"] = "FAILED"
+        run["stage"] = "failed"
+        run["worker_pid"] = 0
+        run["error"] = "检测到图片直发执行进程已退出，已自动清除僵死运行状态。"
+        run.setdefault("children", {})["orphan_cancel_results"] = cancel_results
+        _append_log(run, run["error"])
+        _save(run)
+        closed.append(run_id)
+    return {"ok": True, "closed": closed, "still_running": still_running}
 
 
 def cancel(run_id: str | None = None, **_: Any) -> dict[str, Any]:
@@ -185,6 +224,10 @@ def _worker(run_id: str) -> None:
             _save(run)
             _notify(run, f"图片处理任务失败：{run_id}\n{exc}")
     finally:
+        latest = _load(run_id)
+        if latest and int(latest.get("worker_pid") or 0) == os.getpid():
+            latest["worker_pid"] = 0
+            _save(latest)
         _WORKERS.discard(run_id)
 
 
@@ -566,6 +609,40 @@ def _start_worker(run_id: str) -> None:
         return
     _WORKERS.add(run_id)
     threading.Thread(target=_worker, args=(run_id,), name=f"direct_image_{run_id}", daemon=True).start()
+
+
+def _process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, SystemError, ValueError):
+        return False
+
+
+def _reconcile_terminal_child(run: dict[str, Any]) -> dict[str, Any]:
+    if str(run.get("status") or "").upper() != "RUNNING" or str(run.get("stage") or "") != "matting":
+        return run
+    child_id = str((run.get("children") or {}).get("comfyui_run_id") or "")
+    if not child_id:
+        return run
+    try:
+        from assetclaw_matting.skills.comfyui_skills import run_status
+
+        payload = run_status(child_id, include_gpu=False)
+    except Exception:
+        return run
+    child_status = str(payload.get("status") or "").upper()
+    if child_status not in {"FAILED", "CANCELED"}:
+        return run
+    run.setdefault("children", {})["comfyui"] = payload
+    run["status"] = child_status
+    run["stage"] = "failed" if child_status == "FAILED" else "canceled"
+    run["error"] = _format_child_failure("ComfyUI", child_id, payload)
+    run["updated_at"] = _now()
+    _save(run)
+    return run
 
 
 def _is_canceled(run: dict[str, Any]) -> bool:

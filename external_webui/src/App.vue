@@ -675,13 +675,9 @@ function etaSeconds(raw) {
     raw.remaining
   );
   if (direct !== null && direct >= 0) return Math.round(direct);
-  const total = firstNumber(raw.total, raw.total_records);
-  const done = firstNumber(raw.completed, raw.processed_records);
-  if (total === null || done === null || total <= 0 || done <= 0 || done >= total) return null;
-  const started = Date.parse(raw.started_at || raw.created_at || raw.createdAt || "");
-  if (!Number.isFinite(started)) return null;
-  const elapsed = Math.max(1, (Date.now() - started) / 1000);
-  return Math.max(0, Math.round((elapsed / done) * (total - done)));
+  // Creation time includes overnight pauses, restarts and queue wait.  When
+  // the backend has no measured ETA, show "计算中" instead of inventing one.
+  return null;
 }
 
 function firstNumber(...values) {

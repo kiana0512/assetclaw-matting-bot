@@ -119,9 +119,55 @@ def workflow_to_api_prompt(workflow: dict[str, Any]) -> dict[str, Any]:
     return prompt
 
 
-def prepare_api_prompt_for_run(workflow: dict[str, Any]) -> dict[str, Any]:
-    """Convert a workflow to the ComfyUI API prompt format without changing it."""
-    return workflow_to_api_prompt(workflow)
+def prepare_api_prompt_for_run(
+    workflow: dict[str, Any],
+    auxiliary_output_root: str | None = None,
+) -> dict[str, Any]:
+    """Convert a workflow to an API prompt and normalize machine-local outputs.
+
+    Some imported workflows contain absolute paths from their author's machine
+    in helper save nodes such as ``CherryMirrorSave``.  Those nodes are not the
+    production output selected by AssetClaw, but ComfyUI still executes them and
+    aborts the whole prompt when their directory is unavailable.  Point only
+    these auxiliary save nodes at the current ComfyUI installation at runtime.
+    """
+    prompt = workflow_to_api_prompt(workflow)
+    if auxiliary_output_root:
+        patch_auxiliary_output_roots(prompt, auxiliary_output_root)
+    return prompt
+
+
+def patch_auxiliary_output_roots(
+    prompt: dict[str, Any],
+    output_root: str,
+) -> dict[str, Any]:
+    """Patch machine-local paths on known auxiliary save nodes.
+
+    Cherry's mirror-save node has used several localized input names across
+    versions. Match absolute path values instead of one translated label.
+    """
+    for node in prompt.values():
+        if not isinstance(node, dict) or str(node.get("class_type") or "") != "CherryMirrorSave":
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        patched = False
+        for key, value in list(inputs.items()):
+            if isinstance(value, str) and _is_absolute_windows_path(value):
+                inputs[key] = str(output_root)
+                patched = True
+        if not patched:
+            for key in ("output_root", "output_dir"):
+                if key in inputs:
+                    inputs[key] = str(output_root)
+                    break
+    return prompt
+
+
+def _is_absolute_windows_path(value: str) -> bool:
+    text = str(value or "").strip()
+    return len(text) >= 3 and text[0].isalpha() and text[1:3] in {":\\", ":/"}
 
 
 def inspect_workflow(workflow: dict[str, Any]) -> dict[str, Any]:
@@ -330,16 +376,26 @@ def _primary_save_score(workflow: dict[str, Any], item: dict[str, Any]) -> tuple
     source = _save_image_source_info(workflow, str(item.get("id") or ""))
     source_text = " ".join(str(part) for part in source.values()).lower()
     score = 0
+    # Prefer nodes fed by final RGBA composition stages. A plain VAE decode is
+    # commonly an opaque background preview, not the matte consumed downstream.
+    if "footregionpaste" in source_text:
+        score += 140
+    if "joinimagewithalpha" in source_text:
+        score += 100
+    if "holdout" in source_text or "alpha" in source_text:
+        score += 50
+    if "selfcomposite" in source_text or "colormatchtosource" in source_text:
+        score += 30
     if "cherryitemcolorrestore" in source_text:
         score += 100
     if "rgba" in source_text or "图像(rgba)" in source_text:
         score += 50
     if _looks_like_primary_save_title(item):
         score += 20
-    # Prefer earlier clean SaveImage nodes over late preview/debug nodes when
-    # scores tie. Dict/list order follows the workflow file order.
-    order = -_workflow_node_order(workflow, str(item.get("id") or ""))
-    return (score, order, -int(str(item.get("id") or "0")) if str(item.get("id") or "0").isdigit() else 0)
+    # Preview/mask nodes were filtered before scoring. When otherwise tied,
+    # prefer the later save because cleanup/composition stages are appended.
+    order = _workflow_node_order(workflow, str(item.get("id") or ""))
+    return (score, order, int(str(item.get("id") or "0")) if str(item.get("id") or "0").isdigit() else 0)
 
 
 def _save_image_source_info(workflow: dict[str, Any], node_id: str) -> dict[str, str]:

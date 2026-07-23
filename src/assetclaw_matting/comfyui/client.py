@@ -19,6 +19,18 @@ from assetclaw_matting.comfyui.output_resolver import resolve_first_output
 log = logging.getLogger(__name__)
 
 
+def _queue_prompt_ids(items: list[Any]) -> set[str]:
+    result: set[str] = set()
+    for item in items:
+        if isinstance(item, (list, tuple)) and len(item) > 1 and item[1]:
+            result.add(str(item[1]))
+        elif isinstance(item, dict):
+            prompt_id = item.get("prompt_id") or item.get("id")
+            if prompt_id:
+                result.add(str(prompt_id))
+    return result
+
+
 class ComfyUIClient:
     """HTTP client for the ComfyUI API."""
 
@@ -132,9 +144,11 @@ class ComfyUIClient:
         return resp.json()
 
     def wait_for_completion(self, prompt_id: str) -> dict[str, Any]:
-        deadline = time.time() + settings.comfyui_timeout_seconds
+        submitted_at = time.time()
+        execution_started_at: float | None = None
+        queue_timeout = max(21600, settings.comfyui_timeout_seconds * 6)
         interval = settings.comfyui_poll_interval_seconds
-        while time.time() < deadline:
+        while True:
             history = self.get_history(prompt_id)
             if prompt_id in history:
                 entry = history[prompt_id]
@@ -146,11 +160,27 @@ class ComfyUIClient:
                     raise RuntimeError(
                         f"ComfyUI prompt {prompt_id} error: {status.get('messages')}"
                     )
+            now = time.time()
+            queue = self.get_queue()
+            running_ids = _queue_prompt_ids(queue.get("queue_running") or [])
+            pending_ids = _queue_prompt_ids(queue.get("queue_pending") or [])
+            if prompt_id in running_ids:
+                execution_started_at = execution_started_at or now
+                if now - execution_started_at >= settings.comfyui_timeout_seconds:
+                    raise TimeoutError(
+                        f"ComfyUI prompt {prompt_id} execution did not complete in "
+                        f"{settings.comfyui_timeout_seconds}s"
+                    )
+            elif prompt_id in pending_ids:
+                if now - submitted_at >= queue_timeout:
+                    raise TimeoutError(
+                        f"ComfyUI prompt {prompt_id} stayed queued for {int(now - submitted_at)}s"
+                    )
+            elif now - submitted_at >= 60:
+                raise RuntimeError(
+                    f"ComfyUI prompt {prompt_id} disappeared from queue without history"
+                )
             time.sleep(interval)
-        raise TimeoutError(
-            f"ComfyUI prompt {prompt_id} did not complete in {settings.comfyui_timeout_seconds}s"
-        )
-
     # ── Download ──────────────────────────────────────────────────────────────
 
     def download_output(

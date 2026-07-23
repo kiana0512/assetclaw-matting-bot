@@ -75,14 +75,34 @@ def queue_status() -> dict[str, Any]:
     if settings.comfyui_fake_mode:
         return {"ok": True, "fake_mode": True, "reachable": False, "running": [], "pending": []}
     queue = comfyui_client.get_queue()
+    running = [_queue_item_summary(item) for item in (queue.get("queue_running") or [])]
+    pending = [_queue_item_summary(item) for item in (queue.get("queue_pending") or [])]
     return {
         "ok": True,
         "fake_mode": False,
         "reachable": True,
-        "running": queue.get("queue_running") or [],
-        "pending": queue.get("queue_pending") or [],
-        "raw": queue,
+        "running": running,
+        "pending": pending,
+        "running_count": len(running),
+        "pending_count": len(pending),
     }
+
+
+def _queue_item_summary(item: Any) -> dict[str, Any]:
+    if isinstance(item, dict):
+        return {
+            "position": item.get("number") or item.get("position"),
+            "prompt_id": item.get("prompt_id") or item.get("id") or "",
+            "client_id": item.get("client_id") or "",
+        }
+    if isinstance(item, (list, tuple)):
+        metadata = item[3] if len(item) > 3 and isinstance(item[3], dict) else {}
+        return {
+            "position": item[0] if item else None,
+            "prompt_id": str(item[1]) if len(item) > 1 else "",
+            "client_id": str(metadata.get("client_id") or ""),
+        }
+    return {"position": None, "prompt_id": "", "client_id": ""}
 
 
 _MONITORING_RUNS: set[str] = set()
@@ -216,43 +236,32 @@ def run_status(run_id: str | None = None, include_gpu: bool = True) -> dict[str,
     files = json.loads(row["files_json"] or "[]")
     completed = 0
     failed = 0
-    histories: list[dict[str, Any]] = []
     options = json.loads(row["options_json"] or "{}")
     prompt_map = options.get("prompt_map") or []
     completed = sum(1 for item in prompt_map if not item.get("error") and Path(str(item.get("dst_path") or "")).exists())
     failed = sum(1 for item in prompt_map if item.get("error"))
     error_items = [item for item in prompt_map if item.get("error")]
-    if not settings.comfyui_fake_mode and not completed + failed:
-        for prompt_id in prompt_ids:
-            try:
-                history = comfyui_client.get_history(prompt_id)
-                entry = history.get(prompt_id)
-                if not entry:
-                    continue
-                histories.append(entry)
-                status = entry.get("status", {})
-                if status.get("completed") or status.get("status_str") == "success":
-                    completed += 1
-                elif status.get("status_str") == "error":
-                    failed += 1
-            except Exception:
-                continue
-
     total = int(row["total"] or len(files))
     running = max(0, total - completed - failed)
-    elapsed = max(0.0, time.time() - datetime.fromisoformat(row["created_at"]).timestamp())
-    eta_seconds = _eta(elapsed, completed, total)
-    status_text = "DONE" if total and completed + failed >= total else row["status"]
-    if failed and completed + failed >= total:
-        status_text = "FAILED" if completed == 0 else "DONE_WITH_ERRORS"
+    eta_seconds = _eta_from_prompt_map(prompt_map, total, row["created_at"])
+    status_text = row["status"]
+    # Prompt success only means ComfyUI executed the graph. Completion requires
+    # a validated transparent PNG to exist at dst_path, otherwise a parent flow
+    # can enter post-processing while this worker is still rejecting/retrying.
+    if total and completed + failed >= total:
+        if failed:
+            status_text = "FAILED" if completed == 0 else "DONE_WITH_ERRORS"
+        elif completed == total:
+            status_text = "DONE"
     queue = {}
     if not settings.comfyui_fake_mode:
         try:
             queue = comfyui_client.get_queue()
         except Exception as exc:
             queue = {"error": str(exc)}
-    with get_connection() as conn:
-        conn.execute("UPDATE comfyui_runs SET status = ?, updated_at = ? WHERE id = ?", (status_text, _now(), row["id"]))
+    if status_text != row["status"]:
+        with get_connection() as conn:
+            conn.execute("UPDATE comfyui_runs SET status = ?, updated_at = ? WHERE id = ?", (status_text, _now(), row["id"]))
 
     result: dict[str, Any] = {
         "ok": True,
@@ -334,7 +343,7 @@ def run_resume(run_id: str | None = None) -> dict[str, Any]:
     row = _get_run(run_id)
     if not row:
         return {"ok": False, "error": "comfyui run not found"}
-    if row["status"] in {"DONE", "DONE_WITH_ERRORS", "FAILED", "CANCELED"}:
+    if row["status"] in {"DONE", "DONE_WITH_ERRORS", "CANCELED"}:
         return {"ok": True, "run_id": row["id"], "status": row["status"], "message": "任务已经结束，不能继续。"}
     if row["status"] == "RUNNING" and not settings.comfyui_fake_mode:
         try:
@@ -580,7 +589,11 @@ def _run_worker(run_id: str) -> None:
         workflow_file = Path(row["workflow_path"])
         base_workflow = json.loads(workflow_file.read_text(encoding="utf-8"))
         final_save_image_node_id = _final_save_image_node_id(base_workflow)
-        done_sources = {item.get("src_path") for item in prompt_map}
+        done_sources = {
+            item.get("src_path")
+            for item in prompt_map
+            if not item.get("error") and Path(str(item.get("dst_path") or "")).is_file()
+        }
 
         for image_path in files:
             if str(image_path) in done_sources:
@@ -602,7 +615,9 @@ def _run_worker(run_id: str) -> None:
                 last_error: Exception | None = None
                 upload_verification: dict[str, str] = {}
                 identity_verification: dict[str, Any] = {}
+                processing_seconds = 0.0
                 for attempt in range(1, attempts + 1):
+                    attempt_started = time.monotonic()
                     try:
                         if settings.comfyui_fake_mode:
                             _fake_copy_image(image_path, target)
@@ -617,7 +632,11 @@ def _run_worker(run_id: str) -> None:
                                 workflow = patch_node_input(workflow, str(options["input_node_id"]), str(options.get("input_name") or "image"), uploaded)
                             else:
                                 workflow = patch_load_image(workflow, uploaded)
-                            prompt_id = comfyui_client.submit_prompt(prepare_api_prompt_for_run(workflow), client_id=run_id)
+                            prompt = prepare_api_prompt_for_run(
+                                workflow,
+                                auxiliary_output_root=str(settings.comfyui_dir / "output" / "assetclaw_aux" / run_id),
+                            )
+                            prompt_id = comfyui_client.submit_prompt(prompt, client_id=run_id)
                             prompt_ids.append(prompt_id)
                             _save_run_progress(run_id, prompt_ids, options)
                             history = comfyui_client.wait_for_completion(prompt_id)
@@ -635,11 +654,14 @@ def _run_worker(run_id: str) -> None:
 
                                 identity_verification = validate_matte_identity(image_path, target)
                         last_error = None
+                        processing_seconds = max(0.0, time.monotonic() - attempt_started)
                         break
                     except Exception as exc:
                         last_error = exc
                         if target.exists():
                             target.unlink()
+                        if isinstance(exc, TimeoutError):
+                            raise
                         if attempt < attempts:
                             _notify(
                                 run_id,
@@ -652,23 +674,26 @@ def _run_worker(run_id: str) -> None:
                             time.sleep(retry_delay)
                             continue
                         raise RuntimeError(f"ComfyUI 输出校验失败，已重试 {attempts} 次，拒绝写入 matte：{image_path.name}\n{last_error}") from exc
-                prompt_map.append({
+                prompt_map = _replace_prompt_result(prompt_map, str(image_path), {
                     "prompt_id": prompt_id,
                     "src_path": str(image_path),
                     "rel_path": _relative_output_key(src, image_path, bool(options.get("preserve_structure", True))),
                     "dst_path": str(target),
                     **upload_verification,
                     "identity_verification": identity_verification,
+                    "duration_seconds": round(processing_seconds, 3),
+                    "completed_at": _now(),
                 })
                 options["prompt_map"] = prompt_map
                 _save_run_progress(run_id, prompt_ids, options)
             except Exception as exc:
-                prompt_map.append({
+                prompt_map = _replace_prompt_result(prompt_map, str(image_path), {
                     "prompt_id": prompt_id,
                     "src_path": str(image_path),
                     "rel_path": _relative_output_key(src, image_path, bool(options.get("preserve_structure", True))),
                     "dst_path": str(target),
                     "error": str(exc),
+                    "failed_at": _now(),
                 })
                 options["prompt_map"] = prompt_map
                 _save_run_progress(run_id, prompt_ids, options)
@@ -1069,6 +1094,52 @@ def _eta(elapsed: float, completed: int, total: int) -> int | None:
         return None
     avg = elapsed / completed
     return int(avg * (total - completed))
+
+
+def _replace_prompt_result(
+    prompt_map: list[dict[str, Any]],
+    source_path: str,
+    result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return [item for item in prompt_map if str(item.get("src_path") or "") != source_path] + [result]
+
+
+def _eta_from_prompt_map(
+    prompt_map: list[dict[str, Any]],
+    total: int,
+    created_at: str,
+) -> int | None:
+    successful = [
+        item
+        for item in prompt_map
+        if not item.get("error") and Path(str(item.get("dst_path") or "")).is_file()
+    ]
+    completed = len(successful)
+    if completed <= 0 or total <= completed:
+        return None
+    durations = [
+        float(item.get("duration_seconds"))
+        for item in successful
+        if isinstance(item.get("duration_seconds"), (int, float)) and float(item["duration_seconds"]) > 0
+    ]
+    if not durations:
+        try:
+            started = datetime.fromisoformat(created_at).timestamp()
+            mtimes = sorted(Path(str(item["dst_path"])).stat().st_mtime for item in successful)
+            previous = started
+            for mtime in mtimes:
+                duration = mtime - previous
+                if 1 <= duration <= 3600:
+                    durations.append(duration)
+                previous = mtime
+        except (KeyError, OSError, TypeError, ValueError):
+            durations = []
+    if not durations:
+        return None
+    recent = sorted(durations[-10:])
+    midpoint = len(recent) // 2
+    median = recent[midpoint] if len(recent) % 2 else (recent[midpoint - 1] + recent[midpoint]) / 2
+    return max(0, int(median * (total - completed)))
 
 
 def _format_duration(seconds: int) -> str:
