@@ -2,6 +2,17 @@ AssetClaw Win3090 Animation Butler 是一个运行在 Windows RTX 3090 服务器
 
 **安全合规**：使用飞书官方长连接模式，无需公网 IP、无需 Cloudflare Tunnel、无需任何内网穿透工具。
 
+## Repository Hygiene
+
+运行数据、日志、数据库、测试临时目录和前端构建结果不进入 Git。提交前运行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\check_repo_hygiene.ps1
+git diff --check
+```
+
+`scripts\clean_project.ps1` 默认只预览；确认列表后加 `-Apply` 才会删除缓存。规则和误提交恢复方法见 [Git 仓库与运行数据管理](docs/REPOSITORY_HYGIENE.md)。
+
 ## Architecture
 
 - 飞书 = 嘴巴：通过长连接 WebSocket 接收和回复消息。

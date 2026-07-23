@@ -1,5 +1,23 @@
 # Operations
 
+## Git 与项目清理
+
+运行数据不得提交到 Git。提交前执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\check_repo_hygiene.ps1
+git diff --check
+git status --short
+```
+
+项目清理默认是 dry-run。确认预览后再执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\clean_project.ps1 -Apply
+```
+
+该命令保留 `.env`、数据库及其备份、任务输入输出和业务资产。完整追踪规则与误提交恢复方法见 [Git 仓库与运行数据管理](REPOSITORY_HYGIENE.md)。
+
 ## 一键重启本地机器人（推荐，公司内网标准方式）
 
 ```powershell

@@ -1,5 +1,16 @@
 # Troubleshooting
 
+## Git 提交出现大量图片、状态 JSON 或测试目录
+
+这是运行产物已经进入 Git 索引，不是 `git commit` 卡死。先运行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\check_repo_hygiene.ps1
+git -c core.quotepath=false status --short
+```
+
+`.gitignore` 只阻止新的未追踪文件，不能自动移除已经被追踪的文件。按 [Git 仓库与运行数据管理](REPOSITORY_HYGIENE.md) 中的 `git rm --cached` 命令清理索引；该操作不会删除本机运行文件。已经推送的历史若要彻底瘦身，需要单独重写历史和强制推送，不能在多人协作期间直接执行。
+
 ## 飞书无回复
 
 1. 确认飞书后台事件订阅方式为“使用长连接接收事件”，不是“配置请求网址”。

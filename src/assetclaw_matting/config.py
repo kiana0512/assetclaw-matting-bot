@@ -14,25 +14,34 @@ def _discover_aki_root(parent: Path, home: Path | None = None) -> Path:
     """Find an Aki/ComfyUI bundle without relying on its machine-specific folder name."""
     user_home = Path.home() if home is None else Path(home)
     conventional = parent / "ComfyUI-aki-v3"
-    direct_candidates = [
-        conventional,
+    desktop_candidates = [
         user_home / "Desktop" / "ComfyUI-aki-v3",
         user_home / "OneDrive" / "Desktop" / "ComfyUI-aki-v3",
     ]
-    for candidate in direct_candidates:
+    for candidate in [conventional]:
         if (candidate / "ComfyUI").is_dir() and (candidate / "python" / "python.exe").is_file():
             return candidate
-    candidates: list[Path] = []
-    for search_root in (parent, user_home / "Desktop", user_home / "OneDrive" / "Desktop"):
+
+    # A bundle beside the checkout belongs to that deployment and must win
+    # over an unrelated bundle on the current user's Desktop.
+    search_roots = (parent, user_home / "Desktop", user_home / "OneDrive" / "Desktop")
+    for search_root in search_roots:
+        candidates: list[Path] = []
         try:
-            candidates.extend(
+            candidates = [
                 item
                 for item in search_root.iterdir()
                 if item.is_dir() and (item / "ComfyUI").is_dir() and (item / "python" / "python.exe").is_file()
-            )
+            ]
         except OSError:
             continue
-    return sorted(candidates, key=lambda item: item.name.lower())[0] if candidates else conventional
+        if candidates:
+            return sorted(candidates, key=lambda item: item.name.lower())[0]
+        if search_root == parent:
+            for candidate in desktop_candidates:
+                if (candidate / "ComfyUI").is_dir() and (candidate / "python" / "python.exe").is_file():
+                    return candidate
+    return conventional
 
 
 def _discover_unity_project(parent: Path) -> Path:
@@ -53,7 +62,11 @@ def _discover_unity_project(parent: Path) -> Path:
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=PROJECT_ROOT / ".env",
+        # Only the process-global settings object loads the checkout .env.
+        # Ad-hoc Settings(...) instances (tests, migrations, diagnostics) must
+        # derive paths from their explicit assetclaw_root instead of silently
+        # inheriting machine-specific paths from the real deployment.
+        env_file=None,
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -308,4 +321,4 @@ class Settings(BaseSettings):
             directory.mkdir(parents=True, exist_ok=True)
 
 
-settings = Settings()
+settings = Settings(_env_file=PROJECT_ROOT / ".env")
