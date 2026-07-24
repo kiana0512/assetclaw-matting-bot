@@ -10,5 +10,11 @@ if (Test-Path -LiteralPath $pidFile) {
     Write-Host "cloudflared PID $value stopped."
   }
 }
-Remove-Item -LiteralPath $pidFile,(Join-Path $ProjectRoot "logs\public_webui_url.txt"),(Join-Path $ProjectRoot "logs\public_webui_access.txt") -Force -ErrorAction SilentlyContinue
-Write-Host "Public tunnel stopped. Local backend and WebUI were left running."
+
+Remove-Item -LiteralPath `
+  $pidFile, `
+  (Join-Path $ProjectRoot "logs\public_webui_url.txt"), `
+  (Join-Path $ProjectRoot "logs\public_webui_access.txt") `
+  -Force -ErrorAction SilentlyContinue
+
+Write-Host "Public tunnel stopped. Password-free local WebUI and backend were left running."

@@ -1,7 +1,5 @@
 param(
-  [string]$LocalUrl = "http://127.0.0.1:5180",
-  [string]$Username = "assetclaw",
-  [string]$Password = ""
+  [string]$LocalUrl = "http://127.0.0.1:5180"
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,12 +13,7 @@ $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $ProjectRoot
 New-Item -ItemType Directory -Force -Path "logs" | Out-Null
 
-if (-not $Password) {
-  $Password = [Guid]::NewGuid().ToString("N").Substring(0, 16)
-}
-$basicToken = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${Username}:${Password}"))
-$authHeaders = @{ Authorization = "Basic $basicToken" }
-
+$localUri = [Uri]$LocalUrl
 $TunnelOutLog = Join-Path $ProjectRoot "logs\cloudflared.out.log"
 $TunnelErrLog = Join-Path $ProjectRoot "logs\cloudflared.err.log"
 $TunnelPidFile = Join-Path $ProjectRoot "logs\cloudflared.pid"
@@ -50,23 +43,6 @@ function Stop-PidFromFile([string]$Path) {
   }
 }
 
-function Test-WebUi {
-  try {
-    Invoke-WebRequest $LocalUrl -Headers $authHeaders -UseBasicParsing -TimeoutSec 3 | Out-Null
-    return $true
-  } catch {
-    return $false
-  }
-}
-
-function Wait-WebUi {
-  for ($i = 0; $i -lt 30; $i++) {
-    if (Test-WebUi) { return $true }
-    Start-Sleep -Seconds 1
-  }
-  return $false
-}
-
 function Get-ListenerProcessIds([int]$Port) {
   $ids = @(
     Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
@@ -83,51 +59,72 @@ function Get-ListenerProcessIds([int]$Port) {
   return $ids
 }
 
-function Test-WebUiAuthGuard {
+function Stop-Listener([int]$Port) {
+  Get-ListenerProcessIds $Port |
+    ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+}
+
+function Get-WebUiState {
   try {
     Invoke-WebRequest $LocalUrl -UseBasicParsing -TimeoutSec 3 | Out-Null
-    return $false
+    return "ready"
   } catch {
-    return ($_.Exception.Response.StatusCode.value__ -eq 401)
+    if ($_.Exception.Response -and $_.Exception.Response.StatusCode.value__ -eq 401) {
+      return "auth"
+    }
+    return "down"
   }
+}
+
+function Wait-WebUi {
+  for ($i = 0; $i -lt 30; $i++) {
+    if ((Get-WebUiState) -eq "ready") { return $true }
+    Start-Sleep -Seconds 1
+  }
+  return $false
 }
 
 function Find-PublicUrl {
   foreach ($path in @($TunnelOutLog, $TunnelErrLog)) {
     if (-not (Test-Path -LiteralPath $path)) { continue }
-    $match = [regex]::Matches((Get-Content -LiteralPath $path -Raw -ErrorAction SilentlyContinue), "https://[a-z0-9-]+\.trycloudflare\.com")
+    $content = Get-Content -LiteralPath $path -Raw -ErrorAction SilentlyContinue
+    if ([string]::IsNullOrWhiteSpace([string]$content)) { continue }
+    $match = [regex]::Matches([string]$content, "https://[a-z0-9-]+\.trycloudflare\.com")
     if ($match.Count -gt 0) { return $match[$match.Count - 1].Value }
   }
   return $null
 }
 
-Write-Host "Restarting the WebUI with password protection..."
-$port = ([Uri]$LocalUrl).Port
-Get-ListenerProcessIds $port |
-  ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
-
-$env:ASSETCLAW_WEBUI_HOST = "127.0.0.1"
-$env:ASSETCLAW_WEBUI_PORT = [string]$port
-$env:ASSETCLAW_WEBUI_SHARE_USERNAME = $Username
-$env:ASSETCLAW_WEBUI_SHARE_PASSWORD = $Password
-Start-Process -FilePath $PowerShellExe `
-  -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File scripts\start_external_webui.ps1" `
-  -RedirectStandardOutput "logs\webui_console.out.log" `
-  -RedirectStandardError "logs\webui_console.err.log" `
-  -WindowStyle Hidden
-
-if (-not (Wait-WebUi)) {
-  throw "Password-protected WebUI did not become ready at $LocalUrl. Check logs\webui_console.err.log."
+# An older version restarted 5180 with Basic Auth. Repair only that WebUI
+# listener; the Gateway on 7865 and all workers are outside this script.
+$state = Get-WebUiState
+if ($state -eq "auth") {
+  Write-Host "Removing the old WebUI login prompt..."
+  Stop-Listener $localUri.Port
+  $state = "down"
 }
-if (-not (Test-WebUiAuthGuard)) {
-  throw "WebUI authentication guard is not active. Refusing to expose an unprotected public URL."
+if ($state -eq "down") {
+  Write-Host "Starting the password-free WebUI..."
+  $env:ASSETCLAW_WEBUI_HOST = "127.0.0.1"
+  $env:ASSETCLAW_WEBUI_PORT = [string]$localUri.Port
+  Remove-Item Env:ASSETCLAW_WEBUI_SHARE_USERNAME -ErrorAction SilentlyContinue
+  Remove-Item Env:ASSETCLAW_WEBUI_SHARE_PASSWORD -ErrorAction SilentlyContinue
+  Start-Process -FilePath $PowerShellExe `
+    -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "start_external_webui.ps1")) `
+    -WorkingDirectory $ProjectRoot `
+    -RedirectStandardOutput (Join-Path $ProjectRoot "logs\webui_console.out.log") `
+    -RedirectStandardError (Join-Path $ProjectRoot "logs\webui_console.err.log") `
+    -WindowStyle Hidden | Out-Null
+}
+if (-not (Wait-WebUi)) {
+  throw "WebUI did not become ready at $LocalUrl. Check logs\webui_console.err.log."
 }
 
 $cloudflared = Get-CloudflaredExe
 Stop-PidFromFile $TunnelPidFile
 Remove-Item -LiteralPath $TunnelOutLog,$TunnelErrLog,$PublicUrlFile,$AccessFile -Force -ErrorAction SilentlyContinue
 
-Write-Host "Starting Cloudflare quick tunnel..."
+Write-Host "Starting password-free Cloudflare quick tunnel..."
 $tunnel = Start-Process -FilePath $cloudflared `
   -ArgumentList @("tunnel", "--url", $LocalUrl, "--no-autoupdate") `
   -RedirectStandardOutput $TunnelOutLog `
@@ -148,17 +145,17 @@ if (-not $publicUrl) {
 
 @(
   "URL=$publicUrl",
-  "USERNAME=$Username",
-  "PASSWORD=$Password"
+  "LOCAL_URL=$LocalUrl",
+  "PASSWORD=disabled"
 ) | Set-Content -LiteralPath $AccessFile -Encoding UTF8
 Set-Content -LiteralPath $PublicUrlFile -Value $publicUrl -Encoding ASCII
 try { Set-Clipboard -Value $publicUrl } catch {}
+try { Start-Process $publicUrl } catch { Start-Process $LocalUrl }
 
 Write-Host ""
-Write-Host "================ PUBLIC WEBUI READY ================" -ForegroundColor Green
-Write-Host "访问地址:  $publicUrl"
-Write-Host "用户名:    $Username"
-Write-Host "访问密码:  $Password"
-Write-Host "凭据文件:  $AccessFile"
-Write-Host "停止隧道:  双击 stop_public_webui.bat"
-Write-Host "===================================================="
+Write-Host "============= PASSWORD-FREE WEBUI READY =============" -ForegroundColor Green
+Write-Host "Local URL (no password): $LocalUrl"
+Write-Host "Public URL (no password): $publicUrl"
+Write-Host "The public URL was copied to the clipboard. Open it directly."
+Write-Host "To stop the public tunnel, run stop_public_webui.bat"
+Write-Host "====================================================="
