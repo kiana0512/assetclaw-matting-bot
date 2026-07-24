@@ -461,7 +461,7 @@ def _worker(run_id: str) -> None:
             matte_size = _workflow_output_size(row["workflow_path"])
             size_line = f"本次抠图输出尺寸：{matte_size}" if matte_size else "本次抠图输出尺寸：未能从 workflow 自动识别"
             _notify(run_id, f"动画自动化流程：抽帧完成，开始 ComfyUI 抠图\n已登记视频：{status.get('manifest_count', 0)} 条\n{size_line}\n工作流：{row['workflow_path']}")
-            for route in comfy_routes:
+            for route_index, route in enumerate(comfy_routes):
                 frames_dir = route / "frames" if (route / "frames").is_dir() else Path(row["frame_output_dir"])
                 matte_dir = route / "matte" if (route / "matte").parent.exists() else Path(row["matte_output_dir"])
                 if not any(frames_dir.rglob("*.png")):
@@ -477,12 +477,13 @@ def _worker(run_id: str) -> None:
                     skip_existing=True,
                     priority_characters=opts.get("priority_characters") or None,
                     notify_interval_seconds=opts["notify_interval_seconds"],
+                    external_batch_id=f"assetclaw:{run_id}:route:{route_index}:matting:g1",
                 )
                 _update_ids(run_id, comfyui_run_id=str(comfy["run_id"]), current_step="comfyui")
                 if not _wait_until_done(lambda rid=str(comfy["run_id"]): comfy_status(rid, include_gpu=False), run_id):
                     return
                 status = comfy_status(str(comfy["run_id"]), include_gpu=False)
-                if status.get("status") not in {"DONE", "DONE_WITH_ERRORS"}:
+                if status.get("status") != "DONE":
                     _fail(run_id, f"抠图失败：{status.get('error') or status.get('status')}")
                     return
                 _notify(
@@ -523,7 +524,7 @@ def _worker(run_id: str) -> None:
             if not _wait_until_done(lambda rid=str(cherry["run_id"]): cherry_status(rid, include_gpu=False), run_id):
                 return
             status = cherry_status(str(cherry["run_id"]), include_gpu=False)
-            if status.get("status") not in {"DONE", "DONE_WITH_ERRORS"}:
+            if status.get("status") != "DONE":
                 _fail(run_id, f"平滑失败：{status.get('error') or status.get('status')}")
                 return
             _notify(

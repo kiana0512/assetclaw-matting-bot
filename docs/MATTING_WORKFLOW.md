@@ -1,5 +1,9 @@
 # Matting / ComfyUI Workflow
 
+> 本机 4070Ti 与 GPU Control 集群的混合抠图边界、请求/返回字段、任务隔离和联调验收，见
+> [GPU_CONTROL_MATTING_HANDOFF_V2_IMPLEMENTATION.md](GPU_CONTROL_MATTING_HANDOFF_V2_IMPLEMENTATION.md)。远端只负责 ImageClip 抠图，其余步骤仍由动画管家执行。
+> 调度前容量握手、双端持久化和故障恢复约定见 [GPU_CONTROL_SCHEDULER_HANDSHAKE_V2_1.md](GPU_CONTROL_SCHEDULER_HANDSHAKE_V2_1.md)。
+
 目标流程：用户选择 `workflow_path`，指定 `input_dir`、`output_dir`，机器人把输入目录中的图片逐张提交给 ComfyUI，并能从飞书查询当前管线、进度、ETA、输入输出目录和 GPU 状态。
 
 当前 ComfyUI 由秋叶启动器管理：

@@ -122,6 +122,9 @@ def run_start(
     priority_characters: list[str] | None = None,
     notify_interval_seconds: int = 300,
     strict_frame_identity: bool = False,
+    backend: str | None = None,
+    external_batch_id: str | None = None,
+    cluster_parameters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from assetclaw_matting.config import settings
     from assetclaw_matting.comfyui.client import comfyui_client
@@ -157,6 +160,8 @@ def run_start(
     created_at = _now()
     prompt_map: list[dict[str, str]] = []
     ctx = get_runtime_context()
+    from assetclaw_matting.services.hybrid_matting_router import matting_route_lock, select_matting_backend
+
     options = {
         "input_node_id": input_node_id,
         "input_name": input_name,
@@ -170,36 +175,53 @@ def run_start(
         "chat_id": (ctx.get("chat_id") or "") if ctx.get("channel") == "feishu" else "",
         "archived": False,
         "pipeline_notice": pipeline_notice,
+        "external_batch_id": external_batch_id or f"assetclaw:{run_id}:matting:g1",
+        "cluster_parameters": dict(cluster_parameters or {}),
     }
-    if not settings.comfyui_fake_mode:
-        comfyui_client.check_health()
 
     status = "DONE" if not files else "RUNNING"
-    with get_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO comfyui_runs
-            (id, status, workflow_path, input_dir, output_dir, total, files_json, prompt_ids_json, options_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                run_id,
-                status,
-                str(workflow_file),
-                str(src),
-                str(dst),
-                len(files),
-                json.dumps([str(p) for p in files], ensure_ascii=False),
-                json.dumps([], ensure_ascii=False),
-                json.dumps(options, ensure_ascii=False),
-                created_at,
-                created_at,
-            ),
+    with matting_route_lock():
+        selected_backend, selection_reason, backend_handshake = select_matting_backend(
+            len(files),
+            requested=backend,
+            include_handshake=True,
         )
+        options["matting_backend"] = selected_backend
+        options["backend_selection_reason"] = selection_reason
+        options["backend_handshake"] = backend_handshake
+        with get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO comfyui_runs
+                (id, status, workflow_path, input_dir, output_dir, total, files_json, prompt_ids_json, options_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    status,
+                    str(workflow_file),
+                    str(src),
+                    str(dst),
+                    len(files),
+                    json.dumps([str(p) for p in files], ensure_ascii=False),
+                    json.dumps([], ensure_ascii=False),
+                    json.dumps(options, ensure_ascii=False),
+                    created_at,
+                    created_at,
+                ),
+            )
+
+    if selected_backend == "local" and not settings.comfyui_fake_mode:
+        try:
+            comfyui_client.check_health()
+        except Exception:
+            _set_run_status(run_id, "FAILED")
+            raise
 
     if options.get("chat_id") and files:
         notice = f"\n{pipeline_notice}" if pipeline_notice else ""
-        _notify(run_id, f"ComfyUI 批量任务已启动：{len(files)} 张{notice}\n输入：{src}\n输出：{dst}")
+        backend_label = "本机 4070Ti" if selected_backend == "local" else "GPU Control 集群"
+        _notify(run_id, f"抠图批量任务已启动：{len(files)} 张，后端：{backend_label}{notice}\n输入：{src}\n输出：{dst}")
         _start_progress_monitor(run_id)
     if files:
         _start_run_worker(run_id)
@@ -219,6 +241,9 @@ def run_start(
         "recursive": recursive,
         "preserve_structure": preserve_structure,
         "skip_existing": skip_existing,
+        "backend": selected_backend,
+        "backend_selection_reason": selection_reason,
+        "external_batch_id": options["external_batch_id"],
     }
 
 
@@ -237,10 +262,18 @@ def run_status(run_id: str | None = None, include_gpu: bool = True) -> dict[str,
     completed = 0
     failed = 0
     options = json.loads(row["options_json"] or "{}")
+    backend = str(options.get("matting_backend") or "local")
+    remote_state = dict(options.get("gpu_control") or {})
     prompt_map = options.get("prompt_map") or []
-    completed = sum(1 for item in prompt_map if not item.get("error") and Path(str(item.get("dst_path") or "")).exists())
-    failed = sum(1 for item in prompt_map if item.get("error"))
+    if backend == "gpu_control" and row["status"] not in {"DONE", "DONE_WITH_ERRORS"}:
+        counts = dict(remote_state.get("counts") or {})
+        completed = int(counts.get("succeeded") or 0)
+        failed = int(counts.get("failed") or 0)
+    else:
+        completed = sum(1 for item in prompt_map if not item.get("error") and Path(str(item.get("dst_path") or "")).exists())
+        failed = sum(1 for item in prompt_map if item.get("error"))
     error_items = [item for item in prompt_map if item.get("error")]
+    remote_error = remote_state.get("client_error") or remote_state.get("error") or remote_state.get("poll_error") or ""
     total = int(row["total"] or len(files))
     running = max(0, total - completed - failed)
     eta_seconds = _eta_from_prompt_map(prompt_map, total, row["created_at"])
@@ -248,13 +281,13 @@ def run_status(run_id: str | None = None, include_gpu: bool = True) -> dict[str,
     # Prompt success only means ComfyUI executed the graph. Completion requires
     # a validated transparent PNG to exist at dst_path, otherwise a parent flow
     # can enter post-processing while this worker is still rejecting/retrying.
-    if total and completed + failed >= total:
+    if backend == "local" and total and completed + failed >= total:
         if failed:
             status_text = "FAILED" if completed == 0 else "DONE_WITH_ERRORS"
         elif completed == total:
             status_text = "DONE"
     queue = {}
-    if not settings.comfyui_fake_mode:
+    if backend == "local" and not settings.comfyui_fake_mode:
         try:
             queue = comfyui_client.get_queue()
         except Exception as exc:
@@ -267,6 +300,13 @@ def run_status(run_id: str | None = None, include_gpu: bool = True) -> dict[str,
         "ok": True,
         "run_id": row["id"],
         "status": status_text,
+        "backend": backend,
+        "backend_selection_reason": options.get("backend_selection_reason") or "",
+        "backend_handshake": options.get("backend_handshake") or {},
+        "external_batch_id": options.get("external_batch_id") or "",
+        "remote_batch_id": remote_state.get("batch_id") or "",
+        "remote_status": remote_state.get("status") or "",
+        "node_distribution": remote_state.get("node_distribution") or {},
         "fake_mode": settings.comfyui_fake_mode,
         "workflow_path": row["workflow_path"],
         "input_dir": row["input_dir"],
@@ -275,18 +315,30 @@ def run_status(run_id: str | None = None, include_gpu: bool = True) -> dict[str,
         "completed": completed,
         "failed": failed,
         "running_or_pending": running,
-        "progress_percent": round((completed + failed) / total * 100, 1) if total else 0,
+        "progress_percent": (
+            round(float(remote_state.get("progress") or 0), 1)
+            if backend == "gpu_control" and remote_state.get("progress") is not None
+            else (round((completed + failed) / total * 100, 1) if total else 0)
+        ),
         "eta_seconds": eta_seconds,
         "queue_running": len(queue.get("queue_running") or []),
         "queue_pending": len(queue.get("queue_pending") or []),
         "prompt_ids": prompt_ids[:20],
         "last_completed": _last_completed_name(prompt_map),
         "last_completed_detail": _path_detail(_last_completed_rel_path(prompt_map)),
-        "last_error": _last_error_summary(error_items),
+        "last_error": str(remote_error) if backend == "gpu_control" and remote_error else _last_error_summary(error_items),
         "error_items": _error_item_summaries(error_items[:5]),
     }
     if include_gpu:
-        result["gpu"] = gpu_status()
+        result["gpu"] = (
+            {
+                "source": "gpu_control",
+                "batch_id": remote_state.get("batch_id") or "",
+                "node_distribution": remote_state.get("node_distribution") or {},
+            }
+            if backend == "gpu_control"
+            else gpu_status()
+        )
     return result
 
 
@@ -301,6 +353,9 @@ def run_sync_outputs(run_id: str, overwrite: bool = True) -> dict[str, Any]:
     prompt_ids = json.loads(row["prompt_ids_json"] or "[]")
     options = json.loads(row["options_json"] or "{}")
     prompt_map = options.get("prompt_map") or []
+    if str(options.get("matting_backend") or "local") == "gpu_control":
+        saved = [str(item.get("dst_path")) for item in prompt_map if Path(str(item.get("dst_path") or "")).is_file()]
+        return {"ok": True, "run_id": run_id, "output_dir": str(output_dir), "count": len(saved), "items": saved[:50]}
     prompt_targets = {item.get("prompt_id"): item for item in prompt_map if item.get("prompt_id")}
     workflow_file = Path(row["workflow_path"])
     final_save_image_node_id = _final_save_image_node_id(json.loads(workflow_file.read_text(encoding="utf-8")))
@@ -331,6 +386,14 @@ def run_pause(run_id: str | None = None) -> dict[str, Any]:
         return {"ok": False, "error": "comfyui run not found"}
     if row["status"] in {"DONE", "DONE_WITH_ERRORS", "FAILED", "CANCELED"}:
         return {"ok": True, "run_id": row["id"], "status": row["status"], "message": "任务已经结束，不能暂停。"}
+    options = json.loads(row["options_json"] or "{}")
+    if str(options.get("matting_backend") or "local") == "gpu_control":
+        return {
+            "ok": False,
+            "run_id": row["id"],
+            "status": row["status"],
+            "error": "GPU Control batch does not support pause; cancel it instead",
+        }
     _set_run_status(row["id"], "PAUSED")
     _notify(row["id"], f"ComfyUI 任务已暂停：{row['id']}")
     return {"ok": True, "run_id": row["id"], "status": "PAUSED"}
@@ -345,7 +408,9 @@ def run_resume(run_id: str | None = None) -> dict[str, Any]:
         return {"ok": False, "error": "comfyui run not found"}
     if row["status"] in {"DONE", "DONE_WITH_ERRORS", "CANCELED"}:
         return {"ok": True, "run_id": row["id"], "status": row["status"], "message": "任务已经结束，不能继续。"}
-    if row["status"] == "RUNNING" and not settings.comfyui_fake_mode:
+    options = json.loads(row["options_json"] or "{}")
+    backend = str(options.get("matting_backend") or "local")
+    if row["status"] == "RUNNING" and backend == "local" and not settings.comfyui_fake_mode:
         try:
             queue = comfyui_client.get_queue()
             queue_count = len(queue.get("queue_running") or []) + len(queue.get("queue_pending") or [])
@@ -371,8 +436,24 @@ def run_cancel(run_id: str | None = None, interrupt_current: bool = True, notify
         return {"ok": False, "error": "comfyui run not found"}
     _set_run_status(row["id"], "CANCELED")
     prompt_ids = json.loads(row["prompt_ids_json"] or "[]")
+    options = json.loads(row["options_json"] or "{}")
+    backend = str(options.get("matting_backend") or "local")
     queue_error = ""
-    if not settings.comfyui_fake_mode:
+    if backend == "gpu_control":
+        remote_state = dict(options.get("gpu_control") or {})
+        remote_batch_id = str(remote_state.get("batch_id") or "")
+        if remote_batch_id:
+            try:
+                from assetclaw_matting.services.gpu_control_batch import GpuControlBatchClient
+
+                GpuControlBatchClient().cancel_batch(
+                    remote_batch_id,
+                    idempotency_key=f"{options.get('external_batch_id') or row['id']}:cancel",
+                    request_id=f"{row['id'].lower()}-cancel",
+                )
+            except Exception as exc:
+                queue_error = str(exc)
+    elif not settings.comfyui_fake_mode:
         try:
             if prompt_ids:
                 comfyui_client.delete_from_queue(prompt_ids)
@@ -382,7 +463,7 @@ def run_cancel(run_id: str | None = None, interrupt_current: bool = True, notify
             queue_error = str(exc)
     if notify:
         _notify(row["id"], f"ComfyUI 任务已终止：{row['id']}")
-    return {"ok": True, "run_id": row["id"], "status": "CANCELED", "queue_error": queue_error}
+    return {"ok": True, "run_id": row["id"], "status": "CANCELED", "backend": backend, "queue_error": queue_error}
 
 
 def run_preview(
@@ -436,11 +517,21 @@ def run_list(limit: int = 10, include_archived: bool = False, include_finished: 
         if not include_finished and row["status"] in {"DONE", "DONE_WITH_ERRORS", "FAILED", "CANCELED"}:
             continue
         prompt_map = options.get("prompt_map") or []
-        completed = sum(1 for item in prompt_map if not item.get("error") and Path(str(item.get("dst_path") or "")).exists())
-        failed = sum(1 for item in prompt_map if item.get("error"))
+        backend = str(options.get("matting_backend") or "local")
+        remote_state = dict(options.get("gpu_control") or {})
+        if backend == "gpu_control" and row["status"] not in {"DONE", "DONE_WITH_ERRORS"}:
+            counts = dict(remote_state.get("counts") or {})
+            completed = int(counts.get("succeeded") or 0)
+            failed = int(counts.get("failed") or 0)
+        else:
+            completed = sum(1 for item in prompt_map if not item.get("error") and Path(str(item.get("dst_path") or "")).exists())
+            failed = sum(1 for item in prompt_map if item.get("error"))
         items.append({
             "run_id": row["id"],
             "status": row["status"],
+            "backend": backend,
+            "remote_batch_id": remote_state.get("batch_id") or "",
+            "remote_status": remote_state.get("status") or "",
             "workflow_name": Path(row["workflow_path"]).name,
             "workflow_path": row["workflow_path"],
             "input_dir": row["input_dir"],
@@ -493,6 +584,8 @@ def run_update(
         return {"ok": False, "error": "comfyui run not found"}
     options = json.loads(row["options_json"] or "{}")
     prompt_map = options.get("prompt_map") or []
+    if str(options.get("matting_backend") or "local") == "gpu_control" and (options.get("gpu_control") or {}).get("batch_id"):
+        raise ValueError("GPU Control batch has already been submitted; cancel it and create a new run instead")
     if prompt_map and row["status"] not in {"PAUSED", "QUEUED"}:
         raise ValueError("任务已经开始产出，先暂停或终止后再改参数。")
 
@@ -567,9 +660,198 @@ def preview_run_start_confirmation(arguments: dict[str, Any], confirmation_id: s
 def _start_run_worker(run_id: str) -> None:
     if run_id in _WORKER_RUNS:
         return
+    row = _get_run(run_id)
+    if not row:
+        return
+    options = json.loads(row["options_json"] or "{}")
+    worker = _run_gpu_control_worker if str(options.get("matting_backend") or "local") == "gpu_control" else _run_worker
     _WORKER_RUNS.add(run_id)
-    thread = threading.Thread(target=_run_worker, args=(run_id,), daemon=True)
+    thread = threading.Thread(target=worker, args=(run_id,), daemon=True)
     thread.start()
+
+
+def _run_gpu_control_worker(run_id: str) -> None:
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.services.gpu_control_batch import (
+        GpuControlBatchClient,
+        GpuControlError,
+        TERMINAL_BATCH_STATUSES,
+        build_input_batch,
+        compact_remote_state,
+        result_artifact,
+        verify_and_publish_result,
+    )
+
+    try:
+        row = _get_run(run_id)
+        if not row:
+            return
+        options = json.loads(row["options_json"] or "{}")
+        files = [Path(path) for path in json.loads(row["files_json"] or "[]")]
+        src = Path(row["input_dir"])
+        dst = Path(row["output_dir"])
+        prompt_ids = json.loads(row["prompt_ids_json"] or "[]")
+        workspace = Path(settings.storage_dir) / "gpu_control_batches" / run_id
+        prepared = build_input_batch(
+            run_id,
+            src,
+            files,
+            workspace,
+            preserve_structure=bool(options.get("preserve_structure", True)),
+            external_batch_id=str(options.get("external_batch_id") or "") or None,
+            parameters=dict(options.get("cluster_parameters") or {}),
+        )
+        remote_state = dict(options.get("gpu_control") or {})
+        remote_state.update(
+            {
+                "external_batch_id": prepared["external_batch_id"],
+                "idempotency_key": prepared["idempotency_key"],
+                "manifest_sha256": prepared["manifest_sha256"],
+                "archive_path": prepared["archive_path"],
+                "manifest_path": prepared["manifest_path"],
+                "status": str(remote_state.get("status") or "PREPARING"),
+            }
+        )
+        options["gpu_control"] = remote_state
+        _save_run_progress(run_id, prompt_ids, options)
+        client = GpuControlBatchClient()
+        batch_id = str(remote_state.get("batch_id") or "")
+        if not batch_id:
+            latest = _get_run(run_id)
+            if not latest or latest["status"] == "CANCELED":
+                return
+            created = client.create_batch(
+                Path(prepared["archive_path"]),
+                prepared["manifest"],
+                idempotency_key=prepared["idempotency_key"],
+                request_id=f"{run_id.lower()}-create",
+            )
+            returned_external_id = str(created.get("external_batch_id") or "")
+            if returned_external_id and returned_external_id != prepared["external_batch_id"]:
+                raise GpuControlError("GPU Control returned a mismatched external_batch_id")
+            remote_state.update(compact_remote_state(created))
+            remote_state["create_response_meta"] = dict(created.get("_response_meta") or {})
+            batch_id = str(remote_state.get("batch_id") or "")
+            if not batch_id:
+                raise GpuControlError("GPU Control create response has no batch_id")
+            options["gpu_control"] = remote_state
+            _save_run_progress(run_id, prompt_ids, options)
+            latest = _get_run(run_id)
+            if not latest or latest["status"] == "CANCELED":
+                try:
+                    client.cancel_batch(
+                        batch_id,
+                        idempotency_key=f"{prepared['idempotency_key']}:cancel",
+                        request_id=f"{run_id.lower()}-cancel-after-create",
+                    )
+                except Exception:
+                    pass
+                return
+
+        started = time.monotonic()
+        consecutive_poll_errors = 0
+        while True:
+            latest = _get_run(run_id)
+            if not latest or latest["status"] == "CANCELED":
+                return
+            if time.monotonic() - started > int(settings.gpu_control_execution_timeout_seconds or 86400):
+                try:
+                    client.cancel_batch(
+                        batch_id,
+                        idempotency_key=f"{prepared['idempotency_key']}:timeout-cancel",
+                        request_id=f"{run_id.lower()}-timeout-cancel",
+                    )
+                except Exception:
+                    pass
+                raise GpuControlError("GPU Control batch exceeded the configured execution timeout")
+            try:
+                payload = client.get_batch(batch_id, request_id=f"{run_id.lower()}-poll")
+                consecutive_poll_errors = 0
+            except Exception as exc:
+                consecutive_poll_errors += 1
+                remote_state["poll_error"] = str(exc)
+                remote_state["poll_error_count"] = consecutive_poll_errors
+                options["gpu_control"] = remote_state
+                _save_run_progress(run_id, prompt_ids, options)
+                poll_error_limit = max(3, int(settings.gpu_control_poll_error_limit or 20))
+                if consecutive_poll_errors >= poll_error_limit:
+                    raise GpuControlError(f"GPU Control status polling repeatedly failed: {exc}") from exc
+                base_delay = max(1, int(settings.gpu_control_poll_interval_seconds or 3))
+                time.sleep(min(60, base_delay * (2 ** min(consecutive_poll_errors - 1, 5))))
+                continue
+
+            returned_batch_id = str(payload.get("batch_id") or "")
+            returned_external_id = str(payload.get("external_batch_id") or "")
+            if returned_batch_id and returned_batch_id != batch_id:
+                raise GpuControlError("GPU Control status returned a mismatched batch_id")
+            if returned_external_id and returned_external_id != prepared["external_batch_id"]:
+                raise GpuControlError("GPU Control status returned a mismatched external_batch_id")
+            remote_state.update(compact_remote_state(payload))
+            remote_state.pop("poll_error", None)
+            remote_state.pop("poll_error_count", None)
+            options["gpu_control"] = remote_state
+            _save_run_progress(run_id, prompt_ids, options)
+            remote_status = str(remote_state.get("status") or "").upper()
+            if remote_status not in TERMINAL_BATCH_STATUSES:
+                time.sleep(max(1, int(settings.gpu_control_poll_interval_seconds or 3)))
+                continue
+            if remote_status == "CANCELLED":
+                _set_run_status(run_id, "CANCELED")
+                return
+            if remote_status != "SUCCEEDED":
+                raise GpuControlError(
+                    f"GPU Control batch ended as {remote_status}: {remote_state.get('error') or 'no error detail'}"
+                )
+
+            counts = dict(remote_state.get("counts") or {})
+            if int(counts.get("total") or -1) != len(files) or int(counts.get("succeeded") or -1) != len(files):
+                raise GpuControlError(f"GPU Control SUCCEEDED counts do not match the submitted total: {counts}")
+            if int(counts.get("failed") or 0) != 0:
+                raise GpuControlError(f"GPU Control SUCCEEDED response contains failed frames: {counts}")
+            artifact = result_artifact(payload)
+            result_zip = workspace / "result.zip"
+            download = client.download_artifact(
+                artifact,
+                result_zip,
+                request_id=f"{run_id.lower()}-download",
+            )
+            latest = _get_run(run_id)
+            if not latest or latest["status"] == "CANCELED":
+                return
+            published = verify_and_publish_result(
+                result_zip,
+                str(artifact.get("sha256") or download["sha256"]),
+                prepared,
+                dst,
+                run_id,
+                strict_frame_identity=bool(options.get("strict_frame_identity")),
+                preserve_existing=bool(options.get("skip_existing")),
+                expected_batch_id=batch_id,
+                expected_external_batch_id=prepared["external_batch_id"],
+            )
+            completed_at = _now()
+            options["prompt_map"] = [{**item, "completed_at": completed_at} for item in published]
+            remote_state["result_archive_path"] = str(result_zip)
+            remote_state["result_archive_sha256"] = download["sha256"]
+            remote_state["result_download"] = download
+            remote_state["published_at"] = completed_at
+            options["gpu_control"] = remote_state
+            _save_run_progress(run_id, prompt_ids, options)
+            _set_run_status(run_id, "DONE")
+            return
+    except Exception as exc:
+        row = _get_run(run_id)
+        if row and row["status"] != "CANCELED":
+            options = json.loads(row["options_json"] or "{}")
+            remote_state = dict(options.get("gpu_control") or {})
+            remote_state["client_error"] = str(exc)
+            remote_state["failed_at"] = _now()
+            options["gpu_control"] = remote_state
+            _save_run_progress(run_id, json.loads(row["prompt_ids_json"] or "[]"), options)
+            _set_run_status(run_id, "FAILED")
+            _notify(run_id, f"GPU Control 抠图批任务失败：{exc}")
+    finally:
+        _WORKER_RUNS.discard(run_id)
 
 
 def _run_worker(run_id: str) -> None:
@@ -756,7 +1038,7 @@ def _monitor_run(run_id: str) -> None:
                 last_status = status_text
             if status.get("status") in {"DONE", "DONE_WITH_ERRORS", "FAILED"}:
                 synced = 0
-                if not status.get("fake_mode") and status.get("completed", 0):
+                if status.get("backend") == "local" and not status.get("fake_mode") and status.get("completed", 0):
                     try:
                         synced_result = run_sync_outputs(run_id)
                         synced = int(synced_result.get("count") or 0)

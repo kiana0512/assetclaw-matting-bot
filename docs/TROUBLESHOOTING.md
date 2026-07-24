@@ -119,6 +119,22 @@ python -c "from assetclaw_matting.skills.cherry_skills import run_start; run_sta
 
 3. 跑完必须确认 `status=DONE`、`completed=total`，再统计输出 PNG 数量和抽样尺寸。
 
+## Cherry 报 `html loaded 0 files`
+
+旧版无头浏览器适配层在 `DOM.setFileInputFiles` 已自动触发原生 `change` 后，又人工触发了一次。HTML 第一次已载入文件并清空 input，第二次事件会用空列表覆盖 `collectedFiles`，最终显示 `loaded 0 files`。
+
+当前实现不再发送重复事件，并等待 HTML 中的文件数达到预期值。每个 Cherry 序列组使用全新的隔离浏览器会话，瞬时失败会自动重试最多 3 次；只有全部尝试失败才将父任务标记失败。视频任务可以复用已通过完整性校验的 matte 帧，从 Cherry 阶段恢复，无需重新抽帧或抠图。
+
+2026-07-24 已对 `VID_8742D1526B59` 做真实恢复：新 Cherry 子任务 `CHERRY_6C509BB7C67B` 完成 54/54，ZIP CRC 校验通过并发送到原飞书会话；Drive file token 为 `WPzcbv4uJo9rqjxcIHvcYYx6n2b`。
+
+## WebUI 把 54 帧显示成 54/108
+
+原因是父任务的 `children.cherry_runs` 同时保留了旧失败尝试和新恢复尝试。该字段是审计历史，不能直接求和。WebUI 现在只汇总父任务当前声明的 `cherry_run_ids`；旧失败记录仍可在详情查看，但不再进入进度分母。打包恢复阶段 `resume_zip` / `resume_delivery` 也会直接显示“打包与发送”，不会继续显示旧 Cherry 进度。
+
+## GPU Control 瞬断或动画管家重启
+
+路由前先调用 `/health/ready` 和可选 `/api/v1/scheduler/capacity`。轮询瞬断使用指数退避并持久化错误次数，默认连续 20 次失败后才停止；动画管家进程重启后使用已保存的 `batch_id` 和幂等键重新挂接原批次，不取消、不重传、不新建混合批次。详细协议见 [GPU_CONTROL_SCHEDULER_HANDSHAKE_V2_1.md](GPU_CONTROL_SCHEDULER_HANDSHAKE_V2_1.md)。
+
 ## Gateway 启动失败 / 端口占用
 
 ```powershell

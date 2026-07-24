@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { defineConfig, loadEnv } from "vite";
@@ -331,16 +332,50 @@ function localAnimationFlowApiPlugin() {
   };
 }
 
+function basicAuthPlugin(username, password) {
+  return {
+    name: "assetclaw-webui-basic-auth",
+    configureServer(server) {
+      if (!password) return;
+      const expected = Buffer.from(`${username}:${password}`, "utf8");
+      server.middlewares.use((req, res, next) => {
+        const raw = String(req.headers.authorization || "");
+        let actual = Buffer.alloc(0);
+        if (raw.startsWith("Basic ")) {
+          try {
+            actual = Buffer.from(raw.slice(6), "base64");
+          } catch {
+            actual = Buffer.alloc(0);
+          }
+        }
+        const authorized = actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+        if (authorized) {
+          next();
+          return;
+        }
+        res.statusCode = 401;
+        res.setHeader("WWW-Authenticate", 'Basic realm="AssetClaw LAN WebUI", charset="UTF-8"');
+        res.setHeader("Cache-Control", "no-store");
+        res.end("Authentication required");
+      });
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  const target = (env.ASSETCLAW_AGENT_URL || env.GATEWAY_BASE_URL || readParentEnv("GATEWAY_BASE_URL") || `http://127.0.0.1:${env.GATEWAY_PORT || readParentEnv("GATEWAY_PORT") || "7865"}`).replace(/\/$/, "");
-  const skillToken = env.ASSETCLAW_SKILL_TOKEN || env.SKILL_API_TOKEN || readParentEnv("ASSETCLAW_SKILL_TOKEN") || readParentEnv("SKILL_API_TOKEN");
+  const target = (process.env.ASSETCLAW_AGENT_URL || env.ASSETCLAW_AGENT_URL || process.env.GATEWAY_BASE_URL || env.GATEWAY_BASE_URL || readParentEnv("GATEWAY_BASE_URL") || `http://127.0.0.1:${process.env.GATEWAY_PORT || env.GATEWAY_PORT || readParentEnv("GATEWAY_PORT") || "7865"}`).replace(/\/$/, "");
+  const skillToken = process.env.ASSETCLAW_SKILL_TOKEN || env.ASSETCLAW_SKILL_TOKEN || process.env.SKILL_API_TOKEN || env.SKILL_API_TOKEN || readParentEnv("ASSETCLAW_SKILL_TOKEN") || readParentEnv("SKILL_API_TOKEN");
+  const webuiHost = process.env.ASSETCLAW_WEBUI_HOST || env.ASSETCLAW_WEBUI_HOST || "127.0.0.1";
+  const webuiPort = Number(process.env.ASSETCLAW_WEBUI_PORT || env.ASSETCLAW_WEBUI_PORT || "5180");
+  const shareUsername = process.env.ASSETCLAW_WEBUI_SHARE_USERNAME || env.ASSETCLAW_WEBUI_SHARE_USERNAME || "assetclaw";
+  const sharePassword = process.env.ASSETCLAW_WEBUI_SHARE_PASSWORD || env.ASSETCLAW_WEBUI_SHARE_PASSWORD || "";
 
   return {
-    plugins: [localAnimationFlowApiPlugin(), vue()],
+    plugins: [basicAuthPlugin(shareUsername, sharePassword), localAnimationFlowApiPlugin(), vue()],
     server: {
-      host: "127.0.0.1",
-      port: 5180,
+      host: webuiHost,
+      port: webuiPort,
       strictPort: true,
       allowedHosts: [".trycloudflare.com"],
       configureServer(server) {
@@ -420,8 +455,8 @@ export default defineConfig(({ mode }) => {
       },
     },
     preview: {
-      host: "127.0.0.1",
-      port: 5181,
+      host: webuiHost,
+      port: webuiPort + 1,
     },
   };
 });

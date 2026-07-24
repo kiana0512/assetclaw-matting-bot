@@ -943,7 +943,16 @@ function directStageProgress(run, isImage) {
   const stage = String(run.stage || "").toLowerCase();
   const children = run.children || {};
   const comfy = children.comfyui && typeof children.comfyui === "object" ? children.comfyui : {};
-  const cherryRuns = children.cherry_runs && typeof children.cherry_runs === "object" ? Object.values(children.cherry_runs) : [];
+  const cherryRunMap = children.cherry_runs && typeof children.cherry_runs === "object" ? children.cherry_runs : {};
+  const declaredCherryIds = [...new Set([
+    ...(Array.isArray(children.cherry_run_ids) ? children.cherry_run_ids : []),
+    children.cherry_run_id,
+  ].filter(Boolean))];
+  // cherry_runs is an audit history and can contain an older failed attempt.
+  // Progress must only aggregate the current generation declared by the parent.
+  const cherryRuns = declaredCherryIds.length
+    ? declaredCherryIds.map((id) => cherryRunMap[id]).filter(Boolean)
+    : Object.values(cherryRunMap);
   const expected = isImage
     ? (run.images || []).length
     : (run.videos || []).reduce((sum, item) => sum + Number(item.frame_count || 0), 0);
@@ -958,7 +967,9 @@ function directStageProgress(run, isImage) {
   const cherryCurrent = cherryRuns.find((item) => isActiveStatus(item?.status)) || children.cherry || {};
   const doneStatus = String(run.status || "").toUpperCase() === "DONE";
   if (doneStatus) return { label: "全部完成", progress: 100, overall: 100, count: `${expected}/${expected}`, raw: run };
-  if (stage.includes("send") || stage.includes("pack")) return { label: "打包与发送", progress: 50, overall: 98, count: "处理中", raw: run };
+  if (stage.includes("send") || stage.includes("pack") || stage.includes("zip") || stage.includes("delivery")) {
+    return { label: "打包与发送", progress: 50, overall: 98, count: "处理中", raw: run };
+  }
   if (stage.includes("cherry") || stage.includes("smooth") || cherryRuns.length) {
     const progress = cherryTotal > 0 ? Math.round((cherryDone / cherryTotal) * 100) : progressFrom(cherryCurrent);
     const overall = isImage ? 50 + Math.round(progress * 0.46) : 60 + Math.round(progress * 0.36);
@@ -967,7 +978,20 @@ function directStageProgress(run, isImage) {
   if (stage.includes("mat") || stage.includes("comfy") || comfyTotal) {
     const progress = comfyTotal > 0 ? Math.round((comfyDone / comfyTotal) * 100) : progressFrom(comfy);
     const overall = isImage ? Math.round(progress * 0.5) : 20 + Math.round(progress * 0.4);
-    return { label: "ComfyUI 抠图", progress, overall: Math.min(60, overall), count: `${comfyDone}/${comfyTotal || "-"}`, position: taskPosition("COMFY", comfy), raw: comfy };
+    const remote = String(comfy.backend || "").toLowerCase() === "gpu_control";
+    const nodes = Object.entries(comfy.node_distribution || {})
+      .filter(([, count]) => Number(count) > 0)
+      .map(([name, count]) => `${name}:${count}`)
+      .join(" · ");
+    const remotePosition = [comfy.remote_status, comfy.remote_batch_id, nodes].filter(Boolean).join(" · ");
+    return {
+      label: remote ? "GPU Control 抠图" : "ComfyUI 抠图",
+      progress,
+      overall: Math.min(60, overall),
+      count: `${comfyDone}/${comfyTotal || "-"}`,
+      position: remote ? remotePosition : taskPosition("COMFY", comfy),
+      raw: comfy,
+    };
   }
   if (stage.includes("frame") || stage.includes("extract")) return { label: "视频抽帧", progress: 0, overall: 5, count: `${expected || 0} 帧`, raw: run };
   return { label: formatStage(stage) || "准备中", progress: 0, overall: 0, count: "等待", raw: run };

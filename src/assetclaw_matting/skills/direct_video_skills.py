@@ -149,6 +149,7 @@ def recover_incomplete_runs() -> dict[str, Any]:
             still_running.append(str(run.get("id") or ""))
             continue
         _append_log(run, "检测到机器人进程曾重启：从原视频安全恢复未完成任务")
+        run["recovery_from_stage"] = str(run.get("stage") or "")
         run["status"] = "QUEUED"
         run["stage"] = "recovery_queued"
         run["worker_pid"] = 0
@@ -223,6 +224,136 @@ def repair_from_frames(run_id: str, resend: bool = True) -> dict[str, Any]:
         _append_log(run, f"红线修复失败并停止发送：{exc}")
         _save(run)
         return {"ok": False, "run_id": run_id, **_public(run)}
+
+
+def resume_from_postprocess(run_id: str, resend: bool = True) -> dict[str, Any]:
+    """Reuse verified matte frames, retry Cherry, package, and deliver."""
+
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.db.sqlite import init_db
+
+    init_db(settings.data_db_path)
+    run = _load(run_id)
+    if not run:
+        return {"ok": False, "run_id": run_id, "error": "direct video run not found"}
+    try:
+        for item in run.get("videos") or []:
+            validate_matte_sequence(item["frame_dir"], item["matte_dir"])
+        run["status"] = "RUNNING"
+        run["stage"] = "resume_postprocess"
+        run["error"] = ""
+        _append_log(run, "复用已通过红线校验的抠图帧，从 Cherry 后处理阶段恢复；不重复抽帧或抠图")
+        _save(run)
+        _run_cherry(run)
+        _mark(run, "RUNNING", "resume_zip")
+        zip_path = _make_zip(run)
+        run["zip_path"] = str(zip_path)
+        if resend and run.get("chat_id"):
+            _mark(run, "RUNNING", "resume_delivery")
+            plan = _cherry_plan_summary(run.get("videos") or [])
+            suffix = f"，{plan}" if plan else ""
+            _notify(run, f"动画恢复完成：{run['id']}，正在重新发送 zip{suffix}。")
+            _send_zip_with_retries(run, zip_path)
+        run["status"] = "DONE"
+        run["stage"] = "done"
+        run["error"] = ""
+        run["updated_at"] = _now()
+        _append_log(run, f"Cherry 恢复、完整性校验、打包和发送完成：{zip_path.name}")
+        _save(run)
+        return {"ok": True, "run_id": run_id, **_public(run)}
+    except Exception as exc:
+        run = _load(run_id) or run
+        run["status"] = "FAILED"
+        run["stage"] = "resume_postprocess_failed"
+        run["error"] = str(exc)
+        run["updated_at"] = _now()
+        _append_log(run, f"Cherry 恢复在自动重试后仍失败：{exc}")
+        _save(run)
+        _notify(run, f"动画后处理自动恢复失败：{run_id}\n{exc}")
+        return {"ok": False, "run_id": run_id, **_public(run)}
+
+
+def resume_interrupted_run(run_id: str, resend: bool = True) -> dict[str, Any]:
+    """Resume the persisted child/batch instead of rebuilding an intact task."""
+
+    run = _load(run_id)
+    if not run:
+        return {"ok": False, "run_id": run_id, "error": "direct video run not found"}
+    previous_stage = str(run.get("recovery_from_stage") or run.get("stage") or "").lower()
+    try:
+        zip_path_text = str(run.get("zip_path") or "")
+        if previous_stage in {"delivery", "resume_delivery", "repair_delivery"} and zip_path_text and Path(zip_path_text).is_file():
+            return resend_zip(run_id)
+        if any(token in previous_stage for token in ("postprocess", "cherry", "smooth")):
+            return resume_from_postprocess(run_id, resend=resend)
+        if "matting" in previous_stage or "comfy" in previous_stage:
+            _mark(run, "RUNNING", "recovery_matting")
+            _resume_existing_comfyui_child(run)
+            return resume_from_postprocess(run_id, resend=resend)
+        if any(token in previous_stage for token in ("zip", "pack")):
+            for item in run.get("videos") or []:
+                validate_sequence_names(item["matte_dir"], item["smooth_dir"], label="matte_to_smooth")
+            zip_path = _make_zip(run)
+            run["zip_path"] = str(zip_path)
+            _save(run)
+            if resend and run.get("chat_id"):
+                _mark(run, "RUNNING", "recovery_delivery")
+                _send_zip_with_retries(run, zip_path)
+            run["status"] = "DONE"
+            run["stage"] = "done"
+            run["error"] = ""
+            _append_log(run, f"从持久化后处理结果恢复打包与发送：{zip_path.name}")
+            _save(run)
+            return {"ok": True, "run_id": run_id, **_public(run)}
+
+        _append_log(run, f"恢复点 {previous_stage or 'unknown'} 尚未创建远端批次，从原始业务输入继续执行")
+        _save(run)
+        _worker(run_id)
+        completed = _load(run_id) or run
+        return {"ok": completed.get("status") == "DONE", "run_id": run_id, **_public(completed)}
+    except Exception as exc:
+        latest = _load(run_id) or run
+        latest["status"] = "FAILED"
+        latest["stage"] = "recovery_failed"
+        latest["error"] = str(exc)
+        _append_log(latest, f"持久化恢复失败：{exc}")
+        _save(latest)
+        _notify(latest, f"动画任务自动恢复多次未成功：{run_id}\n{exc}")
+        return {"ok": False, "run_id": run_id, **_public(latest)}
+
+
+def _resume_existing_comfyui_child(run: dict[str, Any]) -> None:
+    from assetclaw_matting.skills.comfyui_skills import run_resume, run_status
+
+    child_id = str((run.get("children") or {}).get("comfyui_run_id") or "")
+    if not child_id:
+        _append_log(run, "恢复点没有抠图子任务，创建新的幂等批次代次")
+        _run_comfyui(run)
+        return
+    payload = run_status(child_id, include_gpu=False)
+    status_text = str(payload.get("status") or "").upper()
+    if status_text not in {"DONE", "RUNNING", "QUEUED", "PENDING", "PAUSED"}:
+        _append_log(run, f"原抠图子任务 {child_id} 为 {status_text}，创建新的代次重试")
+        _run_comfyui(run)
+        return
+    if status_text != "DONE":
+        run_resume(child_id)
+    while status_text != "DONE":
+        if _is_canceled(run):
+            return
+        payload = run_status(child_id, include_gpu=False)
+        run.setdefault("children", {})["comfyui"] = payload
+        _save(run)
+        status_text = str(payload.get("status") or "").upper()
+        if status_text in {"FAILED", "CANCELED", "DONE_WITH_ERRORS"}:
+            raise RuntimeError(_format_comfyui_failure(child_id, payload))
+        if status_text != "DONE":
+            time.sleep(5)
+    for item in run.get("videos") or []:
+        key = f"video_{int(item.get('index') or 0):02d}"
+        run.setdefault("integrity", {}).setdefault("matte", {})[key] = validate_matte_sequence(item["frame_dir"], item["matte_dir"])
+    _append_log(run, f"已重新挂接持久化抠图子任务：{child_id}，逐帧校验通过")
+    _save(run)
 
 
 def cancel(run_id: str | None = None, **_: Any) -> dict[str, Any]:
@@ -365,7 +496,15 @@ def _extract_all(run: dict[str, Any]) -> None:
 
 
 def _run_comfyui(run: dict[str, Any]) -> None:
+    from assetclaw_matting.services.hybrid_matting_router import local_pipeline_serialization_required
+
     requested_stage = str(run.get("stage") or "matting")
+    if not local_pipeline_serialization_required():
+        _mark(run, "RUNNING", requested_stage)
+        _append_log(run, "混合抠图路由已启用：本业务任务保持完整，按本机/集群容量分配")
+        _save(run)
+        _run_comfyui_unlocked(run)
+        return
     _mark(run, "RUNNING", "waiting_matting_queue")
     _append_log(run, "等待独占抠图队列：视频任务将逐个处理，禁止并发混帧")
     _save(run)
@@ -379,6 +518,9 @@ def _run_comfyui_unlocked(run: dict[str, Any]) -> None:
     from assetclaw_matting.skills.comfyui_skills import run_start, run_status
 
     run_dir = _run_dir(run)
+    matting_generation = int(run.get("matting_generation") or 0) + 1
+    run["matting_generation"] = matting_generation
+    _save(run)
     result = run_start(
         workflow_path=run.get("workflow_path") or None,
         input_dir=str(run_dir / "frames"),
@@ -388,6 +530,7 @@ def _run_comfyui_unlocked(run: dict[str, Any]) -> None:
         skip_existing=False,
         notify_interval_seconds=run["notify_interval_seconds"],
         strict_frame_identity=True,
+        external_batch_id=f"assetclaw:{run['id']}:matting:g{matting_generation}",
     )
     child_id = result["run_id"]
     run.setdefault("children", {})["comfyui_run_id"] = child_id
@@ -767,6 +910,8 @@ def _start_worker(run_id: str, recover: bool = False) -> None:
 
 
 def run_worker_process(run_id: str, recover: bool = False) -> dict[str, Any]:
+    from assetclaw_matting.services.hybrid_matting_router import local_pipeline_serialization_required
+
     run = _load(run_id)
     if not run:
         return {"ok": False, "run_id": run_id, "error": "direct video run not found"}
@@ -774,9 +919,15 @@ def run_worker_process(run_id: str, recover: bool = False) -> dict[str, Any]:
     run["worker_mode"] = "detached_recovery" if recover else "detached"
     _save(run)
     try:
+        if not local_pipeline_serialization_required():
+            if recover:
+                return resume_interrupted_run(run_id, resend=True)
+            _worker(run_id)
+            completed = _load(run_id) or run
+            return {"ok": completed.get("status") == "DONE", "run_id": run_id, **_public(completed)}
         with _cross_process_video_pipeline_lock(run):
             if recover:
-                return repair_from_frames(run_id, resend=True)
+                return resume_interrupted_run(run_id, resend=True)
             _worker(run_id)
             completed = _load(run_id) or run
             return {"ok": completed.get("status") == "DONE", "run_id": run_id, **_public(completed)}
@@ -791,9 +942,21 @@ def _process_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     try:
+        import psutil
+
+        process = psutil.Process(pid)
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except ImportError:
+        pass
+    except psutil.AccessDenied:
+        # Access can be denied for a healthy process owned by another token.
+        return True
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        return False
+    try:
         os.kill(pid, 0)
         return True
-    except OSError:
+    except (OSError, SystemError, ValueError):
         return False
 
 

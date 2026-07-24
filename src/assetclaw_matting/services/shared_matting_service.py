@@ -58,6 +58,7 @@ def start_shared_matting_run(
         input_dir=str(local_input),
         output_dir=str(local_output),
         max_images=len(copied),
+        external_batch_id=f"assetclaw:{run_id}:matting:g1",
     )
     created_at = _now()
     with get_connection() as conn:

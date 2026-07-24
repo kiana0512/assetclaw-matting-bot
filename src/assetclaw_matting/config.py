@@ -186,6 +186,29 @@ class Settings(BaseSettings):
     comfyui_workflow_path: Path = PROJECT_ROOT.parent / "ComfyUI-aki-v3" / "ComfyUI" / "user" / "default" / "workflows" / "ImageClip.json"
     comfyui_timeout_seconds: int = 600
     comfyui_poll_interval_seconds: int = 2
+
+    # Hybrid ImageClip execution.  ``local`` preserves the existing 4070Ti
+    # behavior.  ``hybrid`` keeps small work local while overflowing large or
+    # concurrent runs to GPU Control.  ``gpu_control`` forces all real runs to
+    # the remote batch service.  The remote service performs matting only;
+    # every other animation stage remains on this machine.
+    matting_backend_mode: str = "local"
+    gpu_control_base_url: str = "https://10.3.34.11"
+    gpu_control_api_key: str = ""
+    gpu_control_verify_tls: bool = True
+    gpu_control_ca_bundle: str = ""
+    gpu_control_allow_ca_without_key_usage: bool = False
+    gpu_control_connect_timeout_seconds: int = 15
+    gpu_control_request_timeout_seconds: int = 30
+    gpu_control_upload_timeout_seconds: int = 86400
+    gpu_control_download_timeout_seconds: int = 1800
+    gpu_control_execution_timeout_seconds: int = 86400
+    gpu_control_poll_interval_seconds: int = 3
+    gpu_control_request_retries: int = 3
+    gpu_control_poll_error_limit: int = 20
+    gpu_control_large_batch_threshold: int = 64
+    gpu_control_max_batch_frames: int = 5000
+    gpu_control_max_inflight_batches: int = 8
     matting_pipeline_repo_url: str = "git@gitlab.lilithgame.com:rd_center/ai_art/imageclip.git"
     matting_pipeline_repo_dir: Path = PROJECT_ROOT.parent / "imageclip"
     matting_pipeline_branch: str = "main"
@@ -316,6 +339,7 @@ class Settings(BaseSettings):
             self.storage_dir / "debug",
             self.storage_dir / "feishu_inbox",
             self.storage_dir / "matting_runs",
+            self.storage_dir / "gpu_control_batches",
             self.log_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)

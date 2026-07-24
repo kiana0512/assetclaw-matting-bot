@@ -156,14 +156,14 @@ def recover_incomplete_runs() -> dict[str, Any]:
         if local_worker or remote_worker:
             still_running.append(run_id)
             continue
-        cancel_results = _cancel_child_runs(run)
-        run["status"] = "FAILED"
-        run["stage"] = "failed"
+        run["recovery_from_stage"] = str(run.get("stage") or "")
+        run["status"] = "QUEUED"
+        run["stage"] = "recovery_queued"
         run["worker_pid"] = 0
-        run["error"] = "检测到图片直发执行进程已退出，已自动清除僵死运行状态。"
-        run.setdefault("children", {})["orphan_cancel_results"] = cancel_results
-        _append_log(run, run["error"])
+        run["error"] = ""
+        _append_log(run, "检测到图片直发执行进程已退出，保留远端 batch 并从持久化状态自动恢复。")
         _save(run)
+        _start_recovery_worker(run_id)
         closed.append(run_id)
     return {"ok": True, "closed": closed, "still_running": still_running}
 
@@ -235,6 +235,9 @@ def _run_comfyui(run: dict[str, Any]) -> None:
     from assetclaw_matting.skills.comfyui_skills import run_start, run_status
 
     run_dir = _run_dir(run)
+    matting_generation = int(run.get("matting_generation") or 0) + 1
+    run["matting_generation"] = matting_generation
+    _save(run)
     result = run_start(
         workflow_path=run.get("workflow_path") or None,
         input_dir=str(run_dir / "original_images"),
@@ -243,6 +246,7 @@ def _run_comfyui(run: dict[str, Any]) -> None:
         preserve_structure=True,
         skip_existing=False,
         notify_interval_seconds=run["notify_interval_seconds"],
+        external_batch_id=f"assetclaw:{run['id']}:matting:g{matting_generation}",
     )
     child_id = result["run_id"]
     run.setdefault("children", {})["comfyui_run_id"] = child_id
@@ -255,7 +259,7 @@ def _run_comfyui(run: dict[str, Any]) -> None:
         run["children"]["comfyui"] = payload
         _save(run)
         if payload.get("status") in {"DONE", "FAILED", "CANCELED", "DONE_WITH_ERRORS"}:
-            if payload.get("status") in {"FAILED", "CANCELED"}:
+            if payload.get("status") != "DONE":
                 raise RuntimeError(_format_child_failure("ComfyUI", child_id, payload))
             return
         time.sleep(5)
@@ -294,7 +298,7 @@ def _run_cherry(run: dict[str, Any]) -> None:
             run["children"].setdefault("cherry_runs", {})[child_id] = payload
             _save(run)
             if payload.get("status") in {"DONE", "FAILED", "CANCELED", "DONE_WITH_ERRORS"}:
-                if payload.get("status") in {"FAILED", "CANCELED"}:
+                if payload.get("status") != "DONE":
                     raise RuntimeError(_format_child_failure("Cherry", child_id, payload))
                 break
             time.sleep(5)
@@ -611,8 +615,108 @@ def _start_worker(run_id: str) -> None:
     threading.Thread(target=_worker, args=(run_id,), name=f"direct_image_{run_id}", daemon=True).start()
 
 
+def _start_recovery_worker(run_id: str) -> None:
+    if run_id in _WORKERS:
+        return
+    _WORKERS.add(run_id)
+    threading.Thread(target=_resume_worker, args=(run_id,), name=f"direct_image_recovery_{run_id}", daemon=True).start()
+
+
+def _resume_worker(run_id: str) -> None:
+    run = _load(run_id)
+    if not run:
+        _WORKERS.discard(run_id)
+        return
+    run["worker_pid"] = os.getpid()
+    _save(run)
+    previous_stage = str(run.get("recovery_from_stage") or run.get("stage") or "").lower()
+    try:
+        if "matting" in previous_stage or "comfy" in previous_stage:
+            _mark(run, "RUNNING", "recovery_matting")
+            _resume_existing_comfyui_child(run)
+            previous_stage = "postprocess"
+        elif not any(token in previous_stage for token in ("postprocess", "cherry", "smooth", "send", "delivery")):
+            _append_log(run, f"恢复点 {previous_stage or 'unknown'} 尚未创建远端批次，从原始图片继续执行")
+            _save(run)
+            _worker(run_id)
+            return
+
+        if any(token in previous_stage for token in ("postprocess", "cherry", "smooth")):
+            _mark(run, "RUNNING", "recovery_postprocess")
+            _run_cherry(run)
+        if _is_canceled(run):
+            return
+        _mark(run, "RUNNING", "recovery_send")
+        sent = _send_results(run)
+        run["sent_files"] = sent
+        run["status"] = "DONE"
+        run["stage"] = "done"
+        run["error"] = ""
+        run["updated_at"] = _now()
+        _append_log(run, f"图片任务从持久化断点恢复并发送完成：{len(sent)} 个文件")
+        _save(run)
+    except Exception as exc:
+        latest = _load(run_id) or run
+        if latest.get("status") != "CANCELED":
+            latest["status"] = "FAILED"
+            latest["stage"] = "recovery_failed"
+            latest["error"] = str(exc)
+            latest["updated_at"] = _now()
+            _append_log(latest, f"图片任务持久化恢复失败：{exc}")
+            _save(latest)
+            _notify(latest, f"图片任务自动恢复多次未成功：{run_id}\n{exc}")
+    finally:
+        latest = _load(run_id)
+        if latest and int(latest.get("worker_pid") or 0) == os.getpid():
+            latest["worker_pid"] = 0
+            _save(latest)
+        _WORKERS.discard(run_id)
+
+
+def _resume_existing_comfyui_child(run: dict[str, Any]) -> None:
+    from assetclaw_matting.skills.comfyui_skills import run_resume, run_status
+
+    child_id = str((run.get("children") or {}).get("comfyui_run_id") or "")
+    if not child_id:
+        _run_comfyui(run)
+        return
+    payload = run_status(child_id, include_gpu=False)
+    status_text = str(payload.get("status") or "").upper()
+    if status_text not in {"DONE", "RUNNING", "QUEUED", "PENDING", "PAUSED"}:
+        _append_log(run, f"原抠图子任务 {child_id} 为 {status_text}，创建新的代次重试")
+        _run_comfyui(run)
+        return
+    if status_text != "DONE":
+        run_resume(child_id)
+    while status_text != "DONE":
+        if _is_canceled(run):
+            return
+        payload = run_status(child_id, include_gpu=False)
+        run.setdefault("children", {})["comfyui"] = payload
+        _save(run)
+        status_text = str(payload.get("status") or "").upper()
+        if status_text in {"FAILED", "CANCELED", "DONE_WITH_ERRORS"}:
+            raise RuntimeError(_format_child_failure("ComfyUI", child_id, payload))
+        if status_text != "DONE":
+            time.sleep(5)
+    _append_log(run, f"已重新挂接持久化抠图子任务：{child_id}")
+    _save(run)
+
+
 def _process_alive(pid: int) -> bool:
     if pid <= 0:
+        return False
+    try:
+        import psutil
+
+        process = psutil.Process(pid)
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except ImportError:
+        pass
+    except psutil.AccessDenied:
+        # Access can be denied for a healthy process owned by another token.
+        return True
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
         return False
     try:
         os.kill(pid, 0)

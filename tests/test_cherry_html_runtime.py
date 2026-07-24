@@ -104,3 +104,11 @@ def test_start_chrome_uses_elevated_headless_safe_flags(monkeypatch: pytest.Monk
     assert "--enable-automation" in captured["args"]
     assert "--no-sandbox" in captured["args"]
     assert "--disable-setuid-sandbox" in captured["args"]
+
+
+def test_file_input_script_does_not_dispatch_duplicate_change_event() -> None:
+    script = cherry_html_runner._file_input_preset_script(54)
+
+    assert "const expected=54" in script
+    assert "dispatchEvent" not in script
+    assert "collectedFiles.length!==expected" in script

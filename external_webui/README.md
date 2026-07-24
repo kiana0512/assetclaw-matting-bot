@@ -63,6 +63,8 @@ python .\external_webui\server.py
 
 已取消、失败或完成的 AFLOW 只保留在历史列表，不再占用“当前动画生产链路”。图片/视频直发任务直接读取 `direct_image` / `direct_video` 父任务状态，Cherry 进度按该父任务全部子任务的 `completed / total` 聚合，不再把单个 `CHERRY_*` 的 `1/1` 当作整批进度。
 
+GPU Control 远端抠图任务显示真实 `completed / total`、远端状态、batch ID 和节点分布。父任务恢复时只统计当前 `matting_generation` 声明的 Cherry 子任务；历史失败子任务仍保留审计，但不会重复计入分母，因此 54 帧任务显示 `54/54` 而不是 `54/108`。
+
 ## 视觉主题
 
 当前主题使用 LilClick 视觉系统：紫黑工作画布、中性灰卡片、紫到粉的操作强调色，同时保留浅色模式和移动端响应式布局。

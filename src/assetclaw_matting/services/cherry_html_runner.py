@@ -56,6 +56,11 @@ class CdpClient:
         return self
 
     async def __aexit__(self, *_: Any) -> None:
+        if self._ws:
+            try:
+                await self.send("Browser.close", timeout=2.0)
+            except Exception:
+                pass
         if self._reader:
             self._reader.cancel()
         if self._ws:
@@ -234,22 +239,7 @@ async def _run_cherry_html_async(
                 raise RuntimeError("cherry html file input not found")
             await cdp.send("DOM.setFileInputFiles", {"nodeId": node_id, "files": [str(path) for path in files]})
             preset = await cdp.evaluate(
-                """
-                (async()=>{
-                  const input=document.getElementById('file-input');
-                  input.dispatchEvent(new Event('change',{bubbles:true}));
-                  await new Promise(resolve=>setTimeout(resolve,100));
-                  if (typeof applyInputDefaultsForInput === 'function') {
-                    await applyInputDefaultsForInput();
-                  }
-                  return {
-                    count: collectedFiles.length,
-                    resize: `${document.getElementById('p-rw2').value}x${document.getElementById('p-rh2').value}`,
-                    feather: !!moduleState.feather,
-                    steps: currentOrder().filter(step=>moduleState[step])
-                  };
-                })()
-                """,
+                _file_input_preset_script(len(files)),
                 timeout=30.0,
             )
             if int((preset or {}).get("count") or 0) != len(files):
@@ -273,6 +263,32 @@ async def _run_cherry_html_async(
     finally:
         _stop_chrome(proc)
         shutil.rmtree(session_dir, ignore_errors=True)
+
+
+def _file_input_preset_script(expected_count: int) -> str:
+    return (
+        """
+                (async()=>{
+                  const expected=__EXPECTED__;
+                  const deadline=Date.now()+5000;
+                  // DOM.setFileInputFiles already emits the native change event.
+                  // A second synthetic event runs after onPicked() clears the
+                  // input and overwrites the successfully loaded list with [].
+                  while(collectedFiles.length!==expected && Date.now()<deadline){
+                    await new Promise(resolve=>setTimeout(resolve,50));
+                  }
+                  if (typeof applyInputDefaultsForInput === 'function') {
+                    await applyInputDefaultsForInput();
+                  }
+                  return {
+                    count: collectedFiles.length,
+                    resize: `${document.getElementById('p-rw2').value}x${document.getElementById('p-rh2').value}`,
+                    feather: !!moduleState.feather,
+                    steps: currentOrder().filter(step=>moduleState[step])
+                  };
+                })()
+        """.replace("__EXPECTED__", str(int(expected_count)))
+        )
 
 
 async def _wait_ready(cdp: CdpClient) -> None:

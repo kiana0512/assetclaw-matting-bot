@@ -307,9 +307,6 @@ def _run_worker(run_id: str) -> None:
 
 
 def _run_worker_html(run_id: str, row: Any) -> None:
-    from assetclaw_matting.config import settings
-    from assetclaw_matting.services.cherry_html_runner import run_cherry_html
-
     src = Path(row["input_dir"])
     dst = Path(row["output_dir"])
     files = [Path(path) for path in json.loads(row["files_json"] or "[]")]
@@ -329,15 +326,7 @@ def _run_worker_html(run_id: str, row: Any) -> None:
         if not pending:
             continue
         try:
-            result = run_cherry_html(
-                _tool_source_path(),
-                src,
-                dst,
-                pending,
-                chrome_path=Path(settings.cherry_browser_path) if settings.cherry_browser_path else None,
-                timeout_seconds=int(settings.cherry_html_timeout_seconds),
-                storage_dir=Path(settings.storage_dir),
-            )
+            result = _run_html_group_with_retries(run_id, src, dst, pending, options)
             width, height = _parse_resize(result.resize)
             if width and height:
                 options["resize_width"] = width
@@ -373,6 +362,69 @@ def _run_worker_html(run_id: str, row: Any) -> None:
 
     final_status = "DONE_WITH_ERRORS" if errors else "DONE"
     _set_run_status(run_id, final_status)
+
+
+def _run_html_group_with_retries(
+    run_id: str,
+    src: Path,
+    dst: Path,
+    pending: list[Path],
+    options: dict[str, Any],
+    *,
+    attempts: int = 3,
+):
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.services.cherry_html_runner import run_cherry_html
+
+    failures: list[str] = []
+    for attempt in range(1, max(1, attempts) + 1):
+        latest = _get_run(run_id)
+        if not latest or latest["status"] == "CANCELED":
+            raise RuntimeError("Cherry retry cancelled")
+        started_at = _now()
+        try:
+            result = run_cherry_html(
+                _tool_source_path(),
+                src,
+                dst,
+                pending,
+                chrome_path=Path(settings.cherry_browser_path) if settings.cherry_browser_path else None,
+                timeout_seconds=int(settings.cherry_html_timeout_seconds),
+                storage_dir=Path(settings.storage_dir),
+            )
+            options.setdefault("html_attempts", []).append(
+                {
+                    "input_dir": str(pending[0].parent),
+                    "attempt": attempt,
+                    "status": "SUCCEEDED",
+                    "started_at": started_at,
+                    "finished_at": _now(),
+                }
+            )
+            _save_progress(run_id, options=options, error="")
+            return result
+        except Exception as exc:
+            failures.append(str(exc))
+            options.setdefault("html_attempts", []).append(
+                {
+                    "input_dir": str(pending[0].parent),
+                    "attempt": attempt,
+                    "status": "FAILED",
+                    "started_at": started_at,
+                    "finished_at": _now(),
+                    "error": str(exc),
+                }
+            )
+            retrying = attempt < attempts
+            message = f"Cherry HTML 第 {attempt}/{attempts} 次失败"
+            if retrying:
+                message += "，将使用全新浏览器会话自动重试"
+            _save_progress(run_id, options=options, error=f"{message}: {exc}")
+            if retrying:
+                time.sleep(min(2**(attempt - 1), 4))
+    raise RuntimeError(
+        f"Cherry HTML failed after {attempts} attempts: {failures[-1] if failures else 'unknown error'}"
+    )
 
 
 def _start_run_worker(run_id: str) -> None:
