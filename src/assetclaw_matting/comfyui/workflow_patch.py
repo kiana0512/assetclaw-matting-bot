@@ -378,6 +378,15 @@ def _primary_save_score(workflow: dict[str, Any], item: dict[str, Any]) -> tuple
     score = 0
     # Prefer nodes fed by final RGBA composition stages. A plain VAE decode is
     # commonly an opaque background preview, not the matte consumed downstream.
+    # Newer ImageClip workflows append a shoe-pixel protection stage after the
+    # foot-region composite. Match the stable part of its versioned class name
+    # (for example CodexShoePixelProtectV41) so future revisions remain final.
+    if "lazyshadowbypass" in source_text:
+        score += 220
+    if "footpasteguard" in source_text:
+        score += 200
+    if "shoepixelprotect" in source_text:
+        score += 180
     if "footregionpaste" in source_text:
         score += 140
     if "joinimagewithalpha" in source_text:

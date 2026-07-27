@@ -4,15 +4,18 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from assetclaw_matting.comfyui.workflow_patch import inspect_workflow
 from assetclaw_matting.config import settings
 
 _PREFLIGHT_CACHE: dict[str, Any] = {}
 _PREFLIGHT_CACHE_SECONDS = 15
+_PREFLIGHT_LOCK = threading.Lock()
 
 
 def status(**_: Any) -> dict[str, Any]:
@@ -60,7 +63,7 @@ def verify(**_: Any) -> dict[str, Any]:
     if workflow.exists():
         try:
             data = json.loads(workflow.read_text(encoding="utf-8"))
-            payload["workflow_nodes"] = len(data) if isinstance(data, dict) else 0
+            payload["workflow_nodes"] = inspect_workflow(data)["node_count"] if isinstance(data, dict) else 0
         except Exception as exc:
             errors.append(f"工作流 JSON 无法解析：{exc}")
     else:
@@ -115,9 +118,18 @@ def update(force_copy: bool = False, **_: Any) -> dict[str, Any]:
 
 
 def ensure_latest_for_task(force_copy: bool = False, **_: Any) -> dict[str, Any]:
-    cached = _cached_preflight()
-    if cached:
-        return cached
+    requested_at = time.monotonic()
+    with _PREFLIGHT_LOCK:
+        # Every task gets a preflight performed no earlier than its request.
+        # Concurrent callers may share the check already running when they
+        # arrived, avoiding duplicate fetch/reset work and Git lock races.
+        cached = _cached_preflight(not_before=requested_at)
+        if cached:
+            return cached
+        return _ensure_latest_for_task_locked(force_copy=force_copy)
+
+
+def _ensure_latest_for_task_locked(force_copy: bool = False) -> dict[str, Any]:
     from assetclaw_matting.progress import notify_progress
 
     notify_progress("正在更新抠图管线")
@@ -186,10 +198,13 @@ def ensure_latest_for_task(force_copy: bool = False, **_: Any) -> dict[str, Any]
     return result
 
 
-def _cached_preflight() -> dict[str, Any] | None:
+def _cached_preflight(not_before: float | None = None) -> dict[str, Any] | None:
     if not _PREFLIGHT_CACHE:
         return None
-    if time.time() - float(_PREFLIGHT_CACHE.get("ts") or 0) > _PREFLIGHT_CACHE_SECONDS:
+    checked_at = float(_PREFLIGHT_CACHE.get("ts") or 0)
+    if not_before is not None and checked_at < not_before:
+        return None
+    if time.monotonic() - checked_at > _PREFLIGHT_CACHE_SECONDS:
         return None
     value = dict(_PREFLIGHT_CACHE.get("value") or {})
     if value.get("ok") and value.get("message"):
@@ -198,7 +213,7 @@ def _cached_preflight() -> dict[str, Any] | None:
 
 
 def _remember_preflight(result: dict[str, Any]) -> None:
-    _PREFLIGHT_CACHE["ts"] = time.time()
+    _PREFLIGHT_CACHE["ts"] = time.monotonic()
     _PREFLIGHT_CACHE["value"] = dict(result)
 
 
@@ -212,6 +227,13 @@ def _sync_repo(repo: Path) -> str:
     branch = settings.matting_pipeline_branch
     remote_ref = f"origin/{branch}"
     output.append(_git(["fetch", "--prune", "origin"], cwd=repo))
+    head = _git(["rev-parse", "HEAD"], cwd=repo).strip()
+    remote = _git(["rev-parse", remote_ref], cwd=repo).strip()
+    current_branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo).strip()
+    dirty = bool(_git(["status", "--porcelain"], cwd=repo).strip())
+    if head == remote and current_branch == branch and not dirty:
+        output.append(f"already up to date: {head[:12]}")
+        return "\n".join(part for part in output if part)
     output.append(_git(["reset", "--hard"], cwd=repo))
     output.append(_git(["clean", "-fd"], cwd=repo))
     output.append(_git(["checkout", "--force", "-B", branch, remote_ref], cwd=repo))
@@ -494,6 +516,14 @@ def _workflow_lora_names() -> list[str]:
 def _link_status(item: dict[str, Any]) -> dict[str, Any]:
     source = _first_existing(item["sources"])
     target = item["target"]
+    linked_to_source = bool(source and _points_to(target, source))
+    same_as_source = bool(source and (linked_to_source or _same_content_fast(source, target)))
+    # A ComfyUI model may intentionally be a symlink to the shared model store
+    # rather than directly to the repo copy. Its timestamps can differ while
+    # bytes are identical; verify that case exactly instead of reporting and
+    # attempting a fake "sync" before every task.
+    if source and target.is_symlink() and target.exists() and not same_as_source:
+        same_as_source = _same_content(source, target)
     return {
         "name": item["name"],
         "kind": item["kind"],
@@ -502,8 +532,8 @@ def _link_status(item: dict[str, Any]) -> dict[str, Any]:
         "source_exists": bool(source and source.exists()),
         "target_exists": target.exists(),
         "target_mode": _target_mode(target),
-        "linked_to_source": bool(source and _points_to(target, source)),
-        "same_as_source": bool(source and (_points_to(target, source) or _same_content_fast(source, target))),
+        "linked_to_source": linked_to_source,
+        "same_as_source": same_as_source,
     }
 
 

@@ -317,6 +317,68 @@ def test_primary_save_image_node_prefers_final_foot_region_rgba_composite() -> N
     assert find_primary_save_image_node_id(workflow) == "25"
 
 
+def test_primary_save_image_node_prefers_versioned_shoe_pixel_protection_output() -> None:
+    workflow = {
+        "nodes": [
+            {"id": 29, "type": "VAEDecodeTiled", "outputs": [{"name": "IMAGE"}]},
+            {"id": 13, "type": "CherrySelfComposite", "outputs": [{"name": "IMAGE"}]},
+            {"id": 54, "type": "CodexShoePixelProtectV41", "outputs": [{"name": "IMAGE(RGBA)"}]},
+            {
+                "id": 8,
+                "type": "SaveImage",
+                "inputs": [{"name": "images", "link": 80}],
+                "widgets_values": ["ComfyUI"],
+            },
+            {
+                "id": 22,
+                "type": "SaveImage",
+                "inputs": [{"name": "images", "link": 81}],
+                "widgets_values": ["double"],
+            },
+            {
+                "id": 25,
+                "type": "SaveImage",
+                "inputs": [{"name": "images", "link": 82}],
+                "widgets_values": ["ComfyUI"],
+            },
+        ],
+        "links": [
+            [80, 29, 0, 8, 0, "IMAGE"],
+            [81, 13, 0, 22, 0, "IMAGE"],
+            [82, 54, 0, 25, 0, "IMAGE(RGBA)"],
+        ],
+    }
+
+    assert find_primary_save_image_node_id(workflow) == "25"
+
+
+def test_primary_save_image_node_prefers_versioned_lazy_shadow_bypass_output() -> None:
+    workflow = {
+        "nodes": [
+            {"id": 13, "type": "CherrySelfComposite", "outputs": [{"name": "IMAGE(RGBA)"}]},
+            {"id": 57, "type": "CodexLazyShadowBypassV43", "outputs": [{"name": "FINAL_RGBA"}]},
+            {
+                "id": 22,
+                "type": "SaveImage",
+                "inputs": [{"name": "images", "link": 69}],
+                "widgets_values": ["double"],
+            },
+            {
+                "id": 25,
+                "type": "SaveImage",
+                "inputs": [{"name": "images", "link": 70}],
+                "widgets_values": ["ComfyUI"],
+            },
+        ],
+        "links": [
+            [69, 13, 0, 22, 0, "IMAGE(RGBA)"],
+            [70, 57, 0, 25, 0, "FINAL_RGBA"],
+        ],
+    }
+
+    assert find_primary_save_image_node_id(workflow) == "25"
+
+
 def test_resolve_best_output_rejects_bad_primary_save_even_if_preview_mask_is_transparent(tmp_path) -> None:
     output_root = tmp_path / "output"
     output_root.mkdir()
