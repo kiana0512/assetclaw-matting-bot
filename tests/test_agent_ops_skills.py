@@ -161,9 +161,69 @@ def test_agent_current_work_formats_direct_media_as_table(monkeypatch, tmp_path:
     payload = current_work(include_gpu=False)
     text = format_skill_results([{"ok": True, "skill": "agent.current_work", "result": payload}])
 
-    assert "类型 | 文件 | 任务 | 阶段 | 进度 | 规格 | 说明" in text
-    assert "视频 | 思考.mp4 | VID_TABLE | 抠图中 | 抠图 3/10 | 384x512" in text
-    assert "图片 | 头像.png | IMG_TABLE | 完成 | 已完成 | 256x256" in text
+    assert "思考.mp4" in text and "抠图中" in text and "抠图 3/10" in text and "384×512" in text
+    assert "头像.png" in text and "完成" in text and "已完成" in text and "256×256" in text
+
+
+def test_agent_current_work_uses_exact_live_child_progress_before_outputs_sync(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.skills import comfyui_skills
+
+    storage = tmp_path / "storage"
+    status_path = storage / "direct_video_runs" / "VID_LIVE_PROGRESS" / "status.json"
+    matte_dir = status_path.parent / "matte" / "video_01"
+    matte_dir.mkdir(parents=True)
+    status_path.write_text(
+        json.dumps(
+            {
+                "id": "VID_LIVE_PROGRESS",
+                "status": "RUNNING",
+                "stage": "matting",
+                "created_at": "2026-07-25T11:20:00",
+                "updated_at": "2026-07-25T11:21:00",
+                "videos": [
+                    {
+                        "name": "15_2.mp4",
+                        "frame_count": 70,
+                        "matte_dir": str(matte_dir),
+                        "smooth_dir": str(status_path.parent / "smooth" / "video_01"),
+                        "cherry_output_size": "384x512",
+                    }
+                ],
+                "children": {
+                    "comfyui_run_id": "COMFY_CURRENT",
+                    # A previous generation must never override the current child.
+                    "comfyui": {"run_id": "COMFY_OLD", "completed": 70, "total": 70},
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "storage_dir", storage)
+    monkeypatch.setattr(
+        comfyui_skills,
+        "run_status",
+        lambda run_id, include_gpu=False: {
+            "ok": True,
+            "run_id": run_id,
+            "status": "RUNNING",
+            "completed": 68,
+            "failed": 0,
+            "total": 70,
+            "updated_at": "2026-07-25T11:22:00",
+        },
+    )
+
+    payload = current_work(include_gpu=False, date_start="2026-07-25", date_end="2026-07-25")
+    item = payload["direct_videos"][0]["items"][0]
+    text = format_skill_results([{"ok": True, "skill": "agent.current_work", "result": payload}])
+
+    assert item["matte_done"] == 68
+    assert item["status"] == "抠图中"
+    assert item["progress_source"] == "comfyui_live"
+    assert "抠图 68/70" in text
+    assert "排队抠图" not in text
 
 
 def test_agent_current_work_dedupes_same_media_name(monkeypatch, tmp_path: Path) -> None:
@@ -209,8 +269,7 @@ def test_agent_current_work_dedupes_same_media_name(monkeypatch, tmp_path: Path)
     text = format_skill_results([{"ok": True, "skill": "agent.current_work", "result": payload}])
 
     assert text.count("7月13日思考-1_5.mp4") == 1
-    assert "VID_NEW" in text
-    assert "VID_OLD" not in text
+    assert [run["run_id"] for run in payload["direct_videos"][:2]] == ["VID_NEW", "VID_OLD"]
 
 
 def test_agent_current_work_filters_by_date_query_and_detail(monkeypatch, tmp_path: Path) -> None:
@@ -261,7 +320,7 @@ def test_agent_current_work_filters_by_date_query_and_detail(monkeypatch, tmp_pa
     summary_text = format_skill_results([{"ok": True, "skill": "agent.current_work", "result": summary}])
     assert "7月11日待机.mp4" in summary_text
     assert "source_2.mp4" in summary_text
-    assert "运行中/抠图" in summary_text
+    assert "抠图中" in summary_text and "抠图 5/43" in summary_text
     assert "RUNNING/matting" not in summary_text
 
     detail = current_work(include_gpu=False, date_start="2026-07-13", date_end="2026-07-13", query="source_2.mp4", detail=True)

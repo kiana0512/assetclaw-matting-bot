@@ -219,6 +219,11 @@ class Settings(BaseSettings):
     cherry_postprocess_html_path: Path = PROJECT_ROOT.parent / "imageclip" / "cherry-postprocess.html"
     cherry_browser_path: Path | None = None
     cherry_html_timeout_seconds: int = 900
+    # The standalone HTML keeps several full-resolution ImageData snapshots in
+    # memory for every input. Bound each browser session so long sequences do
+    # not exhaust Chromium's ArrayBuffer heap while still preserving order.
+    cherry_html_batch_max_files: int = 8
+    cherry_html_batch_max_pixels: int = 12_000_000
 
     default_batch_input_dir: Path = PROJECT_ROOT / "storage" / "batch_inputs"
     default_batch_output_dir: Path = PROJECT_ROOT / "storage" / "batch_outputs"

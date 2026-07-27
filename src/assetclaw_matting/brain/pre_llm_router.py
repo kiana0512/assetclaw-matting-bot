@@ -110,6 +110,10 @@ def _plan_task_overview(message: BrainMessage) -> tuple[list[ToolCall], str] | N
     lowered = normalized.lower()
     if not normalized or any(word in normalized for word in ("取消", "终止", "停止", "开始", "启动", "继续", "恢复")):
         return None
+    if "gpu" in lowered or any(word in normalized for word in ("显卡", "显存", "温度", "功耗", "nvidia-smi")):
+        # Hardware + task questions intentionally stay on the combined system
+        # route so the task overview does not swallow the GPU half of intent.
+        return None
     if any(word in lowered for word in ("comfyui", "comfy_", "cherry", "frame_")) or any(
         word in normalized for word in ("抠图子任务", "后处理子任务", "抽帧子任务")
     ):

@@ -80,6 +80,7 @@ def test_parent_task_id_becomes_query() -> None:
 
 def test_component_and_six_video_batch_queries_keep_existing_routes() -> None:
     assert _plan_task_overview(BrainMessage(text="ComfyUI 任务进度")) is None
+    assert _plan_task_overview(BrainMessage(text="查看 GPU 状态和当前任务")) is None
     assert _plan_task_overview(BrainMessage(text="这批六个任务进度列表")) is None
     calls, _reason = plan_direct_video_task(BrainMessage(text="这批六个任务进度列表"))
     assert calls and calls[0].skill == "direct_video.list"

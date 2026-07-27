@@ -90,8 +90,9 @@ def update(force_copy: bool = False, **_: Any) -> dict[str, Any]:
         _sync_asset(source, target, force_copy=force_copy)
         synced.append({**item, "source": str(source), "target": str(target), "mode": _target_mode(target)})
     checked = verify()
+    cherry_release = _verify_cherry_release() if checked.get("ok") else {}
     return {
-        "ok": checked.get("ok", False),
+        "ok": bool(checked.get("ok", False) and cherry_release.get("ok", False)),
         "repo_url": settings.matting_pipeline_repo_url,
         "repo_dir": str(repo),
         "git_output": git_output[-4000:],
@@ -108,6 +109,7 @@ def update(force_copy: bool = False, **_: Any) -> dict[str, Any]:
         "workflow_nodes": checked.get("workflow_nodes"),
         "synced": synced,
         "verify_errors": checked.get("errors", []),
+        "cherry_release": cherry_release,
         "needs_comfyui_restart": True,
     }
 
@@ -139,6 +141,22 @@ def ensure_latest_for_task(force_copy: bool = False, **_: Any) -> dict[str, Any]
         result = {**checked, "git_output": git_output[-4000:], "synced": synced, "needs_sync": needs_sync}
         _remember_preflight(result)
         return result
+    cherry_release = _verify_cherry_release()
+    if not cherry_release.get("ok"):
+        result = {
+            **checked,
+            "ok": False,
+            "git_output": git_output[-4000:],
+            "synced": synced,
+            "needs_sync": needs_sync,
+            "cherry_release": cherry_release,
+            "errors": [
+                *(checked.get("errors") or []),
+                str(cherry_release.get("candidate_error") or "Cherry canary failed"),
+            ],
+        }
+        _remember_preflight(result)
+        return result
     changed = bool(synced) or before.get("commit") != checked.get("commit")
     result = {
         "ok": True,
@@ -161,7 +179,8 @@ def ensure_latest_for_task(force_copy: bool = False, **_: Any) -> dict[str, Any]
         "needs_sync": needs_sync,
         "updated": changed,
         "queue": queue,
-        "message": _task_notice(checked, changed),
+        "cherry_release": cherry_release,
+        "message": _task_notice(checked, changed, cherry_release),
     }
     _remember_preflight(result)
     return result
@@ -223,12 +242,26 @@ def _needs_asset_sync(payload: dict[str, Any]) -> bool:
     return False
 
 
-def _task_notice(payload: dict[str, Any], changed: bool) -> str:
+def _task_notice(payload: dict[str, Any], changed: bool, cherry_release: dict[str, Any] | None = None) -> str:
     commit = str(payload.get("commit") or "")[:12] or "-"
     when = payload.get("commit_time") or "-"
+    release = cherry_release or {}
+    if release.get("fallback"):
+        return f"抠图管线已更新到 {commit}（{when}）；Cherry 新版 canary 未通过，任务继续使用上一验证版本。"
     if changed:
-        return f"抠图管线已同步最新版本 {commit}（{when}）。"
-    return f"抠图管线已确认最新版本 {commit}（{when}）。"
+        return f"抠图管线已同步最新版本 {commit}（{when}），Cherry canary 已通过。"
+    return f"抠图管线已确认最新版本 {commit}（{when}），Cherry 验证版本可用。"
+
+
+def _verify_cherry_release() -> dict[str, Any]:
+    from assetclaw_matting.services.cherry_html_runner import verify_and_promote_cherry_html
+
+    return verify_and_promote_cherry_html(
+        Path(settings.cherry_postprocess_html_path),
+        Path(settings.storage_dir),
+        chrome_path=Path(settings.cherry_browser_path) if settings.cherry_browser_path else None,
+        timeout_seconds=min(180, int(settings.cherry_html_timeout_seconds)),
+    )
 
 
 def _comfyui_queue_activity() -> dict[str, Any]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import shutil
@@ -15,6 +16,7 @@ from typing import Any
 
 import requests
 import websockets
+from PIL import Image
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,7 @@ class CherryHtmlResult:
     feather_enabled: bool
     steps: list[str]
     downloaded_zip: Path
+    source_sha256: str = ""
 
 
 def validate_cherry_html_runtime(html_path: Path, chrome_path: Path | None = None) -> dict[str, str]:
@@ -215,6 +218,12 @@ async def _run_cherry_html_async(
         raise RuntimeError("Cherry browser could not start after retries:\n" + "\n".join(launch_errors))
 
     try:
+        # Navigate to an immutable per-session copy. A pipeline git update can
+        # replace the configured HTML while jobs are running; pinning the bytes
+        # here prevents one task from executing two algorithm revisions.
+        runtime_html = session_dir / "cherry-postprocess.html"
+        shutil.copy2(html_path, runtime_html)
+        source_sha256 = _sha256_file(runtime_html)
         async with CdpClient(ws_url) as cdp:
             await cdp.send("Page.enable")
             await cdp.send("Runtime.enable")
@@ -223,7 +232,7 @@ async def _run_cherry_html_async(
                 "Browser.setDownloadBehavior",
                 {"behavior": "allow", "downloadPath": str(download_dir)},
             )
-            await cdp.send("Page.navigate", {"url": html_path.as_uri()})
+            await cdp.send("Page.navigate", {"url": runtime_html.as_uri()})
             try:
                 await cdp.wait_event("Page.loadEventFired", timeout=30.0)
             except TimeoutError:
@@ -237,6 +246,14 @@ async def _run_cherry_html_async(
             node_id = node.get("nodeId")
             if not node_id:
                 raise RuntimeError("cherry html file input not found")
+            # Recent standalone HTML revisions intentionally expose a
+            # single-file picker while drag/drop still accepts many images.
+            # CDP uses the picker contract, so enable multiple only inside the
+            # disposable automation page before assigning a micro-batch.
+            await cdp.evaluate(
+                "document.getElementById('file-input').multiple=true;",
+                timeout=10.0,
+            )
             await cdp.send("DOM.setFileInputFiles", {"nodeId": node_id, "files": [str(path) for path in files]})
             preset = await cdp.evaluate(
                 _file_input_preset_script(len(files)),
@@ -259,6 +276,7 @@ async def _run_cherry_html_async(
             feather_enabled=bool((preset or {}).get("feather")),
             steps=[str(step) for step in ((preset or {}).get("steps") or [])],
             downloaded_zip=downloaded,
+            source_sha256=source_sha256,
         )
     finally:
         _stop_chrome(proc)
@@ -312,19 +330,26 @@ async def _wait_processing_done(cdp: CdpClient, timeout_seconds: int) -> None:
             (()=>{
               const err=document.getElementById('error-msg');
               const progress=document.getElementById('progress-text');
+              const button=document.getElementById('btn-process');
               return {
                 done: !!resultBlob,
                 error: err && err.style.display !== 'none' ? err.textContent : '',
-                progress: progress ? progress.textContent : ''
+                progress: progress ? progress.textContent : '',
+                processing: !!(button && button.disabled)
               };
             })()
             """,
             timeout=10.0,
         )
-        if state and state.get("error"):
-            raise RuntimeError(str(state.get("error")))
         if state and state.get("done"):
             return
+        # Some Cherry HTML revisions reuse error-msg for non-fatal notices
+        # (for example, optional reference-image steps being skipped). The
+        # process button stays disabled while work is still progressing, so do
+        # not turn an in-progress notice into a failed bot task. A real catch
+        # path re-enables the button without producing resultBlob.
+        if state and state.get("error") and not state.get("processing"):
+            raise RuntimeError(str(state.get("error")))
         await asyncio.sleep(0.5)
     raise TimeoutError("cherry html processing timed out")
 
@@ -536,6 +561,121 @@ def _cleanup_old_sessions(work_root: Path, max_age_seconds: int = 3600) -> None:
                 shutil.rmtree(path, ignore_errors=True)
         except OSError:
             continue
+
+
+def verified_cherry_html_path(source_path: Path, storage_dir: Path) -> Path:
+    metadata_path = Path(storage_dir) / "cherry_html_releases" / "active.json"
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        configured_source = Path(source_path).resolve()
+        release_source = Path(str(payload.get("source_path") or "")).resolve()
+        if release_source != configured_source:
+            return Path(source_path)
+        active = Path(str(payload.get("path") or ""))
+        if active.is_file() and str(payload.get("sha256") or "") == _sha256_file(active):
+            return active
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    return Path(source_path)
+
+
+def verify_and_promote_cherry_html(
+    source_path: Path,
+    storage_dir: Path,
+    *,
+    chrome_path: Path | None = None,
+    timeout_seconds: int = 180,
+) -> dict[str, Any]:
+    source = Path(source_path).resolve()
+    storage = Path(storage_dir).resolve()
+    release_root = storage / "cherry_html_releases"
+    metadata_path = release_root / "active.json"
+    active_before = verified_cherry_html_path(source, storage)
+    digest = ""
+    try:
+        validate_cherry_html_runtime(source, chrome_path)
+        digest = _sha256_file(source)
+    except Exception as exc:
+        if active_before.is_file() and active_before.resolve() != source:
+            return {
+                "ok": True,
+                "promoted": False,
+                "sha256": digest,
+                "path": str(active_before),
+                "fallback": True,
+                "candidate_error": str(exc),
+            }
+        return {"ok": False, "promoted": False, "sha256": digest, "path": "", "candidate_error": str(exc)}
+    try:
+        current = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        current = {}
+    if str(current.get("sha256") or "") == digest and active_before.is_file():
+        return {"ok": True, "promoted": False, "sha256": digest, "path": str(active_before), "cached": True}
+
+    canary_root = storage / "cherry_html_canary" / digest[:16]
+    input_dir = canary_root / "input"
+    output_dir = canary_root / "output"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    probe = input_dir / "canary.png"
+    Image.new("RGBA", (32, 32), (96, 160, 224, 192)).save(probe)
+    produced = output_dir / "canary.png"
+    produced.unlink(missing_ok=True)
+    try:
+        result = run_cherry_html(
+            source,
+            input_dir,
+            output_dir,
+            [probe],
+            chrome_path=chrome_path,
+            timeout_seconds=max(30, int(timeout_seconds)),
+            storage_dir=storage,
+        )
+        if not produced.is_file() or produced.stat().st_size <= 0:
+            raise RuntimeError("Cherry canary did not produce canary.png")
+        with Image.open(produced) as image:
+            image.verify()
+        if result.total != 1:
+            raise RuntimeError(f"Cherry canary returned total={result.total}, expected 1")
+    except Exception as exc:
+        if active_before.is_file() and active_before.resolve() != source:
+            return {
+                "ok": True,
+                "promoted": False,
+                "sha256": digest,
+                "path": str(active_before),
+                "fallback": True,
+                "candidate_error": str(exc),
+            }
+        return {"ok": False, "promoted": False, "sha256": digest, "path": "", "candidate_error": str(exc)}
+
+    release_dir = release_root / digest
+    release_dir.mkdir(parents=True, exist_ok=True)
+    release_path = release_dir / "cherry-postprocess.html"
+    if not release_path.is_file() or _sha256_file(release_path) != digest:
+        shutil.copy2(source, release_path)
+    payload = {
+        "sha256": digest,
+        "path": str(release_path.resolve()),
+        "source_path": str(source),
+        "verified_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "canary_resize": result.resize,
+        "canary_steps": result.steps,
+    }
+    release_root.mkdir(parents=True, exist_ok=True)
+    metadata_tmp = release_root / "active.json.tmp"
+    metadata_tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    metadata_tmp.replace(metadata_path)
+    return {"ok": True, "promoted": True, "sha256": digest, "path": str(release_path), "cached": False}
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _free_port() -> int:

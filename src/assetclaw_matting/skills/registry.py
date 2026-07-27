@@ -159,6 +159,7 @@ SKILLS: list[dict[str, Any]] = [
             "view": "string optional active/running/queue/completed/list",
             "query": "string optional parent task id or file-name fragment",
             "detail": "boolean optional",
+            "all_conversations": "boolean optional; defaults false for Feishu users",
         },
         domain="agent",
         risk_level="readonly",

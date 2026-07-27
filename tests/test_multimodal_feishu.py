@@ -574,10 +574,10 @@ def test_current_work_in_feishu_only_shows_same_conversation(monkeypatch) -> Non
     from assetclaw_matting.runtime_context import reset_runtime_context, set_runtime_context
     from assetclaw_matting.skills import agent_ops_skills
 
-    monkeypatch.setattr(agent_ops_skills, "_direct_video_runs", lambda limit=40: [
+    monkeypatch.setattr(agent_ops_skills, "_direct_video_runs", lambda limit=40, conversation_id="": [
         {"run_id": "VID_OTHER", "conversation_id": "feishu:other", "items": []},
     ])
-    monkeypatch.setattr(agent_ops_skills, "_direct_image_runs", lambda limit=40: [
+    monkeypatch.setattr(agent_ops_skills, "_direct_image_runs", lambda limit=40, conversation_id="": [
         {"run_id": "IMG_MINE", "conversation_id": "feishu:mine", "items": []},
         {"run_id": "IMG_OTHER", "conversation_id": "feishu:other", "items": []},
     ])
@@ -1135,6 +1135,8 @@ def test_direct_image_recovery_closes_orphaned_parent(monkeypatch, tmp_path: Pat
     from assetclaw_matting.skills import direct_image_skills
 
     monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", tmp_path / "runs")
+    scheduled: list[str] = []
+    monkeypatch.setattr(direct_image_skills, "_start_recovery_worker", scheduled.append)
     run = {
         "id": "IMG_ORPHANED",
         "status": "RUNNING",
@@ -1150,8 +1152,25 @@ def test_direct_image_recovery_closes_orphaned_parent(monkeypatch, tmp_path: Pat
     saved = direct_image_skills._load("IMG_ORPHANED")
 
     assert result["closed"] == ["IMG_ORPHANED"]
-    assert saved["status"] == "FAILED"
-    assert "已自动清除僵死运行状态" in saved["error"]
+    assert scheduled == ["IMG_ORPHANED"]
+    assert saved["status"] == "QUEUED"
+    assert saved["stage"] == "recovery_queued"
+
+
+def test_direct_image_background_worker_keeps_scheduled_storage_root(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.skills import direct_image_skills
+
+    production_root = tmp_path / "production"
+    test_root = tmp_path / "pytest-isolated"
+    monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", production_root)
+
+    def fake_worker(run_id: str) -> None:
+        direct_image_skills._save({"id": run_id, "status": "DONE"})
+
+    direct_image_skills._worker_with_runs_root(fake_worker, "IMG_THREAD_TEST", test_root)
+
+    assert (test_root / "IMG_THREAD_TEST" / "status.json").is_file()
+    assert not (production_root / "IMG_THREAD_TEST").exists()
 
 
 def test_direct_image_send_results_returns_matte_processed_and_comparison(monkeypatch, tmp_path: Path) -> None:

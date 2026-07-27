@@ -23,6 +23,7 @@ from assetclaw_matting.skills.security import validate_path
 RUNS_ROOT = Path(settings.storage_dir) / "direct_image_runs"
 FINISHED = {"DONE", "FAILED", "CANCELED", "DONE_WITH_ERRORS"}
 _WORKERS: set[str] = set()
+_RUN_CONTEXT = threading.local()
 
 
 def start(
@@ -46,7 +47,7 @@ def start(
         pipeline_notice = str(pipeline.get("message") or "")
     names = list(source_names or [])
     run_id = "IMG_" + uuid.uuid4().hex[:12].upper()
-    run_dir = RUNS_ROOT / run_id
+    run_dir = _active_runs_root() / run_id
     originals_dir = run_dir / "original_images"
     matte_dir = run_dir / "matte"
     smooth_dir = run_dir / "smooth"
@@ -612,14 +613,34 @@ def _start_worker(run_id: str) -> None:
     if run_id in _WORKERS:
         return
     _WORKERS.add(run_id)
-    threading.Thread(target=_worker, args=(run_id,), name=f"direct_image_{run_id}", daemon=True).start()
+    threading.Thread(
+        target=_worker_with_runs_root,
+        args=(_worker, run_id, Path(RUNS_ROOT)),
+        name=f"direct_image_{run_id}",
+        daemon=True,
+    ).start()
 
 
 def _start_recovery_worker(run_id: str) -> None:
     if run_id in _WORKERS:
         return
     _WORKERS.add(run_id)
-    threading.Thread(target=_resume_worker, args=(run_id,), name=f"direct_image_recovery_{run_id}", daemon=True).start()
+    threading.Thread(
+        target=_worker_with_runs_root,
+        args=(_resume_worker, run_id, Path(RUNS_ROOT)),
+        name=f"direct_image_recovery_{run_id}",
+        daemon=True,
+    ).start()
+
+
+def _worker_with_runs_root(worker: Any, run_id: str, runs_root: Path) -> None:
+    """Pin a background worker to the storage root active when scheduled."""
+    _RUN_CONTEXT.runs_root = Path(runs_root)
+    try:
+        worker(run_id)
+    finally:
+        if hasattr(_RUN_CONTEXT, "runs_root"):
+            delattr(_RUN_CONTEXT, "runs_root")
 
 
 def _resume_worker(run_id: str) -> None:
@@ -817,17 +838,18 @@ def _cherry_plan_summary(items: list[dict[str, Any]]) -> str:
 
 
 def _load(run_id: str | None = None) -> dict[str, Any] | None:
+    runs_root = _active_runs_root()
     if run_id:
-        path = RUNS_ROOT / run_id / "status.json"
+        path = runs_root / run_id / "status.json"
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
         matched = _find_run_by_text(run_id)
         if matched:
             return matched
         return None
-    if not RUNS_ROOT.exists():
+    if not runs_root.exists():
         return None
-    paths = sorted(RUNS_ROOT.glob("IMG_*/status.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+    paths = sorted(runs_root.glob("IMG_*/status.json"), key=lambda item: item.stat().st_mtime, reverse=True)
     if not paths:
         return None
     active = []
@@ -843,9 +865,10 @@ def _load(run_id: str | None = None) -> dict[str, Any] | None:
 
 def _find_run_by_text(value: str) -> dict[str, Any] | None:
     query = str(value or "").strip().lower()
-    if not query or not RUNS_ROOT.exists():
+    runs_root = _active_runs_root()
+    if not query or not runs_root.exists():
         return None
-    paths = sorted(RUNS_ROOT.glob("IMG_*/status.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+    paths = sorted(runs_root.glob("IMG_*/status.json"), key=lambda item: item.stat().st_mtime, reverse=True)
     fallback: dict[str, Any] | None = None
     for path in paths:
         try:
@@ -871,7 +894,11 @@ def _save(run: dict[str, Any]) -> None:
 
 
 def _run_dir(run: dict[str, Any]) -> Path:
-    return RUNS_ROOT / str(run["id"])
+    return _active_runs_root() / str(run["id"])
+
+
+def _active_runs_root() -> Path:
+    return Path(getattr(_RUN_CONTEXT, "runs_root", RUNS_ROOT))
 
 
 def _validate_image(path: str) -> Path:

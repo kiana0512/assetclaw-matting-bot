@@ -9,12 +9,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from PIL import Image
+
 from assetclaw_matting.skills.media_skills import IMAGE_EXTS
 from assetclaw_matting.skills.security import validate_path
 
 
 _WORKER_RUNS: set[str] = set()
 _MONITORING_RUNS: set[str] = set()
+
+
+class CherryBatchCapacityError(RuntimeError):
+    """The HTML renderer ran out of per-session memory for a multi-file batch."""
 
 
 def _now() -> str:
@@ -307,6 +313,8 @@ def _run_worker(run_id: str) -> None:
 
 
 def _run_worker_html(run_id: str, row: Any) -> None:
+    from assetclaw_matting.config import settings
+
     src = Path(row["input_dir"])
     dst = Path(row["output_dir"])
     files = [Path(path) for path in json.loads(row["files_json"] or "[]")]
@@ -325,40 +333,79 @@ def _run_worker_html(run_id: str, row: Any) -> None:
         pending = [path for path in group_files if str(path) not in done]
         if not pending:
             continue
-        try:
-            result = _run_html_group_with_retries(run_id, src, dst, pending, options)
-            width, height = _parse_resize(result.resize)
-            if width and height:
-                options["resize_width"] = width
-                options["resize_height"] = height
-            options["inferred_profile"] = result.profile
-            options["html_feather_enabled"] = result.feather_enabled
-            options["html_steps"] = result.steps
-            options.setdefault("html_runs", []).append(
-                {
-                    "input_dir": str(pending[0].parent),
-                    "count": len(pending),
-                    "profile": result.profile,
-                    "resize": result.resize,
-                    "feather_enabled": result.feather_enabled,
-                    "steps": result.steps,
-                }
-            )
-            for image_path in pending:
-                target = _output_target(src, dst, image_path)
-                if not target.exists():
-                    raise FileNotFoundError(str(target))
-                processed.append({"src_path": str(image_path), "dst_path": str(target), "rel_path": str(image_path.relative_to(src))})
-            options["processed"] = processed
-            _save_progress(run_id, completed=len(processed), failed=len(errors), options=options)
-        except Exception as exc:
-            for image_path in pending:
-                errors.append({"src_path": str(image_path), "rel_path": str(image_path.relative_to(src)), "error": str(exc)})
-            options["errors"] = errors
-            _save_progress(run_id, completed=len(processed), failed=len(errors), options=options, error=str(exc))
-            _set_run_status(run_id, "FAILED")
-            _notify(run_id, f"Cherry HTML 后处理失败：{pending[0].parent}\n{exc}")
-            return
+        queue = _chunk_html_files(
+            pending,
+            max_files=int(settings.cherry_html_batch_max_files),
+            max_pixels=int(settings.cherry_html_batch_max_pixels),
+        )
+        options["html_batch_policy"] = {
+            "max_files": max(1, int(settings.cherry_html_batch_max_files)),
+            "max_pixels": max(1, int(settings.cherry_html_batch_max_pixels)),
+        }
+        while queue:
+            batch = queue.pop(0)
+            latest = _get_run(run_id)
+            if not latest or latest["status"] == "CANCELED":
+                return
+            try:
+                result = _run_html_group_with_retries(run_id, src, dst, batch, options)
+                width, height = _parse_resize(result.resize)
+                if width and height:
+                    options["resize_width"] = width
+                    options["resize_height"] = height
+                options["inferred_profile"] = result.profile
+                options["html_feather_enabled"] = result.feather_enabled
+                options["html_steps"] = result.steps
+                options["source_sha256"] = result.source_sha256
+                options.setdefault("html_runs", []).append(
+                    {
+                        "input_dir": str(batch[0].parent),
+                        "count": len(batch),
+                        "profile": result.profile,
+                        "resize": result.resize,
+                        "feather_enabled": result.feather_enabled,
+                        "steps": result.steps,
+                        "source_sha256": result.source_sha256,
+                    }
+                )
+                for image_path in batch:
+                    target = _output_target(src, dst, image_path)
+                    if not target.exists():
+                        raise FileNotFoundError(str(target))
+                    processed.append(
+                        {
+                            "src_path": str(image_path),
+                            "dst_path": str(target),
+                            "rel_path": str(image_path.relative_to(src)),
+                        }
+                    )
+                    done.add(str(image_path))
+                options["processed"] = processed
+                _save_progress(run_id, completed=len(processed), failed=len(errors), options=options, error="")
+            except CherryBatchCapacityError as exc:
+                if len(batch) <= 1:
+                    raise
+                midpoint = max(1, len(batch) // 2)
+                left, right = batch[:midpoint], batch[midpoint:]
+                options.setdefault("html_batch_splits", []).append(
+                    {
+                        "input_dir": str(batch[0].parent),
+                        "count": len(batch),
+                        "split_counts": [len(left), len(right)],
+                        "error": str(exc),
+                        "created_at": _now(),
+                    }
+                )
+                _save_progress(run_id, completed=len(processed), failed=len(errors), options=options, error="")
+                queue[0:0] = [left, right]
+            except Exception as exc:
+                for image_path in batch:
+                    errors.append({"src_path": str(image_path), "rel_path": str(image_path.relative_to(src)), "error": str(exc)})
+                options["errors"] = errors
+                _save_progress(run_id, completed=len(processed), failed=len(errors), options=options, error=str(exc))
+                _set_run_status(run_id, "FAILED")
+                _notify(run_id, f"Cherry HTML 后处理失败：{batch[0].parent}\n{exc}")
+                return
 
     final_status = "DONE_WITH_ERRORS" if errors else "DONE"
     _set_run_status(run_id, final_status)
@@ -415,15 +462,65 @@ def _run_html_group_with_retries(
                     "error": str(exc),
                 }
             )
-            retrying = attempt < attempts
+            capacity_error = _is_html_capacity_error(exc) and len(pending) > 1
+            retrying = attempt < attempts and not capacity_error
             message = f"Cherry HTML 第 {attempt}/{attempts} 次失败"
             if retrying:
                 message += "，将使用全新浏览器会话自动重试"
             _save_progress(run_id, options=options, error=f"{message}: {exc}")
+            if capacity_error:
+                raise CherryBatchCapacityError(str(exc)) from exc
             if retrying:
                 time.sleep(min(2**(attempt - 1), 4))
+            else:
+                break
     raise RuntimeError(
         f"Cherry HTML failed after {attempts} attempts: {failures[-1] if failures else 'unknown error'}"
+    )
+
+
+def _chunk_html_files(files: list[Path], *, max_files: int, max_pixels: int) -> list[list[Path]]:
+    file_limit = max(1, int(max_files))
+    pixel_limit = max(1, int(max_pixels))
+    batches: list[list[Path]] = []
+    current: list[Path] = []
+    current_pixels = 0
+    for path in files:
+        pixels = _image_pixel_count(path, fallback_pixels=pixel_limit)
+        if current and (len(current) >= file_limit or current_pixels + pixels > pixel_limit):
+            batches.append(current)
+            current = []
+            current_pixels = 0
+        current.append(path)
+        current_pixels += pixels
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _image_pixel_count(path: Path, *, fallback_pixels: int) -> int:
+    try:
+        with Image.open(path) as image:
+            return max(1, int(image.width) * int(image.height))
+    except OSError:
+        # Let the HTML runner report the actual decode error. Treat an image
+        # with unknown dimensions as a full batch so it cannot amplify memory
+        # pressure on otherwise valid files.
+        return max(1, int(fallback_pixels))
+
+
+def _is_html_capacity_error(exc: Exception) -> bool:
+    message = str(exc).casefold()
+    return any(
+        token in message
+        for token in (
+            "array buffer allocation failed",
+            "arraybuffer allocation failed",
+            "out of memory",
+            "not enough memory",
+            "renderer process crashed",
+            "render process gone",
+        )
     )
 
 
@@ -571,8 +668,12 @@ def _save_progress(
 
 def _tool_source_path() -> Path:
     from assetclaw_matting.config import settings
+    from assetclaw_matting.services.cherry_html_runner import verified_cherry_html_path
 
-    return Path(settings.cherry_postprocess_html_path)
+    return verified_cherry_html_path(
+        Path(settings.cherry_postprocess_html_path),
+        Path(settings.storage_dir),
+    )
 
 
 def _require_html_runtime() -> dict[str, str]:

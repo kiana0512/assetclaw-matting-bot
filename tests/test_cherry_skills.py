@@ -142,3 +142,58 @@ def test_cherry_start_refuses_missing_authoritative_html(monkeypatch, tmp_path: 
 
     with pytest.raises(FileNotFoundError, match="Cherry algorithm HTML not found"):
         run_start(str(src), str(dst))
+
+
+def test_chunk_html_files_bounds_file_count_and_raw_pixels(tmp_path: Path) -> None:
+    files = []
+    for index in range(5):
+        path = tmp_path / f"{index:04d}.png"
+        Image.new("RGBA", (100, 100), (255, 0, 0, 128)).save(path)
+        files.append(path)
+
+    batches = cherry_skills._chunk_html_files(files, max_files=3, max_pixels=20_000)
+
+    assert [len(batch) for batch in batches] == [2, 2, 1]
+    assert [path.name for batch in batches for path in batch] == [path.name for path in files]
+
+
+def test_capacity_error_splits_batch_instead_of_retrying_same_load(monkeypatch, tmp_path: Path) -> None:
+    src = tmp_path / "input"
+    dst = tmp_path / "output"
+    html = tmp_path / "cherry-postprocess.html"
+    html.write_text('<input id="file-input"><button id="btn-process"></button><button id="btn-download"></button>', encoding="utf-8")
+    monkeypatch.setattr(settings, "cherry_postprocess_html_path", html)
+    monkeypatch.setattr(settings, "cherry_html_batch_max_files", 4)
+    monkeypatch.setattr(settings, "cherry_html_batch_max_pixels", 1_000_000)
+    monkeypatch.setattr(cherry_skills, "_require_html_runtime", lambda: {"html_path": str(html), "browser_path": "test-browser"})
+    calls: list[int] = []
+
+    def fake_html_runner(html_path, input_root, output_root, files, **kwargs):
+        calls.append(len(files))
+        if len(files) > 1:
+            raise RuntimeError("Array buffer allocation failed")
+        source = files[0]
+        target = output_root / source.relative_to(input_root).with_suffix(".png")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        Image.open(source).convert("RGBA").save(target)
+        return CherryHtmlResult(
+            output_dir=output_root,
+            total=1,
+            profile="half",
+            resize="256x256",
+            feather_enabled=False,
+            steps=["fringe", "resize2"],
+            downloaded_zip=output_root / "test.zip",
+        )
+
+    monkeypatch.setattr("assetclaw_matting.services.cherry_html_runner.run_cherry_html", fake_html_runner)
+    for index in range(4):
+        _make_frame(src / f"{index:04d}.png", 128)
+
+    started = run_start(str(src), str(dst), recursive=False, notify_interval_seconds=60)
+    status = _wait_done(started["run_id"])
+
+    assert status["status"] == "DONE"
+    assert status["completed"] == 4
+    assert calls == [4, 2, 1, 1, 2, 1, 1]
+    assert len(status["options"]["html_batch_splits"]) == 3

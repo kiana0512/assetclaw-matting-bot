@@ -25,15 +25,16 @@ def current_work(
     task_view: str = "",
 ) -> dict[str, Any]:
     """Summarize the machine's current production context in one readonly call."""
-    video_runs = _direct_video_runs(limit=40)
-    image_runs = _direct_image_runs(limit=40)
     from assetclaw_matting.runtime_context import get_runtime_context
 
     runtime = get_runtime_context()
     conversation_id = str(runtime.get("conversation_id") or "")
-    if runtime.get("channel") == "feishu" and conversation_id and not all_conversations:
-        video_runs = [run for run in video_runs if str(run.get("conversation_id") or "") == conversation_id]
-        image_runs = [run for run in image_runs if str(run.get("conversation_id") or "") == conversation_id]
+    conversation_filter = conversation_id if runtime.get("channel") == "feishu" and conversation_id and not all_conversations else ""
+    video_runs = _direct_video_runs(limit=40, conversation_id=conversation_filter)
+    image_runs = _direct_image_runs(limit=40, conversation_id=conversation_filter)
+    if conversation_filter:
+        video_runs = [run for run in video_runs if str(run.get("conversation_id") or "") == conversation_filter]
+        image_runs = [run for run in image_runs if str(run.get("conversation_id") or "") == conversation_filter]
     video_runs = _filter_media_runs(video_runs, date_start=date_start, date_end=date_end, query=query, include_finished=include_finished)
     image_runs = _filter_media_runs(image_runs, date_start=date_start, date_end=date_end, query=query, include_finished=include_finished)
     media = str(media_type or "").lower()
@@ -87,6 +88,7 @@ def task_overview(
     view: str = "active",
     query: str | None = None,
     detail: bool = False,
+    all_conversations: bool = False,
 ) -> dict[str, Any]:
     """Return user-facing parent tasks grouped by source instead of raw worker runs."""
     normalized_scope = str(scope or "all").strip().lower()
@@ -107,7 +109,7 @@ def task_overview(
         detail=detail,
         media_type=media_type,
         include_finished=include_finished,
-        all_conversations=True,
+        all_conversations=all_conversations,
         task_view=normalized_view,
     )
     payload.setdefault("filters", {})["scope"] = normalized_scope
@@ -370,7 +372,7 @@ def _latest_pipeline() -> dict[str, Any]:
     }
 
 
-def _direct_video_runs(limit: int = 8) -> list[dict[str, Any]]:
+def _direct_video_runs(limit: int = 8, conversation_id: str = "") -> list[dict[str, Any]]:
     from assetclaw_matting.config import settings
 
     root = Path(settings.storage_dir) / "direct_video_runs"
@@ -380,7 +382,13 @@ def _direct_video_runs(limit: int = 8) -> list[dict[str, Any]]:
         run = _load_status_file(path)
         if not run:
             continue
-        videos = [_video_item_summary(run, item, count_cache) for item in run.get("videos") or []]
+        if conversation_id and str(run.get("conversation_id") or "") != conversation_id:
+            continue
+        progress = _matting_progress_snapshot(run)
+        videos = [
+            _video_item_summary(run, item, count_cache, progress=progress, item_position=position)
+            for position, item in enumerate(run.get("videos") or [])
+        ]
         items.append(
             {
                 "kind": "video",
@@ -401,7 +409,7 @@ def _direct_video_runs(limit: int = 8) -> list[dict[str, Any]]:
     return items
 
 
-def _direct_image_runs(limit: int = 8) -> list[dict[str, Any]]:
+def _direct_image_runs(limit: int = 8, conversation_id: str = "") -> list[dict[str, Any]]:
     from assetclaw_matting.config import settings
 
     root = Path(settings.storage_dir) / "direct_image_runs"
@@ -411,7 +419,13 @@ def _direct_image_runs(limit: int = 8) -> list[dict[str, Any]]:
         run = _load_status_file(path)
         if not run:
             continue
-        images = [_image_item_summary(run, item, count_cache) for item in run.get("images") or []]
+        if conversation_id and str(run.get("conversation_id") or "") != conversation_id:
+            continue
+        progress = _matting_progress_snapshot(run)
+        images = [
+            _image_item_summary(run, item, count_cache, progress=progress, item_position=position)
+            for position, item in enumerate(run.get("images") or [])
+        ]
         items.append(
             {
                 "kind": "image",
@@ -508,9 +522,18 @@ def _load_status_file(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _video_item_summary(run: dict[str, Any], item: dict[str, Any], count_cache: dict[str, int] | None = None) -> dict[str, Any]:
+def _video_item_summary(
+    run: dict[str, Any],
+    item: dict[str, Any],
+    count_cache: dict[str, int] | None = None,
+    *,
+    progress: dict[str, Any] | None = None,
+    item_position: int = 0,
+) -> dict[str, Any]:
     frame_total = int(item.get("frame_count") or _count_pngs_value(item.get("frame_dir"), count_cache))
-    matte_done = _count_pngs_value(item.get("matte_dir"), count_cache)
+    local_matte_done = _count_pngs_value(item.get("matte_dir"), count_cache)
+    remote_matte_done = _allocated_matting_completed(run, item_position, frame_total, progress)
+    matte_done = min(frame_total, max(local_matte_done, remote_matte_done)) if frame_total else max(local_matte_done, remote_matte_done)
     smooth_done = _count_pngs_value(item.get("smooth_dir"), count_cache)
     children = run.get("children") if isinstance(run.get("children"), dict) else {}
     repair_batch = run.get("repair_batch") if isinstance(run.get("repair_batch"), dict) else {}
@@ -529,6 +552,8 @@ def _video_item_summary(run: dict[str, Any], item: dict[str, Any], count_cache: 
         "aspect": item.get("aspect") or "",
         "output_size": item.get("cherry_output_size") or "",
         "comfyui_run_id": children.get("comfyui_run_id") or "",
+        "progress_source": (progress or {}).get("source") or "filesystem",
+        "progress_updated_at": (progress or {}).get("updated_at") or run.get("updated_at") or "",
         "cherry_run_id": children.get("cherry_run_id") or "",
         "last_log": (run.get("log") or [{}])[-1].get("message", ""),
         "queue_position": (
@@ -539,10 +564,19 @@ def _video_item_summary(run: dict[str, Any], item: dict[str, Any], count_cache: 
     }
 
 
-def _image_item_summary(run: dict[str, Any], item: dict[str, Any], count_cache: dict[str, int] | None = None) -> dict[str, Any]:
-    matte_done = _count_pngs_value(item.get("matte_dir"), count_cache)
+def _image_item_summary(
+    run: dict[str, Any],
+    item: dict[str, Any],
+    count_cache: dict[str, int] | None = None,
+    *,
+    progress: dict[str, Any] | None = None,
+    item_position: int = 0,
+) -> dict[str, Any]:
+    local_matte_done = _count_pngs_value(item.get("matte_dir"), count_cache)
     smooth_done = _count_pngs_value(item.get("smooth_dir"), count_cache)
     total = 1
+    remote_matte_done = _allocated_matting_completed(run, item_position, total, progress)
+    matte_done = min(total, max(local_matte_done, remote_matte_done))
     children = run.get("children") if isinstance(run.get("children"), dict) else {}
     return {
         "run_id": run.get("id"),
@@ -559,9 +593,89 @@ def _image_item_summary(run: dict[str, Any], item: dict[str, Any], count_cache: 
         "aspect": item.get("aspect") or "",
         "output_size": item.get("cherry_output_size") or "",
         "comfyui_run_id": children.get("comfyui_run_id") or "",
+        "progress_source": (progress or {}).get("source") or "filesystem",
+        "progress_updated_at": (progress or {}).get("updated_at") or run.get("updated_at") or "",
         "cherry_run_id": children.get("cherry_run_id") or "",
         "last_log": (run.get("log") or [{}])[-1].get("message", ""),
     }
+
+
+def _matting_progress_snapshot(run: dict[str, Any]) -> dict[str, Any]:
+    """Read the exact current matting child and keep progress monotonic.
+
+    Direct-media outputs may remain absent locally while GPU Control is still
+    running, so counting matte files alone can incorrectly report 0/N.  The
+    current child id is the authority; the persisted parent snapshot is only a
+    fallback and is ignored when it belongs to an older generation.
+    """
+    status = str(run.get("status") or "").upper()
+    stage = str(run.get("stage") or "").lower()
+    if status in DONE_STATUSES or stage not in {"matting", "repair_matting", "waiting_matting_queue"}:
+        return {}
+    children = run.get("children") if isinstance(run.get("children"), dict) else {}
+    child_id = str(children.get("comfyui_run_id") or "").strip()
+    if not child_id:
+        return {}
+
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    persisted = children.get("comfyui") if isinstance(children.get("comfyui"), dict) else {}
+    persisted_id = str(persisted.get("run_id") or "").strip()
+    if persisted and persisted_id == child_id:
+        candidates.append(("parent_snapshot", persisted))
+
+    try:
+        from assetclaw_matting.skills.comfyui_skills import run_status
+
+        live = run_status(child_id, include_gpu=False)
+    except Exception:
+        live = {}
+    if isinstance(live, dict) and live.get("ok") and str(live.get("run_id") or "").strip() == child_id:
+        candidates.append(("comfyui_live", live))
+
+    if not candidates:
+        return {"run_id": child_id, "completed": 0, "failed": 0, "source": "filesystem"}
+
+    completed = max(_safe_nonnegative_int(payload.get("completed")) for _, payload in candidates)
+    failed = max(_safe_nonnegative_int(payload.get("failed")) for _, payload in candidates)
+    freshest_source, freshest = candidates[-1]
+    total = max(_safe_nonnegative_int(payload.get("total")) for _, payload in candidates)
+    return {
+        "run_id": child_id,
+        "status": freshest.get("status") or persisted.get("status") or "",
+        "completed": min(total, completed) if total else completed,
+        "failed": min(total, failed) if total else failed,
+        "total": total,
+        "source": freshest_source,
+        "updated_at": freshest.get("updated_at") or persisted.get("updated_at") or run.get("updated_at") or "",
+    }
+
+
+def _allocated_matting_completed(
+    run: dict[str, Any],
+    item_position: int,
+    item_total: int,
+    progress: dict[str, Any] | None,
+) -> int:
+    if not progress or item_total <= 0:
+        return 0
+    completed = _safe_nonnegative_int(progress.get("completed"))
+    raw_items = run.get("videos") or run.get("images") or []
+    offset = 0
+    for position, item in enumerate(raw_items):
+        if position >= item_position:
+            break
+        if run.get("videos"):
+            offset += _safe_nonnegative_int(item.get("frame_count"))
+        else:
+            offset += 1
+    return min(item_total, max(0, completed - offset))
+
+
+def _safe_nonnegative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _display_name(item: dict[str, Any]) -> str:

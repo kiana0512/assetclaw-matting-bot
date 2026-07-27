@@ -328,6 +328,7 @@ def run_status(run_id: str | None = None, include_gpu: bool = True) -> dict[str,
         "last_completed_detail": _path_detail(_last_completed_rel_path(prompt_map)),
         "last_error": str(remote_error) if backend == "gpu_control" and remote_error else _last_error_summary(error_items),
         "error_items": _error_item_summaries(error_items[:5]),
+        "updated_at": row["updated_at"],
     }
     if include_gpu:
         result["gpu"] = (

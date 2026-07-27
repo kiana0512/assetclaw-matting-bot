@@ -1,4 +1,7 @@
 from pathlib import Path
+import asyncio
+import hashlib
+import json
 
 import pytest
 
@@ -112,3 +115,93 @@ def test_file_input_script_does_not_dispatch_duplicate_change_event() -> None:
     assert "const expected=54" in script
     assert "dispatchEvent" not in script
     assert "collectedFiles.length!==expected" in script
+
+
+def test_runner_enables_multi_file_picker_for_automation() -> None:
+    source = Path(cherry_html_runner.__file__).read_text(encoding="utf-8")
+
+    assert "document.getElementById('file-input').multiple=true" in source
+
+
+def test_wait_processing_ignores_nonfatal_notice_while_button_is_busy(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeCdp:
+        def __init__(self) -> None:
+            self.states = iter(
+                [
+                    {"done": False, "error": "optional reference step skipped", "processing": True},
+                    {"done": True, "error": "optional reference step skipped", "processing": False},
+                ]
+            )
+
+        async def evaluate(self, *_args, **_kwargs):
+            return next(self.states)
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(cherry_html_runner.asyncio, "sleep", no_sleep)
+    asyncio.run(cherry_html_runner._wait_processing_done(FakeCdp(), 5))  # type: ignore[arg-type]
+
+
+def test_wait_processing_raises_error_after_processing_stops() -> None:
+    class FakeCdp:
+        @staticmethod
+        async def evaluate(*_args, **_kwargs):
+            return {"done": False, "error": "decode failed", "processing": False}
+
+    with pytest.raises(RuntimeError, match="decode failed"):
+        asyncio.run(cherry_html_runner._wait_processing_done(FakeCdp(), 5))  # type: ignore[arg-type]
+
+
+def test_verified_release_is_scoped_to_configured_source(tmp_path: Path) -> None:
+    source_a = tmp_path / "a.html"
+    source_b = tmp_path / "b.html"
+    source_a.write_text("a", encoding="utf-8")
+    source_b.write_text("b", encoding="utf-8")
+    release = tmp_path / "storage" / "cherry_html_releases" / "release.html"
+    release.parent.mkdir(parents=True)
+    release.write_text("verified", encoding="utf-8")
+    (release.parent / "active.json").write_text(
+        json.dumps(
+            {
+                "source_path": str(source_a.resolve()),
+                "path": str(release.resolve()),
+                "sha256": hashlib.sha256(release.read_bytes()).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert cherry_html_runner.verified_cherry_html_path(source_a, tmp_path / "storage") == release.resolve()
+    assert cherry_html_runner.verified_cherry_html_path(source_b, tmp_path / "storage") == source_b
+
+
+def test_invalid_candidate_falls_back_to_last_verified_release(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    source = tmp_path / "cherry-postprocess.html"
+    source.write_text("candidate", encoding="utf-8")
+    release = tmp_path / "storage" / "cherry_html_releases" / "old" / "cherry-postprocess.html"
+    release.parent.mkdir(parents=True)
+    release.write_text("verified", encoding="utf-8")
+    metadata = release.parents[1] / "active.json"
+    metadata.write_text(
+        json.dumps(
+            {
+                "source_path": str(source.resolve()),
+                "path": str(release.resolve()),
+                "sha256": hashlib.sha256(release.read_bytes()).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        cherry_html_runner,
+        "validate_cherry_html_runtime",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("missing process button")),
+    )
+
+    result = cherry_html_runner.verify_and_promote_cherry_html(source, tmp_path / "storage")
+
+    assert result["ok"] is True
+    assert result["fallback"] is True
+    assert Path(result["path"]) == release.resolve()
+    assert "missing process button" in result["candidate_error"]
