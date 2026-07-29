@@ -75,8 +75,14 @@ def run_preview(
     files = _collect_images(src, recursive=recursive, max_images=max_images)
     groups = _group_sequences(src, files)
     reference = _require_color_reference(reference_path) if reference_path else None
-    preview_options = _merge_options(options)
-    if not reference:
+    if reference:
+        expected_profile, expected_width, expected_height = _require_expected_output_profile(options)
+        merge_input = dict(options)
+        merge_input.setdefault("profile", expected_profile)
+        preview_options = _merge_options(merge_input)
+        _lock_expected_output(preview_options, expected_profile, expected_width, expected_height)
+    else:
+        preview_options = _merge_options(options)
         preview_options["html_modules"] = [step for step in preview_options.get("html_modules") or [] if step not in {"colormatch", "align"}]
         preview_options["html_colormatch_enabled"] = False
         preview_options["html_align_enabled"] = False
@@ -120,6 +126,9 @@ def run_start(
     if reference_steps_required and reference is None:
         raise ValueError("reference_path is required for Cherry color matching and alignment")
     reference_steps_enabled = reference is not None
+    expected_output: tuple[str, int, int] | None = None
+    if reference_steps_enabled:
+        expected_output = _require_expected_output_profile(options)
     actual_reference_sha256 = _sha256_path(reference) if reference else ""
     expected_reference_sha256 = str(reference_sha256 or actual_reference_sha256).lower()
     if reference and actual_reference_sha256.lower() != expected_reference_sha256:
@@ -134,8 +143,14 @@ def run_start(
     run_id = _run_id()
     pinned_source, pinned_source_sha256 = _pin_html_for_run(run_id, _tool_source_path(), Path(settings.storage_dir))
     ctx = get_runtime_context()
-    opts = _merge_options(options)
-    if not reference_steps_enabled:
+    if reference_steps_enabled:
+        assert expected_output is not None
+        merge_input = dict(options)
+        merge_input.setdefault("profile", expected_output[0])
+        opts = _merge_options(merge_input)
+        _lock_expected_output(opts, *expected_output)
+    else:
+        opts = _merge_options(options)
         opts["html_modules"] = [step for step in opts.get("html_modules") or [] if step not in {"colormatch", "align"}]
         opts["html_colormatch_enabled"] = False
         opts["html_align_enabled"] = False
@@ -368,6 +383,7 @@ def _run_worker_html(run_id: str, row: Any) -> None:
         or _sha256_path(reference_path).lower() != expected_reference_sha256
     ):
         raise RuntimeError("frozen character reference changed before Cherry processing")
+    expected_output = _require_expected_output_profile(options) if reference_steps_required else None
     processed = options.get("processed") or []
     errors = options.get("errors") or []
     done = {item.get("src_path") for item in processed}
@@ -430,8 +446,15 @@ def _run_worker_html(run_id: str, row: Any) -> None:
                     expected_source_sha256=expected_source_sha256,
                     expected_reference_sha256=expected_reference_sha256,
                     reference_steps_required=reference_steps_required,
+                    expected_output=expected_output,
                 )
-                _validate_html_result(result, reference_steps_required=reference_steps_required)
+                _validate_html_result(
+                    result,
+                    reference_steps_required=reference_steps_required,
+                    expected_profile=expected_output[0] if expected_output else None,
+                    expected_width=expected_output[1] if expected_output else None,
+                    expected_height=expected_output[2] if expected_output else None,
+                )
                 if reference_steps_required and group_alignment_transform is None:
                     group_alignment_transform = dict(result.alignment_transform or {})
                     saved_group_transforms[group_key] = group_alignment_transform
@@ -523,6 +546,7 @@ def _run_html_group_with_retries(
     expected_source_sha256: str,
     expected_reference_sha256: str,
     reference_steps_required: bool,
+    expected_output: tuple[str, int, int] | None = None,
     attempts: int = 3,
 ):
     from assetclaw_matting.config import settings
@@ -543,6 +567,9 @@ def _run_html_group_with_retries(
                 reference_path=reference_path,
                 reference_steps_required=reference_steps_required,
                 alignment_transform=alignment_transform,
+                expected_profile=expected_output[0] if expected_output else None,
+                expected_width=expected_output[1] if expected_output else None,
+                expected_height=expected_output[2] if expected_output else None,
                 chrome_path=Path(settings.cherry_browser_path) if settings.cherry_browser_path else None,
                 timeout_seconds=int(settings.cherry_html_timeout_seconds),
                 storage_dir=Path(settings.storage_dir),
@@ -874,8 +901,72 @@ def _require_color_reference(reference_path: str | Path | None) -> Path:
     return reference
 
 
-def _validate_html_result(result: Any, *, reference_steps_required: bool = True) -> None:
+def _require_expected_output_profile(options: dict[str, Any]) -> tuple[str, int, int]:
+    """Resolve the immutable output contract for a reference-backed run.
+
+    Reference color/alignment assets are body-profile specific.  Falling back
+    to Cherry's input-shape auto detection can therefore pair a full-body
+    reference with a half-body output (or the reverse), so these runs must
+    name the profile explicitly.
+    """
+
+    raw_profile = options.get("expected_profile")
+    if raw_profile is None:
+        raw_profile = options.get("profile")
+    if raw_profile is None:
+        raw_profile = options.get("preset")
+    profile = str(raw_profile or "").strip().lower()
+    if profile not in {"full", "half"}:
+        raise ValueError("reference-enabled Cherry run requires explicit profile='full' or profile='half'; auto is forbidden")
+    width, height = (384, 512) if profile == "full" else (256, 256)
+    supplied_width = options.get("expected_width", options.get("target_width"))
+    supplied_height = options.get("expected_height", options.get("target_height"))
+    if supplied_width is not None and int(supplied_width) != width:
+        raise ValueError(f"expected_width conflicts with Cherry {profile} profile ({width}x{height})")
+    if supplied_height is not None and int(supplied_height) != height:
+        raise ValueError(f"expected_height conflicts with Cherry {profile} profile ({width}x{height})")
+    return profile, width, height
+
+
+def _lock_expected_output(options: dict[str, Any], profile: str, width: int, height: int) -> None:
+    """Pin all persisted/output-facing fields to one canonical profile."""
+
+    options["profile"] = profile
+    options["auto_profile_by_size"] = False
+    options["expected_profile"] = profile
+    options["expected_width"] = int(width)
+    options["expected_height"] = int(height)
+    options["expected_resize"] = f"{int(width)}x{int(height)}"
+    options["use_resize2"] = True
+    options["resize2_width"] = int(width)
+    options["resize2_height"] = int(height)
+    options["use_resize"] = True
+    options["resize_width"] = int(width)
+    options["resize_height"] = int(height)
+    options["html_feather_enabled"] = profile == "full"
+    modules = [str(step) for step in (options.get("html_modules") or []) if str(step) != "feather"]
+    if profile == "full":
+        insertion = modules.index("blur") if "blur" in modules else max(0, len(modules) - 2)
+        modules.insert(insertion, "feather")
+    options["html_modules"] = modules
+
+
+def _validate_html_result(
+    result: Any,
+    *,
+    reference_steps_required: bool = True,
+    expected_profile: str | None = None,
+    expected_width: int | None = None,
+    expected_height: int | None = None,
+) -> None:
     executed = [str(step) for step in (result.executed_steps or [])]
+    if expected_profile is not None:
+        expected_resize = f"{int(expected_width or 0)}x{int(expected_height or 0)}"
+        if str(result.profile) != expected_profile or str(result.resize) != expected_resize:
+            raise RuntimeError(
+                f"Cherry output profile mismatch: expected {expected_profile} {expected_resize}, "
+                f"got {result.profile} {result.resize}"
+            )
     if not reference_steps_required:
         if result.alignment_enabled or "align" in executed or "colormatch" in executed:
             raise RuntimeError("Cherry unexpectedly executed reference-dependent steps")

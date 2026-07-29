@@ -196,8 +196,13 @@ def recover_incomplete_runs() -> dict[str, Any]:
         current_status = str(run.get("status") or "")
         if current_status == "WAITING_CHARACTER":
             run_id = str(run.get("id") or status_path.parent.name)
-            from assetclaw_matting.services.character_resolution import all_run_units_frozen, reconcile_resolved_units
+            from assetclaw_matting.services.character_resolution import (
+                all_run_units_frozen,
+                mark_run_waiting,
+                reconcile_resolved_units,
+            )
 
+            mark_run_waiting("direct_video", run_id, immediate_if_uninitialized=True)
             reconcile_resolved_units("direct_video", run_id)
             if all_run_units_frozen("direct_video", run_id):
                 resume_after_character_resolution(run_id)
@@ -265,6 +270,8 @@ def repair_from_frames(run_id: str, resend: bool = True) -> dict[str, Any]:
         _extract_all(run)
         _mark(run, "RUNNING", "repair_matting")
         _run_comfyui(run)
+        if not _prepare_character_gate(run):
+            return {"ok": True, "run_id": run_id, **_public(run)}
         _mark(run, "RUNNING", "repair_postprocess")
         _run_cherry(run)
         _mark(run, "RUNNING", "repair_zip")
@@ -463,6 +470,42 @@ def resume_after_character_resolution(run_id: str) -> dict[str, Any]:
     return {"ok": True, "run_id": run_id, "status": "QUEUED", "scheduled": scheduled}
 
 
+def fail_character_confirmation_timeout(run_id: str, reason: str) -> dict[str, Any]:
+    """Terminally fail only a parent that is still at the character gate."""
+
+    run = _load(run_id)
+    if not run:
+        return {"ok": False, "run_id": run_id, "error": "direct video run not found"}
+    if str(run.get("status") or "") != "WAITING_CHARACTER":
+        return {
+            "ok": False,
+            "run_id": run_id,
+            "status": run.get("status"),
+            "error": "direct video run is no longer waiting for character confirmation",
+        }
+    run["status"] = "FAILED"
+    run["stage"] = "character_confirmation_timeout"
+    run["error"] = str(reason or "角色确认超时")
+    run["failure_kind"] = "character_confirmation_timeout"
+    run["auto_retry_disabled"] = True
+    run["character_question"] = ""
+    run["worker_pid"] = 0
+    resolution = run.setdefault("character_resolution", {})
+    resolution["pending"] = 0
+    resolution["expired"] = True
+    run["updated_at"] = _now()
+    _append_log(run, f"角色确认超时，任务已失败：{run['error']}")
+    if not _save(run, expected_statuses={"WAITING_CHARACTER"}):
+        latest = _load(run_id) or run
+        return {
+            "ok": False,
+            "run_id": run_id,
+            "status": latest.get("status"),
+            "error": "direct video run changed while applying character timeout",
+        }
+    return {"ok": True, "run_id": run_id, "status": "FAILED", "stage": run["stage"]}
+
+
 def preview_start_confirmation(arguments: dict[str, Any], confirmation_id: str) -> str:
     videos = arguments.get("video_paths") or []
     names = arguments.get("source_names") or []
@@ -579,8 +622,8 @@ def _extract_all(run: dict[str, Any]) -> None:
             raise RuntimeError(stderr.strip() or f"extract worker exited with {rc}")
         item["frame_count"] = int(last_payload.get("frame_count") or len(list(out_dir.glob("*.png"))))
         width, height = _first_frame_size(out_dir)
-        item["aspect"] = "square" if width and height and width == height else "portrait"
-        item["cherry_profile"] = "half" if item["aspect"] == "square" else "full"
+        item["cherry_profile"] = _cherry_profile_from_dimensions(width, height)
+        item["aspect"] = "square" if item["cherry_profile"] == "half" else "portrait"
         item["cherry_output_size"] = _cherry_output_size(str(item["cherry_profile"]))
         _append_log(
             run,
@@ -660,7 +703,13 @@ def _run_cherry(run: dict[str, Any]) -> None:
         smooth_dir = Path(str(item["smooth_dir"]))
         if not any(matte_dir.rglob("*.png")):
             raise RuntimeError(f"matte_dir has no png images: {matte_dir}")
-        profile = str(item.get("cherry_profile") or "auto")
+        profile = str(item.get("cherry_profile") or "").strip().lower()
+        if profile not in {"full", "half"}:
+            raise RuntimeError(f"Cherry output profile is missing or invalid for video item: {item.get('item_id') or item.get('index')}")
+        reference_path = str(item.get("color_reference_path") or "")
+        reference_sha256 = str(item.get("color_reference_sha256") or "").lower()
+        if not reference_path or not reference_sha256:
+            raise RuntimeError(f"character reference binding is incomplete for video item: {item.get('item_id') or item.get('index')}")
         item["cherry_output_size"] = item.get("cherry_output_size") or _cherry_output_size(profile)
         result = run_start(
             input_dir=str(matte_dir),
@@ -669,8 +718,9 @@ def _run_cherry(run: dict[str, Any]) -> None:
             skip_existing=False,
             notify_interval_seconds=run["notify_interval_seconds"],
             profile=profile,
-            reference_path=str(item.get("color_reference_path") or ""),
-            reference_sha256=str(item.get("color_reference_sha256") or ""),
+            expected_profile=profile,
+            reference_path=reference_path,
+            reference_sha256=reference_sha256,
             color_match_required=True,
             alignment_enabled=True,
         )
@@ -715,6 +765,11 @@ def _prepare_character_gate(run: dict[str, Any]) -> bool:
         _append_log(run, "角色参考图已逐视频冻结；Cherry 将在流程末尾依次执行校色和位置矫正。")
         _save(run)
         return True
+    if result.get("missing_profiles"):
+        raise RuntimeError(
+            "无法确定以下视频的 Cherry 输出规格，已停止后处理："
+            + "、".join(result.get("missing_profiles") or [])
+        )
     run["status"] = "WAITING_CHARACTER"
     run["stage"] = "waiting_character"
     run["recovery_from_stage"] = "postprocess"
@@ -722,6 +777,9 @@ def _prepare_character_gate(run: dict[str, Any]) -> bool:
     run["updated_at"] = _now()
     _append_log(run, "抠图已完成，等待用户确认角色后继续 Cherry 校色/矫正：" + "、".join(result.get("missing") or []))
     _save(run)
+    from assetclaw_matting.services.character_resolution import mark_run_waiting
+
+    mark_run_waiting("direct_video", str(run["id"]))
     return False
 
 
@@ -1194,6 +1252,14 @@ def _brief_pipeline_notice(text: str) -> str:
 
 def _cherry_output_size(profile: str) -> str:
     return "256x256" if str(profile or "").lower() in {"half", "emoji", "square"} else "384x512"
+
+
+def _cherry_profile_from_dimensions(width: int, height: int) -> str:
+    """Mirror Cherry's near-square rule, then freeze the resulting output profile."""
+
+    if width > 0 and height > 0 and abs((float(width) / float(height)) - 1.0) <= 0.01:
+        return "half"
+    return "full"
 
 
 def _cherry_plan_summary(items: list[dict[str, Any]]) -> str:

@@ -217,6 +217,10 @@ class Settings(BaseSettings):
     matting_pipeline_custom_node_name: str = "Cherry_lizi"
     cherry_html_runner_enabled: bool = True
     cherry_postprocess_html_path: Path = PROJECT_ROOT.parent / "imageclip" / "cherry-postprocess.html"
+    cherry_character_full_reference_dir: Path = PROJECT_ROOT.parent / "imageclip" / "CharactorFull"
+    cherry_character_emoji_reference_dir: Path = PROJECT_ROOT.parent / "imageclip" / "CharactorEmoji"
+    # Legacy single-folder setting retained while existing deployments migrate
+    # to the strict full/half reference catalog above.
     cherry_character_reference_dir: Path = PROJECT_ROOT.parent / "imageclip" / "Charactor"
     cherry_browser_path: Path | None = None
     cherry_html_timeout_seconds: int = 900
@@ -225,6 +229,14 @@ class Settings(BaseSettings):
     # not exhaust Chromium's ArrayBuffer heap while still preserving order.
     cherry_html_batch_max_files: int = 8
     cherry_html_batch_max_pixels: int = 12_000_000
+    # Character confirmation is intentionally independent from GPU workers.
+    # The original question is sent with the start acknowledgement; once
+    # matting reaches the character gate, send two reminders ten minutes apart
+    # and fail on the third interval if the user still has not answered.
+    character_confirmation_reminder_interval_seconds: int = 600
+    character_confirmation_max_reminders: int = 2
+    character_confirmation_sweep_interval_seconds: int = 30
+    character_confirmation_lease_seconds: int = 120
 
     default_batch_input_dir: Path = PROJECT_ROOT / "storage" / "batch_inputs"
     default_batch_output_dir: Path = PROJECT_ROOT / "storage" / "batch_outputs"
@@ -293,6 +305,8 @@ class Settings(BaseSettings):
             "comfyui_workflow_path": comfy_dir / "user" / "default" / "workflows" / "ImageClip.json",
             "matting_pipeline_repo_dir": pipeline_root,
             "cherry_postprocess_html_path": pipeline_root / "cherry-postprocess.html",
+            "cherry_character_full_reference_dir": pipeline_root / "CharactorFull",
+            "cherry_character_emoji_reference_dir": pipeline_root / "CharactorEmoji",
             "cherry_character_reference_dir": pipeline_root / "Charactor",
             "default_batch_input_dir": root / "storage" / "batch_inputs",
             "default_batch_output_dir": root / "storage" / "batch_outputs",
@@ -306,6 +320,12 @@ class Settings(BaseSettings):
         for key, value in defaults.items():
             data.setdefault(key, value)
         return data
+
+    @property
+    def cherry_character_half_reference_dir(self) -> Path:
+        """Compatibility spelling for the 256x256 emoji/half-body catalog."""
+
+        return self.cherry_character_emoji_reference_dir
 
     @property
     def feishu_admin_open_ids_list(self) -> list[str]:

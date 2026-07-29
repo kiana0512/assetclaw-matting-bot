@@ -695,6 +695,8 @@ def _media_item_status(run_status: str, stage: str, total: int, matte_done: int,
         return "完成"
     if run_status in {"FAILED", "CANCELED", "DONE_WITH_ERRORS"}:
         return {"FAILED": "失败", "CANCELED": "已取消", "DONE_WITH_ERRORS": "部分完成"}.get(run_status, run_status)
+    if run_status == "WAITING_CHARACTER" or stage == "waiting_character":
+        return "等待确认角色"
     if stage in {"queued", "pending"}:
         return "排队中"
     if stage == "repair_queued":

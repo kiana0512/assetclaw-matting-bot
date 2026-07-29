@@ -7,8 +7,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
+from PIL import Image, UnidentifiedImageError
+
 
 DEFAULT_CHARACTER_REFERENCE_ROOT = Path(r"C:\imageclip\Charactor")
+DEFAULT_CHARACTER_FULL_REFERENCE_ROOT = Path(r"C:\imageclip\CharactorFull")
+DEFAULT_CHARACTER_EMOJI_REFERENCE_ROOT = Path(r"C:\imageclip\CharactorEmoji")
+FULL_CHARACTER_REFERENCE_SIZE = (384, 512)
+HALF_CHARACTER_REFERENCE_SIZE = (256, 256)
 SUPPORTED_REFERENCE_SUFFIXES = frozenset({".jpeg", ".jpg", ".png", ".webp"})
 DEFAULT_CHARACTER_ALIASES: Mapping[str, tuple[str, ...]] = {
     # These are explicit legacy production names.  Keeping them here lets us
@@ -20,6 +26,19 @@ DEFAULT_CHARACTER_ALIASES: Mapping[str, tuple[str, ...]] = {
 
 class CharacterRegistryError(RuntimeError):
     """Raised when the on-disk character reference registry is invalid."""
+
+
+class CharacterProfileError(ValueError):
+    """Raised when a reference profile or output size is not deterministic."""
+
+
+class CharacterReferenceVariant(str, Enum):
+    FULL = "full"
+    HALF = "half"
+
+    @property
+    def output_size(self) -> tuple[int, int]:
+        return FULL_CHARACTER_REFERENCE_SIZE if self is self.FULL else HALF_CHARACTER_REFERENCE_SIZE
 
 
 class CharacterResolutionStatus(str, Enum):
@@ -37,6 +56,9 @@ class CharacterReference:
     aliases: tuple[str, ...]
     path: Path
     sha256: str
+    variant: CharacterReferenceVariant | None = None
+    width: int | None = None
+    height: int | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -45,6 +67,9 @@ class CharacterReference:
             "aliases": list(self.aliases),
             "path": str(self.path),
             "sha256": self.sha256,
+            "variant": self.variant.value if self.variant is not None else None,
+            "width": self.width,
+            "height": self.height,
         }
 
 
@@ -136,6 +161,7 @@ class CharacterRegistry:
         aliases: Mapping[str, Iterable[str]] | None = None,
         display_names: Mapping[str, str] | None = None,
         suffixes: Iterable[str] = SUPPORTED_REFERENCE_SUFFIXES,
+        variant: CharacterReferenceVariant | str | None = None,
     ) -> "CharacterRegistry":
         """Build a fresh registry from a configurable flat reference folder.
 
@@ -145,6 +171,9 @@ class CharacterRegistry:
         canonical names.
         """
 
+        normalized_variant = (
+            normalize_character_reference_variant(variant) if variant is not None else None
+        )
         reference_root = Path(root).expanduser().resolve()
         if not reference_root.is_dir():
             raise CharacterRegistryError(f"character reference root does not exist: {reference_root}")
@@ -189,6 +218,10 @@ class CharacterRegistry:
             display_name = normalized_display_names.get(canonical_id) or _default_display_name(path.stem)
             configured_aliases = normalized_aliases.get(canonical_id, ())
             alias_values = _deduplicate_aliases((canonical_id, display_name, *configured_aliases))
+            width: int | None = None
+            height: int | None = None
+            if normalized_variant is not None:
+                width, height = _validated_image_size(path, normalized_variant)
             references.append(
                 CharacterReference(
                     canonical_id=canonical_id,
@@ -196,6 +229,9 @@ class CharacterRegistry:
                     aliases=alias_values,
                     path=path.resolve(),
                     sha256=_sha256(path),
+                    variant=normalized_variant,
+                    width=width,
+                    height=height,
                 )
             )
 
@@ -272,6 +308,223 @@ class CharacterRegistry:
             candidates=candidates,
             reason="unique_boundary_safe_alias_match",
         )
+
+
+@dataclass(frozen=True, slots=True)
+class CharacterReferenceCatalog:
+    """Two-profile reference catalog with a union identity registry.
+
+    Identity matching is deliberately independent of asset availability.  A
+    character found in only one folder can still be identified; requesting its
+    missing profile then fails closed instead of silently using the wrong body
+    crop.
+    """
+
+    full_registry: CharacterRegistry
+    half_registry: CharacterRegistry
+    identity_registry: CharacterRegistry
+    catalog_revision: str
+
+    @classmethod
+    def discover(
+        cls,
+        full_root: str | Path = DEFAULT_CHARACTER_FULL_REFERENCE_ROOT,
+        emoji_root: str | Path = DEFAULT_CHARACTER_EMOJI_REFERENCE_ROOT,
+        *,
+        aliases: Mapping[str, Iterable[str]] | None = None,
+        display_names: Mapping[str, str] | None = None,
+        suffixes: Iterable[str] = SUPPORTED_REFERENCE_SUFFIXES,
+    ) -> "CharacterReferenceCatalog":
+        full = CharacterRegistry.discover(
+            full_root,
+            suffixes=suffixes,
+            variant=CharacterReferenceVariant.FULL,
+        )
+        half = CharacterRegistry.discover(
+            emoji_root,
+            suffixes=suffixes,
+            variant=CharacterReferenceVariant.HALF,
+        )
+        all_ids = {item.canonical_id for item in full.references} | {
+            item.canonical_id for item in half.references
+        }
+        custom_aliases = _normalize_mapping_keys(aliases or {})
+        normalized_display_names = {
+            canonical_character_id(key): str(value).strip()
+            for key, value in (display_names or {}).items()
+        }
+        unknown_alias_targets = sorted(set(custom_aliases) - all_ids)
+        if unknown_alias_targets:
+            raise CharacterRegistryError(
+                "aliases configured for unknown characters: " + ", ".join(unknown_alias_targets)
+            )
+        unknown_display_targets = sorted(set(normalized_display_names) - all_ids)
+        if unknown_display_targets:
+            raise CharacterRegistryError(
+                "display names configured for unknown characters: " + ", ".join(unknown_display_targets)
+            )
+
+        default_aliases = _normalize_mapping_keys(DEFAULT_CHARACTER_ALIASES)
+
+        def apply_metadata(registry: CharacterRegistry) -> CharacterRegistry:
+            references: list[CharacterReference] = []
+            for reference in registry.references:
+                canonical_id = reference.canonical_id
+                display_name = normalized_display_names.get(canonical_id) or reference.display_name
+                alias_values = _deduplicate_aliases(
+                    (
+                        canonical_id,
+                        display_name,
+                        *default_aliases.get(canonical_id, ()),
+                        *custom_aliases.get(canonical_id, ()),
+                    )
+                )
+                references.append(
+                    CharacterReference(
+                        canonical_id=canonical_id,
+                        display_name=display_name,
+                        aliases=alias_values,
+                        path=reference.path,
+                        sha256=reference.sha256,
+                        variant=reference.variant,
+                        width=reference.width,
+                        height=reference.height,
+                    )
+                )
+            return CharacterRegistry(registry.root, references)
+
+        full = apply_metadata(full)
+        half = apply_metadata(half)
+        identity_references = tuple(
+            full.get(canonical_id) or half.require(canonical_id)
+            for canonical_id in sorted(all_ids)
+        )
+        identity_root = Path(full.root.parent)
+        identity = CharacterRegistry(identity_root, identity_references)
+        revision = _reference_catalog_revision(full, half)
+        return cls(
+            full_registry=full,
+            half_registry=half,
+            identity_registry=identity,
+            catalog_revision=revision,
+        )
+
+    @property
+    def references(self) -> tuple[CharacterReference, ...]:
+        """Union character identities, not a profile-specific asset list."""
+
+        return self.identity_registry.references
+
+    def resolve(self, filename_or_path: str | Path) -> CharacterResolution:
+        return self.identity_registry.resolve(filename_or_path)
+
+    def registry_for(self, profile: object) -> CharacterRegistry:
+        normalized = normalize_character_profile(profile)
+        return self.full_registry if normalized == "full" else self.half_registry
+
+    def get(self, canonical_id: str, profile: object) -> CharacterReference | None:
+        """Return only the requested profile; never cross-profile fallback."""
+
+        return self.registry_for(profile).get(canonical_id)
+
+    def require(self, canonical_id: str, profile: object) -> CharacterReference:
+        normalized = normalize_character_profile(profile)
+        reference = self.get(canonical_id, normalized)
+        if reference is None:
+            size = CharacterReferenceVariant(normalized).output_size
+            raise CharacterRegistryError(
+                f"character {canonical_character_id(canonical_id)!r} has no {normalized} "
+                f"reference ({size[0]}x{size[1]}); cross-profile fallback is forbidden"
+            )
+        return reference
+
+    def available_profiles(self, canonical_id: str) -> tuple[str, ...]:
+        return tuple(
+            profile
+            for profile in ("full", "half")
+            if self.get(canonical_id, profile) is not None
+        )
+
+
+def normalize_character_reference_variant(value: object) -> CharacterReferenceVariant:
+    """Normalize only canonical variants; aliases belong to profile parsing."""
+
+    if isinstance(value, CharacterReferenceVariant):
+        return value
+    normalized = normalize_text(value)
+    try:
+        return CharacterReferenceVariant(normalized)
+    except ValueError as exc:
+        raise CharacterProfileError(
+            f"unsupported character reference variant {value!r}; expected 'full' or 'half'"
+        ) from exc
+
+
+def normalize_character_profile(profile: object) -> str:
+    """Return the canonical Cherry output profile (``full`` or ``half``).
+
+    ``emoji`` and ``square`` are existing names for the 256x256 half-body
+    profile.  ``auto`` is intentionally rejected because a concrete output
+    size must be selected before a reference asset can be frozen.
+    """
+
+    if isinstance(profile, CharacterReferenceVariant):
+        return profile.value
+    normalized = normalize_text(profile)
+    aliases = {
+        "full": "full",
+        "half": "half",
+        "emoji": "half",
+        "square": "half",
+    }
+    try:
+        return aliases[normalized]
+    except KeyError as exc:
+        raise CharacterProfileError(
+            f"unsupported character profile {profile!r}; expected full or half "
+            "(emoji/square are accepted half-profile aliases)"
+        ) from exc
+
+
+def normalize_character_output_size(width: object, height: object) -> tuple[int, int]:
+    """Validate that an output size belongs to one of the two supported profiles."""
+
+    size = (_strict_dimension(width, "width"), _strict_dimension(height, "height"))
+    if size not in {FULL_CHARACTER_REFERENCE_SIZE, HALF_CHARACTER_REFERENCE_SIZE}:
+        raise CharacterProfileError(
+            f"unsupported character output size {size[0]}x{size[1]}; "
+            "expected 384x512 (full) or 256x256 (half)"
+        )
+    return size
+
+
+def character_profile_for_output_size(width: object, height: object) -> str:
+    size = normalize_character_output_size(width, height)
+    return "full" if size == FULL_CHARACTER_REFERENCE_SIZE else "half"
+
+
+def resolve_character_profile(
+    *,
+    profile: object | None = None,
+    width: object | None = None,
+    height: object | None = None,
+) -> str:
+    """Resolve profile and/or size evidence, rejecting missing or conflicting data."""
+
+    candidates: list[str] = []
+    if profile is not None:
+        candidates.append(normalize_character_profile(profile))
+    if width is not None or height is not None:
+        if width is None or height is None:
+            raise CharacterProfileError("both output width and height are required")
+        candidates.append(character_profile_for_output_size(width, height))
+    if not candidates:
+        raise CharacterProfileError("a concrete character profile or output size is required")
+    if any(candidate != candidates[0] for candidate in candidates[1:]):
+        raise CharacterProfileError(
+            f"character profile conflicts with output size: {', '.join(candidates)}"
+        )
+    return candidates[0]
 
 
 def list_characters(
@@ -385,6 +638,56 @@ def _contains_token_sequence(haystack: tuple[str, ...], needle: tuple[str, ...])
         return False
     width = len(needle)
     return any(haystack[index : index + width] == needle for index in range(len(haystack) - width + 1))
+
+
+def _strict_dimension(value: object, label: str) -> int:
+    if isinstance(value, bool):
+        raise CharacterProfileError(f"output {label} must be an integer")
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text.isascii() or not text.isdecimal():
+        raise CharacterProfileError(f"output {label} must be an integer")
+    return int(text)
+
+
+def _validated_image_size(
+    path: Path,
+    variant: CharacterReferenceVariant,
+) -> tuple[int, int]:
+    expected = variant.output_size
+    try:
+        with Image.open(path) as image:
+            actual = tuple(int(value) for value in image.size)
+            image.verify()
+    except (OSError, ValueError, UnidentifiedImageError) as exc:
+        raise CharacterRegistryError(f"invalid character reference image: {path}") from exc
+    if actual != expected:
+        raise CharacterRegistryError(
+            f"{variant.value} character reference has wrong pixel size: {path.name} "
+            f"is {actual[0]}x{actual[1]}, expected {expected[0]}x{expected[1]}"
+        )
+    return actual
+
+
+def _reference_catalog_revision(
+    full_registry: CharacterRegistry,
+    half_registry: CharacterRegistry,
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"character-reference-catalog-v2\0")
+    for variant, registry in (
+        (CharacterReferenceVariant.FULL, full_registry),
+        (CharacterReferenceVariant.HALF, half_registry),
+    ):
+        for reference in registry.references:
+            digest.update(
+                (
+                    f"{variant.value}\0{reference.canonical_id}\0"
+                    f"{reference.width}x{reference.height}\0{reference.sha256}\n"
+                ).encode("utf-8")
+            )
+    return digest.hexdigest()
 
 
 def _sha256(path: Path) -> str:

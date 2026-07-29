@@ -48,6 +48,9 @@ def test_cherry_info_preview_and_real_processing(monkeypatch) -> None:
     monkeypatch.setattr(cherry_skills, "_require_html_runtime", lambda: {"html_path": str(html), "browser_path": "test-browser"})
 
     def fake_html_runner(html_path, input_root, output_root, files, **kwargs):
+        assert kwargs["expected_profile"] == "half"
+        assert kwargs["expected_width"] == 256
+        assert kwargs["expected_height"] == 256
         for source in files:
             target = output_root / source.relative_to(input_root).with_suffix(".png")
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -117,6 +120,7 @@ def test_cherry_info_preview_and_real_processing(monkeypatch) -> None:
         use_sharpen=False,
         notify_interval_seconds=60,
         reference_path=str(reference),
+        profile="half",
     )
     status = _wait_done(started["run_id"])
 
@@ -164,6 +168,9 @@ def test_legacy_cherry_caller_without_role_reference_keeps_reference_steps_off(m
     def fake_html_runner(html_path, input_root, output_root, files, **kwargs):
         assert kwargs["reference_path"] is None
         assert kwargs["reference_steps_required"] is False
+        assert kwargs["expected_profile"] is None
+        assert kwargs["expected_width"] is None
+        assert kwargs["expected_height"] is None
         for source in files:
             target = output_root / source.relative_to(input_root).with_suffix(".png")
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -199,6 +206,79 @@ def test_cherry_start_refuses_missing_authoritative_html(monkeypatch, tmp_path: 
         run_start(str(src), str(dst))
 
 
+def test_reference_run_requires_explicit_non_auto_profile(monkeypatch, tmp_path: Path) -> None:
+    src = tmp_path / "input"
+    dst = tmp_path / "output"
+    html = tmp_path / "cherry-postprocess.html"
+    reference = tmp_path / "reference.png"
+    html.write_text("test", encoding="utf-8")
+    _make_frame(src / "001.png", 128)
+    _make_frame(reference, 255)
+    monkeypatch.setattr(settings, "cherry_postprocess_html_path", html)
+    monkeypatch.setattr(cherry_skills, "_require_html_runtime", lambda: {"html_path": str(html), "browser_path": "test"})
+
+    with pytest.raises(ValueError, match="explicit profile='full' or profile='half'"):
+        run_start(str(src), str(dst), reference_path=str(reference))
+    with pytest.raises(ValueError, match="auto is forbidden"):
+        run_start(str(src), str(dst), reference_path=str(reference), profile="auto")
+
+
+def test_reference_output_contract_is_canonical_and_mismatch_fails() -> None:
+    options = cherry_skills._merge_options({"profile": "half", "use_resize": False})
+    profile, width, height = cherry_skills._require_expected_output_profile({"profile": "half"})
+    cherry_skills._lock_expected_output(options, profile, width, height)
+
+    assert options["profile"] == "half"
+    assert options["auto_profile_by_size"] is False
+    assert options["expected_resize"] == "256x256"
+    assert options["use_resize2"] is True
+    assert options["resize2_width"] == 256
+    assert options["resize2_height"] == 256
+    assert options["html_feather_enabled"] is False
+    assert "feather" not in options["html_modules"]
+
+    result = CherryHtmlResult(
+        output_dir=Path("output"),
+        total=1,
+        profile="full",
+        resize="384x512",
+        feather_enabled=True,
+        steps=["colormatch", "align"],
+        downloaded_zip=Path("output.zip"),
+        executed_steps=["colormatch", "align"],
+        reference_loaded=True,
+        alignment_enabled=True,
+        alignment_transform={"s": 1.0, "tx": 0.0, "ty": 0.0},
+        color_match_stats={"calls": 1, "applied": 1, "insufficient": 0},
+    )
+    with pytest.raises(RuntimeError, match="output profile mismatch"):
+        cherry_skills._validate_html_result(
+            result,
+            expected_profile="half",
+            expected_width=256,
+            expected_height=256,
+        )
+
+
+def test_expected_profile_alias_selects_matching_preset(tmp_path: Path) -> None:
+    src = tmp_path / "input"
+    dst = tmp_path / "output"
+    reference = tmp_path / "reference.png"
+    _make_frame(src / "001.png", 128)
+    _make_frame(reference, 255)
+
+    preview = run_preview(
+        str(src),
+        str(dst),
+        reference_path=str(reference),
+        expected_profile="half",
+    )
+
+    assert preview["options"]["profile"] == "half"
+    assert preview["options"]["use_shadow"] is False
+    assert preview["options"]["expected_resize"] == "256x256"
+
+
 def test_chunk_html_files_bounds_file_count_and_raw_pixels(tmp_path: Path) -> None:
     files = []
     for index in range(5):
@@ -225,6 +305,9 @@ def test_capacity_error_splits_batch_instead_of_retrying_same_load(monkeypatch, 
     calls: list[int] = []
 
     def fake_html_runner(html_path, input_root, output_root, files, **kwargs):
+        assert kwargs["expected_profile"] == "half"
+        assert kwargs["expected_width"] == 256
+        assert kwargs["expected_height"] == 256
         calls.append(len(files))
         if len(files) > 1:
             raise RuntimeError("Array buffer allocation failed")
@@ -260,6 +343,7 @@ def test_capacity_error_splits_batch_instead_of_retrying_same_load(monkeypatch, 
         recursive=False,
         notify_interval_seconds=60,
         reference_path=str(reference),
+        profile="half",
     )
     status = _wait_done(started["run_id"])
 

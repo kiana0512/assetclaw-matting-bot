@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import threading
@@ -22,6 +23,9 @@ from assetclaw_matting.skills.security import validate_path
 
 RUNS_ROOT = Path(settings.storage_dir) / "direct_image_runs"
 FINISHED = {"DONE", "FAILED", "CANCELED", "DONE_WITH_ERRORS"}
+MAX_FULL_PIPELINE_RETRIES = 2
+MAX_SOURCE_RECOVERY_CANDIDATES = 32
+MAX_SOURCE_RECOVERY_ZIP_MEMBER_BYTES = 128 * 1024 * 1024
 _WORKERS: set[str] = set()
 _RUN_CONTEXT = threading.local()
 
@@ -70,7 +74,8 @@ def start(
         target = image_dir / f"{index:02d}_{Path(name).stem}{suffix}"
         shutil.copy2(image, target)
         width, height = _image_size(target)
-        aspect = "square" if width and height and width == height else "portrait"
+        profile = _cherry_profile_from_dimensions(width, height)
+        aspect = "square" if profile == "half" else "portrait"
         default_group = "sequence:default" if package_as_sequence else f"item:{index:04d}"
         group_key = str(group_keys[index - 1] if index - 1 < len(group_keys) else default_group)
         if group_key not in group_units:
@@ -99,6 +104,8 @@ def start(
                 "character_group_key": group_key,
                 "source_path": str(image),
                 "source_name": name,
+                "source_evidence": [str(value) for value in supplied_evidence if str(value or "").strip()],
+                "source_size_bytes": int(image.stat().st_size),
                 "original_path": str(target),
                 "name": target.name,
                 "matte_dir": str(matte_dir / f"image_{index:02d}"),
@@ -106,8 +113,8 @@ def start(
                 "width": width,
                 "height": height,
                 "aspect": aspect,
-                "cherry_profile": "half" if aspect == "square" else "full",
-                "cherry_output_size": _cherry_output_size("half" if aspect == "square" else "full"),
+                "cherry_profile": profile,
+                "cherry_output_size": _cherry_output_size(profile),
                 "matte_result_path": "",
                 "postprocessed_result_path": "",
                 "comparison_path": "",
@@ -199,14 +206,30 @@ def recover_incomplete_runs() -> dict[str, Any]:
         current_status = str(run.get("status") or "").upper()
         if current_status == "WAITING_CHARACTER":
             run_id = str(run.get("id") or status_path.parent.name)
-            from assetclaw_matting.services.character_resolution import all_run_units_frozen, reconcile_resolved_units
+            from assetclaw_matting.services.character_resolution import (
+                all_run_units_frozen,
+                mark_run_waiting,
+                reconcile_resolved_units,
+            )
 
+            mark_run_waiting("direct_image", run_id, immediate_if_uninitialized=True)
             reconcile_resolved_units("direct_image", run_id)
             if all_run_units_frozen("direct_image", run_id):
                 resume_after_character_resolution(run_id)
                 closed.append(run_id)
             else:
                 waiting_character.append(run_id)
+            continue
+        if current_status == "FAILED" and _should_auto_retry_failed_run(run):
+            run_id = str(run.get("id") or status_path.parent.name)
+            run["recovery_from_stage"] = "full_pipeline"
+            run["status"] = "QUEUED"
+            run["stage"] = "recovery_queued"
+            run["worker_pid"] = 0
+            _append_log(run, "检测到可自动恢复的失败，已进入有界完整流程恢复，不会直接向用户报失败。")
+            if _save(run, expected_statuses={"FAILED"}):
+                _start_recovery_worker(run_id)
+                closed.append(run_id)
             continue
         if current_status not in {"RUNNING", "QUEUED", "PENDING"}:
             continue
@@ -275,11 +298,48 @@ def resume_after_character_resolution(run_id: str) -> dict[str, Any]:
     return {"ok": True, "run_id": run_id, "status": "QUEUED", "scheduled": scheduled}
 
 
-def _worker(run_id: str) -> None:
+def fail_character_confirmation_timeout(run_id: str, reason: str) -> dict[str, Any]:
+    """Terminally fail only a parent that is still at the character gate."""
+
+    run = _load(run_id)
+    if not run:
+        return {"ok": False, "run_id": run_id, "error": "direct image run not found"}
+    if str(run.get("status") or "") != "WAITING_CHARACTER":
+        return {
+            "ok": False,
+            "run_id": run_id,
+            "status": run.get("status"),
+            "error": "direct image run is no longer waiting for character confirmation",
+        }
+    run["status"] = "FAILED"
+    run["stage"] = "character_confirmation_timeout"
+    run["error"] = str(reason or "角色确认超时")
+    run["failure_kind"] = "character_confirmation_timeout"
+    run["auto_retry_disabled"] = True
+    run["character_question"] = ""
+    run["worker_pid"] = 0
+    resolution = run.setdefault("character_resolution", {})
+    resolution["pending"] = 0
+    resolution["expired"] = True
+    run["updated_at"] = _now()
+    _append_log(run, f"角色确认超时，任务已失败：{run['error']}")
+    if not _save(run, expected_statuses={"WAITING_CHARACTER"}):
+        latest = _load(run_id) or run
+        return {
+            "ok": False,
+            "run_id": run_id,
+            "status": latest.get("status"),
+            "error": "direct image run changed while applying character timeout",
+        }
+    return {"ok": True, "run_id": run_id, "status": "FAILED", "stage": run["stage"]}
+
+
+def _worker_once(run_id: str) -> None:
     run = _load(run_id)
     if not run:
         return
     try:
+        _ensure_original_images(run)
         _mark(run, "RUNNING", "matting")
         _run_comfyui(run)
         if _is_canceled(run):
@@ -310,6 +370,9 @@ def _worker(run_id: str) -> None:
         else:
             _notify(run, f"图片完成：{run['id']}，已发回抠图、后处理、三联对比 3 份结果{suffix}。{character_lines}")
     except Exception as exc:
+        if bool(getattr(_RUN_CONTEXT, "full_pipeline_retry_enabled", False)):
+            _RUN_CONTEXT.failed_run = run
+            raise
         run = _load(run_id) or run
         if run.get("status") != "CANCELED":
             run["status"] = "FAILED"
@@ -325,6 +388,381 @@ def _worker(run_id: str) -> None:
             _save(latest)
         _WORKERS.discard(run_id)
         _restart_character_resume_if_needed(run_id)
+
+
+def _worker(run_id: str) -> None:
+    """Run the whole image pipeline with bounded, audited self-recovery."""
+
+    _RUN_CONTEXT.full_pipeline_retry_enabled = True
+    try:
+        while True:
+            try:
+                _worker_once(run_id)
+                return
+            except Exception as exc:
+                persisted = _load(run_id) or {}
+                failed_run = getattr(_RUN_CONTEXT, "failed_run", {})
+                run = _merge_runtime_delivery_state(persisted, failed_run)
+                if not run or str(run.get("status") or "").upper() == "CANCELED":
+                    return
+                if _finish_after_confirmed_delivery(run):
+                    return
+                if not _prepare_full_pipeline_retry(run, exc):
+                    run["status"] = "FAILED"
+                    run["stage"] = "recovery_exhausted"
+                    run["error"] = str(exc)
+                    run["updated_at"] = _now()
+                    _append_log(run, f"自动完整流程恢复已达到上限，任务失败：{exc}")
+                    _save(run)
+                    _notify(run, f"图片任务自动恢复多次仍未成功：{run_id}\n{exc}")
+                    return
+                _WORKERS.add(run_id)
+    finally:
+        if hasattr(_RUN_CONTEXT, "full_pipeline_retry_enabled"):
+            delattr(_RUN_CONTEXT, "full_pipeline_retry_enabled")
+        if hasattr(_RUN_CONTEXT, "failed_run"):
+            delattr(_RUN_CONTEXT, "failed_run")
+        _WORKERS.discard(run_id)
+
+
+def _prepare_full_pipeline_retry(run: dict[str, Any], error: Exception) -> bool:
+    """Persist one bounded retry decision before re-entering matting."""
+
+    if str(run.get("status") or "").upper() in {"CANCELED", "WAITING_CHARACTER"}:
+        return False
+    if str(run.get("stage") or "").lower() in {
+        "character_confirmation_timeout",
+        "waiting_character",
+        "canceled",
+    }:
+        return False
+    recovery = run.setdefault("full_pipeline_recovery", {})
+    attempt = int(recovery.get("attempt_count") or run.get("full_pipeline_retry_count") or 0) + 1
+    if attempt > MAX_FULL_PIPELINE_RETRIES:
+        recovery["exhausted"] = True
+        recovery["last_error"] = str(error)
+        return False
+
+    entry: dict[str, Any] = {
+        "attempt": attempt,
+        "triggered_at": _now(),
+        "trigger_stage": str(run.get("stage") or ""),
+        "error": str(error),
+        "source_recovery": [],
+    }
+    recovery["attempt_count"] = attempt
+    recovery["max_attempts"] = MAX_FULL_PIPELINE_RETRIES
+    recovery.setdefault("attempts", []).append(entry)
+    run["full_pipeline_retry_count"] = attempt
+    try:
+        entry["source_recovery"] = _ensure_original_images(run)
+        _reset_outputs_for_full_retry(run)
+    except Exception as recovery_error:
+        entry["source_recovery_error"] = str(recovery_error)
+        recovery["last_error"] = str(recovery_error)
+        run["status"] = "QUEUED"
+        run["stage"] = f"full_pipeline_retry_{attempt}_source_recovery"
+        run["error"] = str(recovery_error)
+        _append_log(
+            run,
+            f"第 {attempt}/{MAX_FULL_PIPELINE_RETRIES} 次自动恢复暂未找到可靠原图：{recovery_error}",
+        )
+        _save(run)
+        return attempt < MAX_FULL_PIPELINE_RETRIES
+
+    previous_children = run.get("children") if isinstance(run.get("children"), dict) else {}
+    entry["previous_children"] = {
+        "comfyui_run_id": str(previous_children.get("comfyui_run_id") or ""),
+        "cherry_run_ids": list(previous_children.get("cherry_run_ids") or []),
+    }
+    run["children"] = {}
+    run["status"] = "QUEUED"
+    run["stage"] = f"full_pipeline_retry_{attempt}_queued"
+    run["error"] = ""
+    run["worker_pid"] = os.getpid()
+    for item in run.get("images") or []:
+        for key in (
+            "matte_result_path",
+            "postprocessed_result_path",
+            "comparison_path",
+            "result_path",
+            "cherry_sequence_group",
+            "color_correction_run_id",
+        ):
+            item[key] = ""
+        item["color_correction_status"] = "READY" if item.get("color_reference_path") else ""
+        item["position_alignment_status"] = "READY" if item.get("position_alignment_enabled") else ""
+        item["reference_postprocess_status"] = "READY" if item.get("color_reference_path") else ""
+    _append_log(run, f"自动恢复第 {attempt}/{MAX_FULL_PIPELINE_RETRIES} 次：已恢复原图并从抠图开始完整重跑。")
+    _save(run)
+    return True
+
+
+def _ensure_original_images(run: dict[str, Any]) -> list[dict[str, Any]]:
+    """Restore missing run originals from source, import storage, or Feishu cache."""
+
+    actions: list[dict[str, Any]] = []
+    for item in run.get("images") or []:
+        target = Path(str(item.get("original_path") or ""))
+        if _is_usable_source_image(target, item):
+            continue
+        recovered = _recover_original_image(run, item, target)
+        if recovered is None:
+            raise FileNotFoundError(
+                f"original image is missing and no verified persistent source was found: {target}"
+            )
+        actions.append(recovered)
+    if actions:
+        run.setdefault("source_recovery_audit", []).extend(actions)
+        _append_log(run, f"已从持久化 source/import/飞书缓存恢复 {len(actions)} 张原图。")
+        _save(run)
+    return actions
+
+
+def _recover_original_image(
+    run: dict[str, Any],
+    item: dict[str, Any],
+    target: Path,
+) -> dict[str, Any] | None:
+    exact_candidates: list[Path] = []
+    source_path = Path(str(item.get("source_path") or ""))
+    if str(source_path):
+        exact_candidates.append(source_path)
+    for value in item.get("source_evidence") or []:
+        candidate = Path(str(value or ""))
+        if candidate.suffix.lower() in IMAGE_EXTS:
+            exact_candidates.append(candidate)
+    for candidate in _deduplicate_paths(exact_candidates):
+        if not _is_usable_source_image(candidate, item):
+            continue
+        _copy_recovered_image(candidate, target, item)
+        return _source_recovery_record(item, target, "source_path", candidate)
+
+    names = {
+        Path(str(item.get("source_name") or "")).name.casefold(),
+        source_path.name.casefold(),
+    }
+    names.discard("")
+    storage_root = Path(settings.storage_dir)
+    search_roots = (storage_root / "direct_image_imports", storage_root / "feishu_inbox")
+    searched = 0
+    for root in search_roots:
+        if not root.is_dir():
+            continue
+        for name in sorted(names):
+            for candidate in root.rglob(name):
+                if searched >= MAX_SOURCE_RECOVERY_CANDIDATES:
+                    break
+                if not candidate.is_file():
+                    continue
+                searched += 1
+                if not _is_usable_source_image(candidate, item):
+                    continue
+                _copy_recovered_image(candidate, target, item)
+                return _source_recovery_record(item, target, "persistent_image_cache", candidate)
+
+    for archive in _source_archive_candidates(run, item):
+        member = _restore_from_zip_archive(archive, item, target)
+        if member:
+            return _source_recovery_record(
+                item,
+                target,
+                "feishu_zip_cache",
+                archive,
+                archive_member=member,
+            )
+    return None
+
+
+def _source_archive_candidates(run: dict[str, Any], item: dict[str, Any]) -> list[Path]:
+    candidates: list[Path] = []
+    for value in item.get("source_evidence") or []:
+        path = Path(str(value or ""))
+        if path.suffix.lower() == ".zip" and path.is_file():
+            candidates.append(path)
+    label = Path(str(run.get("run_label") or "")).name
+    if label.lower().endswith(".zip"):
+        inbox = Path(settings.storage_dir) / "feishu_inbox"
+        if inbox.is_dir():
+            candidates.extend(path for path in inbox.rglob(label) if path.is_file())
+    return _deduplicate_paths(candidates)[:MAX_SOURCE_RECOVERY_CANDIDATES]
+
+
+def _restore_from_zip_archive(
+    archive_path: Path,
+    item: dict[str, Any],
+    target: Path,
+) -> str:
+    wanted = {
+        Path(str(item.get("source_name") or "")).name.casefold(),
+        Path(str(item.get("source_path") or "")).name.casefold(),
+    }
+    wanted.discard("")
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            members = [
+                info
+                for info in archive.infolist()
+                if not info.is_dir()
+                and Path(info.filename).name.casefold() in wanted
+                and Path(info.filename).suffix.lower() in IMAGE_EXTS
+                and 0 <= int(info.file_size) <= MAX_SOURCE_RECOVERY_ZIP_MEMBER_BYTES
+            ]
+            if len(members) != 1:
+                return ""
+            member = members[0]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.recover.tmp")
+            try:
+                with archive.open(member) as source, temporary.open("wb") as destination:
+                    shutil.copyfileobj(source, destination, length=1024 * 1024)
+                if not _is_usable_source_image(temporary, item):
+                    return ""
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
+            return member.filename
+    except (OSError, ValueError, zipfile.BadZipFile):
+        return ""
+
+
+def _is_usable_source_image(path: Path, item: dict[str, Any]) -> bool:
+    if not path.is_file() or path.suffix.lower() not in IMAGE_EXTS:
+        # Recovery temp files intentionally end in .tmp; Pillow still validates them.
+        if not path.is_file() or ".recover.tmp" not in path.name:
+            return False
+    expected_width = int(item.get("width") or 0)
+    expected_height = int(item.get("height") or 0)
+    expected_size = int(item.get("source_size_bytes") or 0)
+    try:
+        if expected_size and path.stat().st_size != expected_size:
+            return False
+        with Image.open(path) as image:
+            actual = (int(image.width), int(image.height))
+            image.verify()
+    except (OSError, ValueError):
+        return False
+    return not (expected_width and expected_height) or actual == (expected_width, expected_height)
+
+
+def _copy_recovered_image(source: Path, target: Path, item: dict[str, Any]) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.recover.tmp")
+    try:
+        shutil.copy2(source, temporary)
+        if not _is_usable_source_image(temporary, item):
+            raise RuntimeError(f"recovered source image failed validation: {source}")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _source_recovery_record(
+    item: dict[str, Any],
+    target: Path,
+    method: str,
+    source: Path,
+    *,
+    archive_member: str = "",
+) -> dict[str, Any]:
+    return {
+        "ts": _now(),
+        "item_id": str(item.get("item_id") or item.get("index") or ""),
+        "method": method,
+        "source": str(source),
+        "archive_member": archive_member,
+        "restored_path": str(target),
+        "sha256": _sha256_file(target),
+    }
+
+
+def _reset_outputs_for_full_retry(run: dict[str, Any]) -> None:
+    run_dir = _run_dir(run).resolve()
+    for name in ("matte", "smooth", "comparison", "cherry_sequences"):
+        target = (run_dir / name).resolve()
+        if target.parent != run_dir:
+            raise RuntimeError(f"refusing to reset output outside run directory: {target}")
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir(parents=True, exist_ok=True)
+
+
+def _merge_runtime_delivery_state(
+    persisted: dict[str, Any],
+    runtime: dict[str, Any],
+) -> dict[str, Any]:
+    if not persisted:
+        return runtime
+    for key in ("drive_file", "sequence_zip_path", "sent_files"):
+        if runtime.get(key):
+            persisted[key] = runtime[key]
+    return persisted
+
+
+def _finish_after_confirmed_delivery(run: dict[str, Any]) -> bool:
+    if str(run.get("stage") or "").lower() not in {"send", "done"}:
+        return False
+    receipt = run.get("drive_file") if isinstance(run.get("drive_file"), dict) else {}
+    package = Path(str(run.get("sequence_zip_path") or ""))
+    if not package.is_file() or not any(receipt.get(key) for key in ("message_id", "file_token", "url")):
+        return False
+    run["sent_files"] = [str(package)]
+    run["status"] = "DONE"
+    run["stage"] = "done"
+    run["error"] = ""
+    _append_log(run, "发送回执已确认；状态写入恢复后直接收敛为完成，未重复发送文件。")
+    _save(run)
+    return True
+
+
+def _should_auto_retry_failed_run(run: dict[str, Any]) -> bool:
+    if str(run.get("status") or "").upper() != "FAILED":
+        return False
+    if str(run.get("stage") or "").lower() in {
+        "character_confirmation_timeout",
+        "waiting_character",
+        "canceled",
+        "recovery_exhausted",
+    }:
+        return False
+    attempts = int(
+        (run.get("full_pipeline_recovery") or {}).get("attempt_count")
+        or run.get("full_pipeline_retry_count")
+        or 0
+    )
+    if attempts >= MAX_FULL_PIPELINE_RETRIES:
+        return False
+    error = str(run.get("error") or "").casefold()
+    recoverable_markers = (
+        "winerror 5",
+        "permission denied",
+        "access is denied",
+        "拒绝访问",
+        "original image is missing",
+        "filenotfounderror",
+        "no such file",
+    )
+    return any(marker in error for marker in recoverable_markers)
+
+
+def _deduplicate_paths(values: list[Path]) -> list[Path]:
+    result: list[Path] = []
+    seen: set[str] = set()
+    for value in values:
+        key = os.path.normcase(os.path.abspath(str(value)))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _run_comfyui(run: dict[str, Any]) -> None:
@@ -365,14 +803,19 @@ def _run_cherry(run: dict[str, Any]) -> None:
     from assetclaw_matting.skills.cherry_skills import run_start, run_status
 
     run.setdefault("children", {})["cherry_run_ids"] = []
-    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     for item in run["images"]:
         unit_id = str(item.get("character_unit_id") or item.get("item_id") or f"item:{item.get('index')}")
-        profile = str(item.get("cherry_profile") or "auto")
+        profile = str(item.get("cherry_profile") or "").strip().lower()
+        if profile not in {"full", "half"}:
+            raise RuntimeError(f"Cherry output profile is missing or invalid for image item: {unit_id}")
         reference_path = str(item.get("color_reference_path") or "")
-        grouped.setdefault((unit_id, profile, reference_path), []).append(item)
+        reference_sha256 = str(item.get("color_reference_sha256") or "").lower()
+        if not reference_path or not reference_sha256:
+            raise RuntimeError(f"character reference binding is incomplete for image item: {unit_id}")
+        grouped.setdefault((unit_id, profile, reference_path, reference_sha256), []).append(item)
 
-    for group_index, ((_unit_id, profile, reference_path), group_items) in enumerate(grouped.items(), start=1):
+    for group_index, ((_unit_id, profile, reference_path, reference_sha256), group_items) in enumerate(grouped.items(), start=1):
         if len(group_items) > 1:
             _run_cherry_sequence_group(
                 run,
@@ -380,6 +823,7 @@ def _run_cherry(run: dict[str, Any]) -> None:
                 group_index=group_index,
                 profile=profile,
                 reference_path=reference_path,
+                reference_sha256=reference_sha256,
                 run_start=run_start,
                 run_status=run_status,
             )
@@ -396,8 +840,9 @@ def _run_cherry(run: dict[str, Any]) -> None:
             skip_existing=False,
             notify_interval_seconds=run["notify_interval_seconds"],
             profile=profile,
+            expected_profile=profile,
             reference_path=reference_path,
-            reference_sha256=str(item.get("color_reference_sha256") or ""),
+            reference_sha256=reference_sha256,
             color_match_required=True,
             alignment_enabled=True,
         )
@@ -422,6 +867,7 @@ def _run_cherry_sequence_group(
     group_index: int,
     profile: str,
     reference_path: str,
+    reference_sha256: str,
     run_start: Any,
     run_status: Any,
 ) -> None:
@@ -451,8 +897,9 @@ def _run_cherry_sequence_group(
         skip_existing=False,
         notify_interval_seconds=run["notify_interval_seconds"],
         profile=profile,
+        expected_profile=profile,
         reference_path=reference_path,
-        reference_sha256=str(items[0].get("color_reference_sha256") or ""),
+        reference_sha256=reference_sha256,
         color_match_required=True,
         alignment_enabled=True,
     )
@@ -512,6 +959,11 @@ def _prepare_character_gate(run: dict[str, Any]) -> bool:
         _append_log(run, "角色参考图已逐项冻结；Cherry 将在流程末尾依次执行校色和位置矫正。")
         _save(run)
         return True
+    if result.get("missing_profiles"):
+        raise RuntimeError(
+            "无法确定以下任务的 Cherry 输出规格，已停止后处理："
+            + "、".join(result.get("missing_profiles") or [])
+        )
     run["status"] = "WAITING_CHARACTER"
     run["stage"] = "waiting_character"
     run["recovery_from_stage"] = "postprocess"
@@ -519,6 +971,9 @@ def _prepare_character_gate(run: dict[str, Any]) -> bool:
     run["updated_at"] = _now()
     _append_log(run, "抠图已完成，等待用户确认角色后继续 Cherry 校色/矫正：" + "、".join(result.get("missing") or []))
     _save(run)
+    from assetclaw_matting.services.character_resolution import mark_run_waiting
+
+    mark_run_waiting("direct_image", str(run["id"]))
     return False
 
 
@@ -733,6 +1188,8 @@ def resume_from_postprocess(run_id: str | None = None, **_: Any) -> dict[str, An
     run = _load(run_id)
     if not run:
         return {"ok": False, "error": "direct image run not found"}
+    if not _prepare_character_gate(run):
+        return {"ok": True, "run_id": run["id"], **_public(run)}
     run["status"] = "RUNNING"
     run["stage"] = "postprocess"
     run["error"] = ""
@@ -1055,6 +1512,14 @@ def _brief_pipeline_notice(text: str) -> str:
 
 def _cherry_output_size(profile: str) -> str:
     return "256x256" if str(profile or "").lower() in {"half", "emoji", "square"} else "384x512"
+
+
+def _cherry_profile_from_dimensions(width: int, height: int) -> str:
+    """Mirror Cherry's near-square rule, then freeze the resulting output profile."""
+
+    if width > 0 and height > 0 and abs((float(width) / float(height)) - 1.0) <= 0.01:
+        return "half"
+    return "full"
 
 
 def _cherry_plan_summary(items: list[dict[str, Any]]) -> str:

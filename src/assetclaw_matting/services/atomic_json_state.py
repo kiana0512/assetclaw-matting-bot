@@ -3,9 +3,15 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Iterator
+
+
+_WINDOWS_REPLACE_ATTEMPTS = 12
+_WINDOWS_REPLACE_INITIAL_DELAY_SECONDS = 0.025
+_WINDOWS_REPLACE_MAX_DELAY_SECONDS = 0.5
 
 
 @contextmanager
@@ -77,7 +83,41 @@ def atomic_save_task_json(
                 json.dumps(payload, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-            os.replace(temporary, path)
+            _replace_with_transient_lock_retry(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
     return True
+
+
+def _replace_with_transient_lock_retry(source: Path, target: Path) -> None:
+    """Replace a state file despite short-lived Windows reader/AV handles.
+
+    Windows rejects an otherwise valid atomic replace while another process
+    has the destination open without delete sharing. Dashboard readers,
+    indexers and antivirus scanners can all create that brief window. Retrying
+    the same atomic operation keeps readers from ever observing partial JSON;
+    permanent ACL/read-only failures still surface after a small bounded wait.
+    """
+
+    attempts = _atomic_replace_attempts()
+    delay = _WINDOWS_REPLACE_INITIAL_DELAY_SECONDS
+    for attempt in range(1, attempts + 1):
+        try:
+            os.replace(source, target)
+            return
+        except OSError as exc:
+            if attempt >= attempts or not _is_transient_windows_replace_error(exc):
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, _WINDOWS_REPLACE_MAX_DELAY_SECONDS)
+
+
+def _is_transient_windows_replace_error(exc: OSError) -> bool:
+    # ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION.
+    return os.name == "nt" and (
+        isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in {5, 32, 33}
+    )
+
+
+def _atomic_replace_attempts() -> int:
+    return _WINDOWS_REPLACE_ATTEMPTS if os.name == "nt" else 1

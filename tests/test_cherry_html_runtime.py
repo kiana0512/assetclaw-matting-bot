@@ -117,6 +117,68 @@ def test_file_input_script_does_not_dispatch_duplicate_change_event() -> None:
     assert "collectedFiles.length!==expected" in script
 
 
+def test_reference_output_profile_rejects_auto_and_conflicting_sizes() -> None:
+    with pytest.raises(ValueError, match="explicit expected_profile"):
+        cherry_html_runner._normalize_expected_output_profile(None, None, None, required=True)
+    with pytest.raises(ValueError, match="auto is forbidden"):
+        cherry_html_runner._normalize_expected_output_profile("auto", None, None, required=True)
+    with pytest.raises(ValueError, match="conflicts"):
+        cherry_html_runner._normalize_expected_output_profile("full", 256, 256, required=True)
+
+    assert cherry_html_runner._normalize_expected_output_profile("full", None, None, required=True) == (
+        "full",
+        384,
+        512,
+    )
+    assert cherry_html_runner._normalize_expected_output_profile("half", 256, 256, required=True) == (
+        "half",
+        256,
+        256,
+    )
+    assert cherry_html_runner._normalize_expected_output_profile(None, None, None, required=False) is None
+
+
+def test_force_output_profile_updates_final_html_controls() -> None:
+    class FakeCdp:
+        expression = ""
+
+        async def evaluate(self, expression: str, **_kwargs):
+            self.expression = expression
+            return {
+                "ok": True,
+                "profile": "half",
+                "resize": "256x256",
+                "feather": False,
+                "resize2Enabled": True,
+            }
+
+    cdp = FakeCdp()
+    state = asyncio.run(cherry_html_runner._force_output_profile(cdp, "half", 256, 256))  # type: ignore[arg-type]
+
+    assert state["resize"] == "256x256"
+    assert "p-rw2" in cdp.expression
+    assert "p-rh2" in cdp.expression
+    assert "setModuleState('resize2',true)" in cdp.expression
+    assert "setModuleState('feather',!!expected.feather)" in cdp.expression
+
+
+def test_extracted_output_dimensions_must_match_expected_profile(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    source = input_root / "frame.png"
+    target = output_root / "frame.png"
+    source.parent.mkdir(parents=True)
+    target.parent.mkdir(parents=True)
+    source.write_bytes(b"input")
+    from PIL import Image
+
+    Image.new("RGBA", (384, 512), (0, 0, 0, 0)).save(target)
+    cherry_html_runner._validate_extracted_output_dimensions(input_root, output_root, [source], 384, 512)
+
+    with pytest.raises(RuntimeError, match="dimensions mismatch"):
+        cherry_html_runner._validate_extracted_output_dimensions(input_root, output_root, [source], 256, 256)
+
+
 def test_runner_enables_multi_file_picker_for_automation() -> None:
     source = Path(cherry_html_runner.__file__).read_text(encoding="utf-8")
 

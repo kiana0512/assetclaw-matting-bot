@@ -134,6 +134,11 @@ def main() -> None:
     init_db(settings.data_db_path)
     create_tables()
 
+    from assetclaw_matting.services.character_resolution_monitor import start_background_monitor
+
+    character_monitor_started = start_background_monitor()
+    log.info("character confirmation monitor in-process=%s", character_monitor_started)
+
     from assetclaw_matting.skills.animation_flow_skills import recover_incomplete_runs as recover_animation_flows
     from assetclaw_matting.skills.direct_image_skills import recover_incomplete_runs as recover_direct_images
     from assetclaw_matting.skills.direct_video_skills import recover_incomplete_runs
@@ -201,6 +206,9 @@ def main() -> None:
         log.exception("WS receiver crashed: %s", exc)
         sys.exit(1)
     finally:
+        from assetclaw_matting.services.character_resolution_monitor import stop_background_monitor
+
+        stop_background_monitor()
         _executor.shutdown(wait=False)
         _release_instance_lock(_instance_lock)
         _instance_lock = None

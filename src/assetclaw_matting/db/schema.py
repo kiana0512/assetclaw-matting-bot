@@ -103,6 +103,14 @@ CREATE TABLE IF NOT EXISTS character_resolution_questions (
     run_id TEXT NOT NULL,
     status TEXT NOT NULL,
     outbound_message_id TEXT,
+    waiting_started_at TEXT,
+    next_action_at TEXT,
+    deadline_at TEXT,
+    reminder_count INTEGER NOT NULL DEFAULT 0,
+    last_reminded_at TEXT,
+    lease_owner TEXT,
+    lease_until TEXT,
+    failed_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -144,6 +152,25 @@ ON character_resolutions(conversation_id, user_id, status);
 
 CREATE INDEX IF NOT EXISTS idx_character_resolutions_run
 ON character_resolutions(run_kind, run_id, status);
+
+CREATE TABLE IF NOT EXISTS character_reference_snapshots (
+    unit_id TEXT NOT NULL,
+    profile TEXT NOT NULL,
+    target_width INTEGER NOT NULL,
+    target_height INTEGER NOT NULL,
+    character_id TEXT NOT NULL,
+    catalog_revision TEXT NOT NULL,
+    reference_source_path TEXT NOT NULL,
+    reference_snapshot_path TEXT NOT NULL,
+    reference_sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(unit_id, profile),
+    FOREIGN KEY(unit_id) REFERENCES character_resolutions(unit_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_character_reference_snapshots_unit
+ON character_reference_snapshots(unit_id, profile);
 
 CREATE TABLE IF NOT EXISTS comfyui_runs (
     id TEXT PRIMARY KEY,
@@ -235,11 +262,23 @@ _DEDUP_MIGRATIONS = [
     ("updated_at", "TEXT"),
 ]
 
+_CHARACTER_QUESTION_MIGRATIONS = [
+    ("waiting_started_at", "TEXT"),
+    ("next_action_at", "TEXT"),
+    ("deadline_at", "TEXT"),
+    ("reminder_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("last_reminded_at", "TEXT"),
+    ("lease_owner", "TEXT"),
+    ("lease_until", "TEXT"),
+    ("failed_at", "TEXT"),
+]
+
 
 def create_tables() -> None:
     with get_connection() as conn:
         conn.executescript(SCHEMA_SQL)
     _migrate_feishu_event_dedup()
+    _migrate_character_resolution_questions()
 
 
 def _migrate_feishu_event_dedup() -> None:
@@ -256,3 +295,26 @@ def _migrate_feishu_event_dedup() -> None:
                 conn.execute(
                     f"ALTER TABLE feishu_event_dedup ADD COLUMN {col} {definition}"
                 )
+
+
+def _migrate_character_resolution_questions() -> None:
+    """Add persisted reminder scheduling fields to existing installations."""
+
+    with get_connection() as conn:
+        existing = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(character_resolution_questions)"
+            ).fetchall()
+        }
+        for col, definition in _CHARACTER_QUESTION_MIGRATIONS:
+            if col not in existing:
+                conn.execute(
+                    f"ALTER TABLE character_resolution_questions ADD COLUMN {col} {definition}"
+                )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_character_resolution_questions_due
+            ON character_resolution_questions(status, next_action_at, lease_until)
+            """
+        )

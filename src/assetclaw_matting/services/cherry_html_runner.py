@@ -160,6 +160,9 @@ def run_cherry_html(
     reference_path: Path | None = None,
     reference_steps_required: bool = True,
     alignment_transform: dict[str, Any] | None = None,
+    expected_profile: str | None = None,
+    expected_width: int | None = None,
+    expected_height: int | None = None,
     chrome_path: Path | None = None,
     timeout_seconds: int = 900,
     storage_dir: Path | None = None,
@@ -175,6 +178,9 @@ def run_cherry_html(
                     reference_path=reference_path,
                     reference_steps_required=reference_steps_required,
                     alignment_transform=alignment_transform,
+                    expected_profile=expected_profile,
+                    expected_width=expected_width,
+                    expected_height=expected_height,
                     chrome_path=chrome_path,
                     timeout_seconds=timeout_seconds,
                     storage_dir=storage_dir,
@@ -198,6 +204,9 @@ async def _run_cherry_html_async(
     reference_path: Path | None,
     reference_steps_required: bool,
     alignment_transform: dict[str, Any] | None,
+    expected_profile: str | None,
+    expected_width: int | None,
+    expected_height: int | None,
     chrome_path: Path | None,
     timeout_seconds: int,
     storage_dir: Path | None,
@@ -216,6 +225,12 @@ async def _run_cherry_html_async(
             raise FileNotFoundError(str(path))
     if reference_steps_required and reference_path is None:
         raise ValueError("reference_path is required when Cherry reference post-processing is enabled")
+    expected_output = _normalize_expected_output_profile(
+        expected_profile,
+        expected_width,
+        expected_height,
+        required=reference_steps_required,
+    )
     if reference_path is not None:
         _validate_reference_image(reference_path)
 
@@ -335,6 +350,15 @@ async def _run_cherry_html_async(
             preset = dict(preset or {})
             if int((preset or {}).get("count") or 0) != len(files):
                 raise RuntimeError(f"cherry html loaded {(preset or {}).get('count')} files, expected {len(files)}")
+            if expected_output is not None:
+                profile, width, height = expected_output
+                forced_output = await _force_output_profile(cdp, profile, width, height)
+                preset.update(
+                    {
+                        "resize": str(forced_output.get("resize") or ""),
+                        "feather": bool(forced_output.get("feather")),
+                    }
+                )
             if reference_steps_required:
                 forced = await _force_reference_finishing_steps(cdp)
                 if not forced.get("colormatchEnabled") or not forced.get("alignEnabled"):
@@ -360,10 +384,27 @@ async def _run_cherry_html_async(
 
         _extract_outputs(downloaded, input_root, output_root, files)
         resize = str((preset or {}).get("resize") or "")
+        # Preserve the legacy non-reference classification for older callers;
+        # reference-backed runs are checked against the exact resize below.
+        profile = "half" if resize == "256x256" else "full"
+        if expected_output is not None:
+            expected_name, expected_width_value, expected_height_value = expected_output
+            expected_resize = f"{expected_width_value}x{expected_height_value}"
+            if profile != expected_name or resize != expected_resize:
+                raise RuntimeError(
+                    f"Cherry output profile mismatch: expected {expected_name} {expected_resize}, got {profile} {resize}"
+                )
+            _validate_extracted_output_dimensions(
+                input_root,
+                output_root,
+                files,
+                expected_width_value,
+                expected_height_value,
+            )
         return CherryHtmlResult(
             output_dir=output_root,
             total=len(files),
-            profile="half" if resize == "256x256" else "full",
+            profile=profile,
             resize=resize,
             feather_enabled=bool((preset or {}).get("feather")),
             steps=[str(step) for step in ((preset or {}).get("steps") or [])],
@@ -409,6 +450,91 @@ def _file_input_preset_script(expected_count: int) -> str:
                 })()
         """.replace("__EXPECTED__", str(int(expected_count)))
         )
+
+
+def _normalize_expected_output_profile(
+    profile: str | None,
+    width: int | None,
+    height: int | None,
+    *,
+    required: bool,
+) -> tuple[str, int, int] | None:
+    normalized = str(profile or "").strip().lower()
+    if not normalized:
+        if required:
+            raise ValueError(
+                "reference-enabled Cherry run requires explicit expected_profile='full' or expected_profile='half'"
+            )
+        if width is not None or height is not None:
+            raise ValueError("expected_width/expected_height require an explicit expected_profile")
+        return None
+    if normalized not in {"full", "half"}:
+        raise ValueError("expected_profile must be 'full' or 'half'; auto is forbidden")
+    canonical_width, canonical_height = (384, 512) if normalized == "full" else (256, 256)
+    if width is not None and int(width) != canonical_width:
+        raise ValueError(
+            f"expected_width conflicts with Cherry {normalized} profile ({canonical_width}x{canonical_height})"
+        )
+    if height is not None and int(height) != canonical_height:
+        raise ValueError(
+            f"expected_height conflicts with Cherry {normalized} profile ({canonical_width}x{canonical_height})"
+        )
+    return normalized, canonical_width, canonical_height
+
+
+async def _force_output_profile(cdp: CdpClient, profile: str, width: int, height: int) -> dict[str, Any]:
+    """Override HTML input-shape defaults with the task's frozen output contract."""
+
+    payload = json.dumps(
+        {
+            "profile": str(profile),
+            "width": int(width),
+            "height": int(height),
+            "feather": str(profile) == "full",
+        },
+        ensure_ascii=True,
+    )
+    state = await cdp.evaluate(
+        f"""
+        (()=>{{
+          if(typeof setModuleState !== 'function' || typeof moduleState !== 'object'){{
+            return {{ok:false,error:'Cherry module controls are unavailable'}};
+          }}
+          const expected={payload};
+          const rw=document.getElementById('p-rw2');
+          const rh=document.getElementById('p-rh2');
+          if(!rw || !rh){{
+            return {{ok:false,error:'Cherry final resize controls are unavailable'}};
+          }}
+          rw.value=rw.defaultValue=String(expected.width);
+          rh.value=rh.defaultValue=String(expected.height);
+          setModuleState('resize2',true);
+          setModuleState('feather',!!expected.feather);
+          return {{
+            ok:true,
+            profile:expected.profile,
+            resize:`${{rw.value}}x${{rh.value}}`,
+            feather:!!moduleState.feather,
+            resize2Enabled:!!moduleState.resize2
+          }};
+        }})()
+        """,
+        timeout=10.0,
+    )
+    if not isinstance(state, dict) or not state.get("ok"):
+        detail = state.get("error") if isinstance(state, dict) else "unknown error"
+        raise RuntimeError(f"Cherry output profile could not be enforced: {detail}")
+    expected_resize = f"{int(width)}x{int(height)}"
+    if str(state.get("profile") or "") != str(profile) or str(state.get("resize") or "") != expected_resize:
+        raise RuntimeError(
+            f"Cherry output controls mismatch: expected {profile} {expected_resize}, "
+            f"got {state.get('profile')} {state.get('resize')}"
+        )
+    if not state.get("resize2Enabled"):
+        raise RuntimeError("Cherry final resize module could not be enabled")
+    if bool(state.get("feather")) != (profile == "full"):
+        raise RuntimeError(f"Cherry feather policy does not match the {profile} profile")
+    return state
 
 
 async def _install_processing_probe(cdp: CdpClient) -> None:
@@ -766,6 +892,28 @@ def _extract_outputs(zip_path: Path, input_root: Path, output_root: Path, files:
                 shutil.copyfileobj(src, dst)
 
 
+def _validate_extracted_output_dimensions(
+    input_root: Path,
+    output_root: Path,
+    files: list[Path],
+    expected_width: int,
+    expected_height: int,
+) -> None:
+    expected = (int(expected_width), int(expected_height))
+    for source in files:
+        target = output_root / source.relative_to(input_root).with_suffix(".png")
+        try:
+            with Image.open(target) as image:
+                actual = image.size
+        except Exception as exc:
+            raise RuntimeError(f"Cherry output image could not be verified: {target}") from exc
+        if actual != expected:
+            raise RuntimeError(
+                f"Cherry output dimensions mismatch for {target.name}: "
+                f"expected {expected[0]}x{expected[1]}, got {actual[0]}x{actual[1]}"
+            )
+
+
 def _resolve_browser_candidates(chrome_path: Path | None) -> list[Path]:
     candidates: list[Path] = []
     if chrome_path:
@@ -1067,6 +1215,9 @@ def verify_and_promote_cherry_html(
             output_dir,
             [probe],
             reference_path=probe,
+            expected_profile="half",
+            expected_width=256,
+            expected_height=256,
             chrome_path=chrome_path,
             timeout_seconds=max(30, int(timeout_seconds)),
             storage_dir=storage,

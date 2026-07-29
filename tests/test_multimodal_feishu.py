@@ -1104,6 +1104,12 @@ def test_direct_video_cherry_runs_per_video_dir(monkeypatch, tmp_path: Path) -> 
     matte_two.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (4, 4), (255, 0, 0, 255)).save(matte_one / "0000.png")
     Image.new("RGBA", (4, 4), (0, 255, 0, 255)).save(matte_two / "0000.png")
+    half_reference = tmp_path / "half-reference.png"
+    full_reference = tmp_path / "full-reference.png"
+    Image.new("RGBA", (256, 256), (10, 20, 30, 255)).save(half_reference)
+    Image.new("RGBA", (384, 512), (40, 50, 60, 255)).save(full_reference)
+    half_sha = hashlib.sha256(half_reference.read_bytes()).hexdigest()
+    full_sha = hashlib.sha256(full_reference.read_bytes()).hexdigest()
     calls: list[dict[str, object]] = []
 
     def fake_run_start(**kwargs):
@@ -1138,15 +1144,19 @@ def test_direct_video_cherry_runs_per_video_dir(monkeypatch, tmp_path: Path) -> 
             {
                 "index": 1,
                 "matte_dir": str(matte_one),
-                "smooth_dir": str(tmp_path / "run" / "smooth" / "video_01"),
-                "cherry_profile": "half",
-            },
+                    "smooth_dir": str(tmp_path / "run" / "smooth" / "video_01"),
+                    "cherry_profile": "half",
+                    "color_reference_path": str(half_reference),
+                    "color_reference_sha256": half_sha,
+                },
             {
                 "index": 2,
                 "matte_dir": str(matte_two),
-                "smooth_dir": str(tmp_path / "run" / "smooth" / "video_02"),
-                "cherry_profile": "full",
-            },
+                    "smooth_dir": str(tmp_path / "run" / "smooth" / "video_02"),
+                    "cherry_profile": "full",
+                    "color_reference_path": str(full_reference),
+                    "color_reference_sha256": full_sha,
+                },
         ],
         "log": [],
     }
@@ -1155,6 +1165,8 @@ def test_direct_video_cherry_runs_per_video_dir(monkeypatch, tmp_path: Path) -> 
 
     assert [Path(str(call["input_dir"])).name for call in calls] == ["video_01", "video_02"]
     assert [call["profile"] for call in calls] == ["half", "full"]
+    assert [call["reference_path"] for call in calls] == [str(half_reference), str(full_reference)]
+    assert [call["reference_sha256"] for call in calls] == [half_sha, full_sha]
     assert [item["cherry_output_size"] for item in run["videos"]] == ["256x256", "384x512"]
 
 
@@ -1167,6 +1179,12 @@ def test_direct_image_cherry_profile_and_size_are_recorded(monkeypatch, tmp_path
     matte_two.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", (4, 4), (255, 0, 0, 255)).save(matte_one / "0000.png")
     Image.new("RGBA", (4, 4), (0, 255, 0, 255)).save(matte_two / "0000.png")
+    half_reference = tmp_path / "half-reference.png"
+    full_reference = tmp_path / "full-reference.png"
+    Image.new("RGBA", (256, 256), (10, 20, 30, 255)).save(half_reference)
+    Image.new("RGBA", (384, 512), (40, 50, 60, 255)).save(full_reference)
+    half_sha = hashlib.sha256(half_reference.read_bytes()).hexdigest()
+    full_sha = hashlib.sha256(full_reference.read_bytes()).hexdigest()
     calls: list[dict[str, object]] = []
 
     def fake_run_start(**kwargs):
@@ -1197,16 +1215,20 @@ def test_direct_image_cherry_profile_and_size_are_recorded(monkeypatch, tmp_path
                 "index": 1,
                 "matte_dir": str(matte_one),
                 "smooth_dir": str(tmp_path / "run" / "smooth" / "image_01"),
-                "aspect": "square",
-                "cherry_profile": "half",
-            },
+                    "aspect": "square",
+                    "cherry_profile": "half",
+                    "color_reference_path": str(half_reference),
+                    "color_reference_sha256": half_sha,
+                },
             {
                 "index": 2,
                 "matte_dir": str(matte_two),
                 "smooth_dir": str(tmp_path / "run" / "smooth" / "image_02"),
-                "aspect": "portrait",
-                "cherry_profile": "full",
-            },
+                    "aspect": "portrait",
+                    "cherry_profile": "full",
+                    "color_reference_path": str(full_reference),
+                    "color_reference_sha256": full_sha,
+                },
         ],
         "log": [],
     }
@@ -1214,6 +1236,8 @@ def test_direct_image_cherry_profile_and_size_are_recorded(monkeypatch, tmp_path
     direct_image_skills._run_cherry(run)
 
     assert [call["profile"] for call in calls] == ["half", "full"]
+    assert [call["reference_path"] for call in calls] == [str(half_reference), str(full_reference)]
+    assert [call["reference_sha256"] for call in calls] == [half_sha, full_sha]
     assert [item["cherry_output_size"] for item in run["images"]] == ["256x256", "384x512"]
 
 
