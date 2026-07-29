@@ -38,6 +38,8 @@ def start(
     workflow_path: str | None = None,
     notify_interval_seconds: int = 60,
     run_label: str = "",
+    matting_backend: str | None = None,
+    character_evidence: list[list[str]] | None = None,
     **_: Any,
 ) -> dict[str, Any]:
     if not video_paths:
@@ -51,6 +53,7 @@ def start(
         workflow_path = str(pipeline.get("workflow_path") or "")
         pipeline_notice = str(pipeline.get("message") or "")
     names = list(source_names or [])
+    evidence_sets = list(character_evidence or [])
     run_id = "VID_" + uuid.uuid4().hex[:12].upper()
     run_dir = RUNS_ROOT / run_id
     originals_dir = run_dir / "original_videos"
@@ -71,20 +74,32 @@ def start(
         copied.append(str(target))
 
     ctx = get_runtime_context()
-    run = {
-        "id": run_id,
-        "status": "RUNNING",
-        "stage": "queued",
-        "created_at": _now(),
-        "updated_at": _now(),
-        "run_label": run_label or f"{len(copied)} 个动画视频",
-        "chat_id": (ctx.get("chat_id") or "") if ctx.get("channel") == "feishu" else "",
-        "conversation_id": ctx.get("conversation_id") or "",
-        "videos": [
+    video_items: list[dict[str, Any]] = []
+    resolution_units: list[dict[str, Any]] = []
+    for index in range(1, len(copied) + 1):
+        source_name = _safe_name(names[index - 1] if index - 1 < len(names) else videos[index - 1].name)
+        unit_id = f"{run_id}:video:{index:02d}"
+        evidence = list(evidence_sets[index - 1]) if index - 1 < len(evidence_sets) else []
+        for value in (source_name, str(videos[index - 1])):
+            if value and value not in evidence:
+                evidence.append(value)
+        resolution_units.append(
+            {
+                "unit_id": unit_id,
+                "item_index": index,
+                "group_key": f"video:{index:04d}",
+                "source_name": source_name,
+                "evidence": evidence,
+            }
+        )
+        video_items.append(
             {
                 "index": index,
+                "item_id": f"{run_id}:video-item:{index:04d}",
+                "character_unit_id": unit_id,
+                "character_group_key": f"video:{index:04d}",
                 "source_path": str(videos[index - 1]),
-                "source_name": _safe_name(names[index - 1] if index - 1 < len(names) else videos[index - 1].name),
+                "source_name": source_name,
                 "original_path": copied[index - 1],
                 "name": Path(copied[index - 1]).name,
                 "frame_dir": str(frames_dir / f"video_{index:02d}"),
@@ -95,18 +110,50 @@ def start(
                 "cherry_profile": "",
                 "cherry_output_size": "",
             }
-            for index in range(1, len(copied) + 1)
-        ],
+        )
+    run = {
+        "id": run_id,
+        "status": "RUNNING",
+        "stage": "queued",
+        "created_at": _now(),
+        "updated_at": _now(),
+        "run_label": run_label or f"{len(copied)} 个动画视频",
+        "chat_id": (ctx.get("chat_id") or "") if ctx.get("channel") == "feishu" else "",
+        "conversation_id": ctx.get("conversation_id") or "",
+        "user_id": (ctx.get("open_id") or ctx.get("user_id") or "") if ctx.get("channel") == "feishu" else "",
+        "videos": video_items,
         "children": {},
         "fps": int(fps),
         "max_frames": int(max_frames or 0),
         "workflow_path": workflow_path or "",
+        "matting_backend": str(matting_backend or "").strip().lower(),
         "pipeline_notice": pipeline_notice,
         "notify_interval_seconds": max(30, min(int(notify_interval_seconds or 60), 3600)),
         "zip_path": "",
         "integrity": {},
         "error": "",
         "log": [],
+    }
+    from assetclaw_matting.services.character_resolution import (
+        bind_run_items,
+        initialize_run_resolutions,
+    )
+
+    character_state = initialize_run_resolutions(
+        run_kind="direct_video",
+        run_id=run_id,
+        run_dir=run_dir,
+        conversation_id=str(run.get("conversation_id") or ""),
+        chat_id=str(run.get("chat_id") or ""),
+        user_id=str(run.get("user_id") or ""),
+        units=resolution_units,
+    )
+    bind_run_items("direct_video", run_id, video_items)
+    run["character_question"] = str(character_state.get("prompt") or "")
+    run["character_resolution"] = {
+        "question_id": str(character_state.get("question_id") or ""),
+        "total": len(character_state.get("items") or []),
+        "pending": len(character_state.get("pending") or []),
     }
     _save(run)
     _start_worker(run_id)
@@ -123,8 +170,11 @@ def status(run_id: str | None = None, **_: Any) -> dict[str, Any]:
 def list_runs(limit: int = 10, include_finished: bool = True, **_: Any) -> dict[str, Any]:
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     items = []
+    conversation_id = _current_feishu_conversation_id()
     for path in sorted(RUNS_ROOT.glob("VID_*/status.json"), key=lambda item: item.stat().st_mtime, reverse=True):
         run = json.loads(path.read_text(encoding="utf-8"))
+        if conversation_id and str(run.get("conversation_id") or "") != conversation_id:
+            continue
         if run.get("status") in FINISHED and not include_finished:
             continue
         items.append({"run_id": run["id"], **_public(run)})
@@ -137,12 +187,25 @@ def recover_incomplete_runs() -> dict[str, Any]:
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     recovered: list[str] = []
     still_running: list[str] = []
+    waiting_character: list[str] = []
     for status_path in sorted(RUNS_ROOT.glob("VID_*/status.json"), key=lambda path: path.stat().st_mtime):
         try:
             run = json.loads(status_path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if str(run.get("status") or "") not in {"RUNNING", "QUEUED", "PENDING"}:
+        current_status = str(run.get("status") or "")
+        if current_status == "WAITING_CHARACTER":
+            run_id = str(run.get("id") or status_path.parent.name)
+            from assetclaw_matting.services.character_resolution import all_run_units_frozen, reconcile_resolved_units
+
+            reconcile_resolved_units("direct_video", run_id)
+            if all_run_units_frozen("direct_video", run_id):
+                resume_after_character_resolution(run_id)
+                recovered.append(run_id)
+            else:
+                waiting_character.append(run_id)
+            continue
+        if current_status not in {"RUNNING", "QUEUED", "PENDING"}:
             continue
         worker_pid = int(run.get("worker_pid") or 0)
         if worker_pid and _process_alive(worker_pid):
@@ -156,7 +219,7 @@ def recover_incomplete_runs() -> dict[str, Any]:
         _save(run)
         _start_worker(str(run["id"]), recover=True)
         recovered.append(str(run["id"]))
-    return {"ok": True, "recovered": recovered, "still_running": still_running}
+    return {"ok": True, "recovered": recovered, "still_running": still_running, "waiting_character": waiting_character}
 
 
 def resend_zip(run_id: str | None = None, **_: Any) -> dict[str, Any]:
@@ -237,6 +300,8 @@ def resume_from_postprocess(run_id: str, resend: bool = True) -> dict[str, Any]:
     if not run:
         return {"ok": False, "run_id": run_id, "error": "direct video run not found"}
     try:
+        if not _prepare_character_gate(run):
+            return {"ok": True, "run_id": run_id, **_public(run)}
         for item in run.get("videos") or []:
             validate_matte_sequence(item["frame_dir"], item["matte_dir"])
         run["status"] = "RUNNING"
@@ -361,6 +426,9 @@ def cancel(run_id: str | None = None, **_: Any) -> dict[str, Any]:
     if not run:
         return {"ok": False, "error": "direct video run not found"}
     cancel_results = _cancel_child_runs(run)
+    from assetclaw_matting.services.character_resolution import cancel_run_resolutions
+
+    cancel_run_resolutions("direct_video", str(run["id"]))
     run["status"] = "CANCELED"
     run["stage"] = "canceled"
     run.setdefault("children", {})["cancel_results"] = cancel_results
@@ -370,6 +438,29 @@ def cancel(run_id: str | None = None, **_: Any) -> dict[str, Any]:
         _append_log(run, "已同步取消子任务：" + "，".join(_child_cancel_label(item) for item in cancel_results))
     _save(run)
     return {"ok": True, "run_id": run["id"], "status": "CANCELED", "cancel_results": cancel_results, **_public(run)}
+
+
+def resume_after_character_resolution(run_id: str) -> dict[str, Any]:
+    from assetclaw_matting.services.character_resolution import all_run_units_frozen
+
+    run = _load(run_id)
+    if not run:
+        return {"ok": False, "run_id": run_id, "error": "direct video run not found"}
+    if not all_run_units_frozen("direct_video", run_id):
+        return {"ok": False, "run_id": run_id, "status": run.get("status"), "error": "character resolution is incomplete"}
+    if str(run.get("status") or "") != "WAITING_CHARACTER":
+        return {"ok": True, "run_id": run_id, "status": run.get("status"), "scheduled": False}
+    run["status"] = "QUEUED"
+    run["stage"] = "character_resolved"
+    run["recovery_from_stage"] = "postprocess"
+    run["worker_pid"] = 0
+    run["error"] = ""
+    _append_log(run, "角色已全部确认，从已完成的抠图结果继续后处理；不会重复抽帧或抠图。")
+    if not _save(run, expected_statuses={"WAITING_CHARACTER"}):
+        latest = _load(run_id) or run
+        return {"ok": True, "run_id": run_id, "status": latest.get("status"), "scheduled": False}
+    scheduled = _start_worker(run_id, recover=True)
+    return {"ok": True, "run_id": run_id, "status": "QUEUED", "scheduled": scheduled}
 
 
 def preview_start_confirmation(arguments: dict[str, Any], confirmation_id: str) -> str:
@@ -388,7 +479,7 @@ def preview_start_confirmation(arguments: dict[str, Any], confirmation_id: str) 
         [
             "流程：抽帧、抠图、后处理，完成后发 zip。",
             "后处理：正方形 256x256，长方形 384x512，自动判断。",
-            "回复“确认执行”开始。",
+            "视频文件收到后会自动开始，无需再次确认。",
         ]
     )
     return "\n".join(lines)
@@ -407,6 +498,9 @@ def _worker(run_id: str) -> None:
         _mark(run, "RUNNING", "matting")
         _run_comfyui(run)
         if _is_canceled(run):
+            return
+
+        if not _prepare_character_gate(run):
             return
 
         _mark(run, "RUNNING", "postprocess")
@@ -428,6 +522,7 @@ def _worker(run_id: str) -> None:
         run["updated_at"] = _now()
         _append_log(run, f"zip 发送完成：{zip_path.name}，{zip_path.stat().st_size} bytes")
         _save(run)
+        _notify(run, f"动画完成：{run['id']}，ZIP 已发送。{_character_completion_lines(run.get('videos') or [])}")
     except Exception as exc:
         run = _load(run_id) or run
         if run.get("status") != "CANCELED":
@@ -531,6 +626,7 @@ def _run_comfyui_unlocked(run: dict[str, Any]) -> None:
         notify_interval_seconds=run["notify_interval_seconds"],
         strict_frame_identity=True,
         external_batch_id=f"assetclaw:{run['id']}:matting:g{matting_generation}",
+        backend=str(run.get("matting_backend") or "") or None,
     )
     child_id = result["run_id"]
     run.setdefault("children", {})["comfyui_run_id"] = child_id
@@ -573,6 +669,10 @@ def _run_cherry(run: dict[str, Any]) -> None:
             skip_existing=False,
             notify_interval_seconds=run["notify_interval_seconds"],
             profile=profile,
+            reference_path=str(item.get("color_reference_path") or ""),
+            reference_sha256=str(item.get("color_reference_sha256") or ""),
+            color_match_required=True,
+            alignment_enabled=True,
         )
         options = result.get("options") if isinstance(result.get("options"), dict) else {}
         if options.get("resize_width") and options.get("resize_height"):
@@ -595,10 +695,34 @@ def _run_cherry(run: dict[str, Any]) -> None:
                 key = f"video_{int(item.get('index') or 0):02d}"
                 report = validate_sequence_names(matte_dir, smooth_dir, label="matte_to_smooth")
                 run.setdefault("integrity", {}).setdefault("smooth", {})[key] = report
+                item["color_correction_status"] = "DONE"
+                item["position_alignment_status"] = "DONE"
+                item["reference_postprocess_status"] = "DONE"
+                item["color_correction_run_id"] = child_id
                 _append_log(run, f"后处理序列校验通过：{key}，{report['count']} 帧")
                 _save(run)
                 break
             time.sleep(5)
+
+
+def _prepare_character_gate(run: dict[str, Any]) -> bool:
+    from assetclaw_matting.services.character_resolution import bind_run_items
+
+    result = bind_run_items("direct_video", str(run["id"]), list(run.get("videos") or []))
+    if result.get("ready"):
+        run.setdefault("character_resolution", {})["pending"] = 0
+        run["character_question"] = ""
+        _append_log(run, "角色参考图已逐视频冻结；Cherry 将在流程末尾依次执行校色和位置矫正。")
+        _save(run)
+        return True
+    run["status"] = "WAITING_CHARACTER"
+    run["stage"] = "waiting_character"
+    run["recovery_from_stage"] = "postprocess"
+    run.setdefault("character_resolution", {})["pending"] = len(result.get("missing") or [])
+    run["updated_at"] = _now()
+    _append_log(run, "抠图已完成，等待用户确认角色后继续 Cherry 校色/矫正：" + "、".join(result.get("missing") or []))
+    _save(run)
+    return False
 
 
 def _make_zip(run: dict[str, Any]) -> Path:
@@ -726,31 +850,63 @@ def _cross_process_video_pipeline_lock(run: dict[str, Any]):
             msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def _send_zip(run: dict[str, Any], zip_path: Path) -> None:
+def _send_zip(run: dict[str, Any], zip_path: Path) -> dict[str, str]:
     chat_id = str(run.get("chat_id") or "")
     if not chat_id:
-        return
+        raise RuntimeError("zip delivery requires a Feishu chat_id")
     from assetclaw_matting.feishu.client import feishu_client
 
     _append_log(run, f"开始发送 zip：{zip_path.name}，{zip_path.stat().st_size} bytes")
     _save(run)
     sent = feishu_client.send_file_to_chat(chat_id, zip_path, zip_path.name) or {}
-    if sent:
+    message_id = str(sent.get("message_id") or "")
+    if not message_id:
+        raise RuntimeError(f"Feishu delivery returned no message receipt for {zip_path.name}")
+    if sent.get("file_token") or sent.get("url"):
         run["drive_file"] = sent
-        _append_log(run, f"Drive 文件已授权并发送：{sent.get('url') or sent.get('file_token')}")
-    else:
-        _append_log(run, f"飞书附件已发送：{zip_path.name}")
+    run["delivery"] = {
+        "status": "DELIVERED",
+        "chat_id": chat_id,
+        "file_name": zip_path.name,
+        "file_size": zip_path.stat().st_size,
+        "message_id": message_id,
+        "file_token": str(sent.get("file_token") or ""),
+        "url": str(sent.get("url") or ""),
+        "delivery_method": str(sent.get("delivery_method") or ""),
+        "delivered_at": _now(),
+        "last_error": "",
+    }
+    _append_log(run, f"飞书交付回执已确认：{zip_path.name}，message_id={message_id}")
     _save(run)
+    return sent
 
 
 def _send_zip_with_retries(run: dict[str, Any], zip_path: Path, attempts: int = 5) -> None:
     errors: list[str] = []
     for attempt in range(1, max(1, attempts) + 1):
+        run["delivery"] = {
+            **(run.get("delivery") if isinstance(run.get("delivery"), dict) else {}),
+            "status": "UPLOADING",
+            "chat_id": str(run.get("chat_id") or ""),
+            "file_name": zip_path.name,
+            "file_size": zip_path.stat().st_size,
+            "attempt": attempt,
+            "max_attempts": attempts,
+            "last_error": "",
+        }
+        _save(run)
         try:
             _send_zip(run, zip_path)
             return
         except Exception as exc:
             errors.append(str(exc))
+            run["delivery"] = {
+                **(run.get("delivery") if isinstance(run.get("delivery"), dict) else {}),
+                "status": "RETRYING" if attempt < attempts else "FAILED",
+                "attempt": attempt,
+                "max_attempts": attempts,
+                "last_error": str(exc),
+            }
             _append_log(run, f"zip 发送第 {attempt}/{attempts} 次失败：{exc}")
             _save(run)
             if attempt < attempts:
@@ -873,15 +1029,15 @@ def _notify(run: dict[str, Any], text: str) -> None:
         _save(run)
 
 
-def _start_worker(run_id: str, recover: bool = False) -> None:
+def _start_worker(run_id: str, recover: bool = False) -> bool:
     if run_id in _WORKERS:
-        return
+        return False
     run = _load(run_id)
     if not run:
-        return
+        return False
     existing_pid = int(run.get("worker_pid") or 0)
     if existing_pid and _process_alive(existing_pid):
-        return
+        return False
     _WORKERS.add(run_id)
     script = Path(settings.assetclaw_root) / "scripts" / "direct_video_worker.py"
     log_path = Path(settings.log_dir) / f"direct_video_worker_{run_id}.log"
@@ -892,6 +1048,9 @@ def _start_worker(run_id: str, recover: bool = False) -> None:
     creationflags = 0
     if os.name == "nt":
         creationflags = 0x00000008 | 0x00000200 | 0x08000000
+    child_env = os.environ.copy()
+    child_env["PYTHONUTF8"] = "1"
+    child_env["PYTHONIOENCODING"] = "utf-8"
     with log_path.open("a", encoding="utf-8") as log_handle:
         process = subprocess.Popen(
             command,
@@ -901,12 +1060,14 @@ def _start_worker(run_id: str, recover: bool = False) -> None:
             stdin=subprocess.DEVNULL,
             creationflags=creationflags,
             close_fds=True,
+            env=child_env,
         )
     run["worker_pid"] = process.pid
     run["worker_mode"] = "detached"
     _append_log(run, f"持久化工作进程已启动：PID={process.pid}，机器人重启不会中断")
     _save(run)
     _WORKERS.discard(run_id)
+    return True
 
 
 def run_worker_process(run_id: str, recover: bool = False) -> dict[str, Any]:
@@ -936,6 +1097,19 @@ def run_worker_process(run_id: str, recover: bool = False) -> dict[str, Any]:
         if latest and int(latest.get("worker_pid") or 0) == os.getpid():
             latest["worker_pid"] = 0
             _save(latest)
+        _restart_character_resume_if_needed(run_id)
+
+
+def _restart_character_resume_if_needed(run_id: str) -> None:
+    latest = _load(run_id)
+    if not latest or str(latest.get("status") or "") != "QUEUED":
+        return
+    if str(latest.get("stage") or "") != "character_resolved":
+        return
+    from assetclaw_matting.services.character_resolution import all_run_units_frozen
+
+    if all_run_units_frozen("direct_video", run_id):
+        _start_worker(run_id, recover=True)
 
 
 def _process_alive(pid: int) -> bool:
@@ -976,8 +1150,9 @@ def _mark(run: dict[str, Any], status_text: str, stage: str) -> None:
 
 
 def _append_log(run: dict[str, Any], message: str) -> None:
+    message = _safe_display_text(str(message))
     logs = run.setdefault("log", [])
-    logs.append({"ts": _now(), "message": str(message)})
+    logs.append({"ts": _now(), "message": message})
     run["log"] = logs[-120:]
     run["updated_at"] = _now()
 
@@ -993,11 +1168,16 @@ def _public(run: dict[str, Any]) -> dict[str, Any]:
         "children": run.get("children") or {},
         "fps": run.get("fps"),
         "zip_path": run.get("zip_path") or "",
+        "delivery": run.get("delivery") or {},
+        "drive_file": run.get("drive_file") or {},
+        "character_question": run.get("character_question") or "",
+        "character_resolution": run.get("character_resolution") or {},
         "integrity": run.get("integrity") or {},
         "repair_batch": run.get("repair_batch") or {},
         "worker_pid": int(run.get("worker_pid") or 0),
         "worker_mode": run.get("worker_mode") or "",
         "pipeline_notice": run.get("pipeline_notice") or "",
+        "matting_backend": run.get("matting_backend") or "",
         "error": run.get("error") or "",
         "last_log": (run.get("log") or [{}])[-1].get("message", ""),
         "run_dir": str(_run_dir(run)),
@@ -1031,6 +1211,15 @@ def _cherry_plan_summary(items: list[dict[str, Any]]) -> str:
     return "后处理 " + "，".join(f"{key}×{count}" for key, count in counts.items())
 
 
+def _character_completion_lines(items: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for item in items:
+        name = str(item.get("source_name") or item.get("name") or "视频")
+        character = str(item.get("character_id") or "未知角色")
+        lines.append(f"{name} · {character} · 后处理（含校色/矫正）完成")
+    return ("\n" + "\n".join(lines)) if lines else ""
+
+
 def _load(run_id: str | None = None) -> dict[str, Any] | None:
     if run_id:
         path = RUNS_ROOT / run_id / "status.json"
@@ -1045,15 +1234,34 @@ def _load(run_id: str | None = None) -> dict[str, Any] | None:
     paths = sorted(RUNS_ROOT.glob("VID_*/status.json"), key=lambda item: item.stat().st_mtime, reverse=True)
     if not paths:
         return None
+    conversation_id = _current_feishu_conversation_id()
     active = []
+    visible = []
     for path in paths:
         try:
             run = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
+        if conversation_id and str(run.get("conversation_id") or "") != conversation_id:
+            continue
+        visible.append(run)
         if run.get("status") not in FINISHED:
             active.append(run)
-    return active[0] if active else json.loads(paths[0].read_text(encoding="utf-8"))
+    return active[0] if active else (visible[0] if visible else None)
+
+
+def _current_feishu_conversation_id() -> str:
+    ctx = get_runtime_context()
+    if str(ctx.get("channel") or "") != "feishu":
+        return ""
+    return str(ctx.get("conversation_id") or "")
+
+
+def _safe_display_text(text: str) -> str:
+    value = str(text or "")
+    if "�" in value:
+        return "任务状态已更新；详细技术日志仅保留在后台。"
+    return value
 
 
 def _find_run_by_text(value: str) -> dict[str, Any] | None:
@@ -1079,10 +1287,11 @@ def _find_run_by_text(value: str) -> dict[str, Any] | None:
     return fallback
 
 
-def _save(run: dict[str, Any]) -> None:
+def _save(run: dict[str, Any], *, expected_statuses: set[str] | None = None) -> bool:
+    from assetclaw_matting.services.atomic_json_state import atomic_save_task_json
+
     path = _run_dir(run) / "status.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8")
+    return atomic_save_task_json(path, run, expected_statuses=expected_statuses)
 
 
 def _run_dir(run: dict[str, Any]) -> Path:

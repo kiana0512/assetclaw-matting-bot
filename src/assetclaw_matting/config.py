@@ -217,6 +217,7 @@ class Settings(BaseSettings):
     matting_pipeline_custom_node_name: str = "Cherry_lizi"
     cherry_html_runner_enabled: bool = True
     cherry_postprocess_html_path: Path = PROJECT_ROOT.parent / "imageclip" / "cherry-postprocess.html"
+    cherry_character_reference_dir: Path = PROJECT_ROOT.parent / "imageclip" / "Charactor"
     cherry_browser_path: Path | None = None
     cherry_html_timeout_seconds: int = 900
     # The standalone HTML keeps several full-resolution ImageData snapshots in
@@ -292,6 +293,7 @@ class Settings(BaseSettings):
             "comfyui_workflow_path": comfy_dir / "user" / "default" / "workflows" / "ImageClip.json",
             "matting_pipeline_repo_dir": pipeline_root,
             "cherry_postprocess_html_path": pipeline_root / "cherry-postprocess.html",
+            "cherry_character_reference_dir": pipeline_root / "Charactor",
             "default_batch_input_dir": root / "storage" / "batch_inputs",
             "default_batch_output_dir": root / "storage" / "batch_outputs",
             "speech_model_dir": root / "storage" / "models" / "asr" / "iic__SenseVoiceSmall",

@@ -752,8 +752,30 @@ h3 {
 }
 
 .task-row.large {
-  grid-template-columns: 300px 108px 132px minmax(380px, 1fr) auto;
+  grid-template-columns: minmax(320px, 380px) 108px 132px minmax(380px, 1fr) auto;
   min-height: 68px;
+}
+
+.task-row.large .task-main {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+}
+
+.task-row.large .task-main b,
+.task-row.large .task-main span,
+.task-row.large .task-main small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-row.large .task-main b {
+  grid-row: auto;
+  font-size: 15px;
 }
 
 .task-main {

@@ -40,6 +40,7 @@ def _wait_done(run_id: str) -> dict:
 def test_cherry_info_preview_and_real_processing(monkeypatch) -> None:
     src = Path.cwd() / "storage/debug/cherry_input"
     dst = Path.cwd() / "storage/debug/cherry_output"
+    reference = Path.cwd() / "storage/debug/cherry_reference.png"
     html = Path.cwd() / "storage/debug/cherry-postprocess.html"
     html.parent.mkdir(parents=True, exist_ok=True)
     html.write_text('<input id="file-input"><button id="btn-process"></button><button id="btn-download"></button>', encoding="utf-8")
@@ -57,13 +58,21 @@ def test_cherry_info_preview_and_real_processing(monkeypatch) -> None:
             profile="half",
             resize="256x256",
             feather_enabled=False,
-            steps=["fringe", "hairinset", "blur", "resize2"],
+            steps=["fringe", "hairinset", "blur", "resize2", "colormatch", "align"],
             downloaded_zip=output_root / "test.zip",
+            source_sha256=cherry_skills._sha256_path(Path(html_path)),
+            executed_steps=["fringe", "hairinset", "blur", "resize2", "colormatch", "align"],
+            reference_loaded=True,
+            reference_sha256=cherry_skills._sha256_path(Path(kwargs["reference_path"])),
+            alignment_enabled=True,
+            alignment_transform={"s": 1.0, "tx": 0.0, "ty": 0.0, "anchor": "001.png"},
+            color_match_stats={"calls": len(files), "applied": len(files), "insufficient": 0},
         )
 
     monkeypatch.setattr("assetclaw_matting.services.cherry_html_runner.run_cherry_html", fake_html_runner)
     _make_frame(src / "seq_a" / "001.png", 80)
     _make_frame(src / "seq_a" / "002.png", 160)
+    _make_frame(reference, 255)
 
     available = info()
     assert available["exists"] is True
@@ -72,6 +81,8 @@ def test_cherry_info_preview_and_real_processing(monkeypatch) -> None:
     assert available["runtime_ready"] is True
     assert "fringe" in available["steps"]
     assert "resize2" in available["steps"]
+    assert "colormatch(final-2)" in available["steps"]
+    assert "align(final)" in available["steps"]
     assert available["defaults"]["use_denoise"] is True
     assert available["defaults"]["engine"] == "headless_chrome_html"
     assert available["defaults"]["html_feather_enabled"] is True
@@ -99,7 +110,14 @@ def test_cherry_info_preview_and_real_processing(monkeypatch) -> None:
     assert preview["sequence_count"] == 1
     assert preview["options"]["use_denoise"] is True
 
-    started = run_start(str(src), str(dst), use_resize=False, use_sharpen=False, notify_interval_seconds=60)
+    started = run_start(
+        str(src),
+        str(dst),
+        use_resize=False,
+        use_sharpen=False,
+        notify_interval_seconds=60,
+        reference_path=str(reference),
+    )
     status = _wait_done(started["run_id"])
 
     assert status["status"] == "DONE"
@@ -134,6 +152,43 @@ def test_cherry_registry_and_router() -> None:
     assert listed["ok"] is True
 
 
+def test_legacy_cherry_caller_without_role_reference_keeps_reference_steps_off(monkeypatch, tmp_path: Path) -> None:
+    src = tmp_path / "input"
+    dst = tmp_path / "output"
+    html = tmp_path / "cherry-postprocess.html"
+    html.write_text("legacy-test", encoding="utf-8")
+    _make_frame(src / "001.png", 128)
+    monkeypatch.setattr(settings, "cherry_postprocess_html_path", html)
+    monkeypatch.setattr(cherry_skills, "_require_html_runtime", lambda: {"html_path": str(html), "browser_path": "test"})
+
+    def fake_html_runner(html_path, input_root, output_root, files, **kwargs):
+        assert kwargs["reference_path"] is None
+        assert kwargs["reference_steps_required"] is False
+        for source in files:
+            target = output_root / source.relative_to(input_root).with_suffix(".png")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            Image.open(source).save(target)
+        return CherryHtmlResult(
+            output_dir=output_root,
+            total=len(files),
+            profile="full",
+            resize="384x512",
+            feather_enabled=True,
+            steps=["fringe", "resize2"],
+            downloaded_zip=output_root / "test.zip",
+            source_sha256=cherry_skills._sha256_path(Path(html_path)),
+            executed_steps=["fringe", "resize2"],
+        )
+
+    monkeypatch.setattr("assetclaw_matting.services.cherry_html_runner.run_cherry_html", fake_html_runner)
+    started = run_start(str(src), str(dst), recursive=False)
+    status = _wait_done(started["run_id"])
+
+    assert status["status"] == "DONE"
+    assert status["options"]["reference_postprocess_required"] is False
+    assert status["options"]["html_align_enabled"] is False
+
+
 def test_cherry_start_refuses_missing_authoritative_html(monkeypatch, tmp_path: Path) -> None:
     src = tmp_path / "input"
     dst = tmp_path / "output"
@@ -161,6 +216,7 @@ def test_capacity_error_splits_batch_instead_of_retrying_same_load(monkeypatch, 
     src = tmp_path / "input"
     dst = tmp_path / "output"
     html = tmp_path / "cherry-postprocess.html"
+    reference = tmp_path / "reference.png"
     html.write_text('<input id="file-input"><button id="btn-process"></button><button id="btn-download"></button>', encoding="utf-8")
     monkeypatch.setattr(settings, "cherry_postprocess_html_path", html)
     monkeypatch.setattr(settings, "cherry_html_batch_max_files", 4)
@@ -182,15 +238,29 @@ def test_capacity_error_splits_batch_instead_of_retrying_same_load(monkeypatch, 
             profile="half",
             resize="256x256",
             feather_enabled=False,
-            steps=["fringe", "resize2"],
+            steps=["fringe", "resize2", "colormatch", "align"],
             downloaded_zip=output_root / "test.zip",
+            source_sha256=cherry_skills._sha256_path(Path(html_path)),
+            executed_steps=["fringe", "resize2", "colormatch", "align"],
+            reference_loaded=True,
+            reference_sha256=cherry_skills._sha256_path(Path(kwargs["reference_path"])),
+            alignment_enabled=True,
+            alignment_transform={"s": 1.0, "tx": 0.0, "ty": 0.0, "anchor": "0000.png"},
+            color_match_stats={"calls": 1, "applied": 1, "insufficient": 0},
         )
 
     monkeypatch.setattr("assetclaw_matting.services.cherry_html_runner.run_cherry_html", fake_html_runner)
     for index in range(4):
         _make_frame(src / f"{index:04d}.png", 128)
+    _make_frame(reference, 255)
 
-    started = run_start(str(src), str(dst), recursive=False, notify_interval_seconds=60)
+    started = run_start(
+        str(src),
+        str(dst),
+        recursive=False,
+        notify_interval_seconds=60,
+        reference_path=str(reference),
+    )
     status = _wait_done(started["run_id"])
 
     assert status["status"] == "DONE"

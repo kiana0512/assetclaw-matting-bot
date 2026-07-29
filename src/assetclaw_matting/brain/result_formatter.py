@@ -1042,6 +1042,7 @@ def _run_status_label(status: str) -> str:
         "QUEUED": "排队中",
         "PENDING": "等待中",
         "PAUSED": "已暂停",
+        "WAITING_CHARACTER": "等待确认角色",
         "DONE": "完成",
         "DONE_WITH_ERRORS": "部分完成",
         "FAILED": "失败",
@@ -1110,13 +1111,15 @@ def _image_sequence_status_item(run: dict[str, Any], items: list[dict[str, Any]]
     run_stage = str(run.get("stage") or "")
     first_status = str((items[0] or {}).get("status") or "处理中")
     status = "完成" if run_status == "DONE" else first_status
+    characters = sorted({str(item.get("character_id") or "").strip() for item in items if item.get("character_id")})
+    character_suffix = f" · {'/'.join(characters)}" if characters else ""
     return {
         "run_id": run.get("run_id") or run.get("id") or "",
         "run_status": run_status,
         "run_stage": run_stage,
         "run_label": label,
         "updated_at": run.get("updated_at") or "",
-        "name": f"{label}（{count}张）",
+        "name": f"{label}（{count}张）{character_suffix}",
         "status": status,
         "total": count,
         "matte_done": sum(min(1, int(item.get("matte_done") or 0)) for item in items),
@@ -1665,6 +1668,8 @@ def _format_direct_video(skill: str, payload: dict[str, Any], max_items: int) ->
     lines: list[str] = []
     if skill == "direct_video.start":
         lines.append(f"已启动 {run_id}（{len(videos)} 个视频）")
+        if payload.get("character_question"):
+            lines.append(str(payload.get("character_question")))
         return lines
     if skill == "direct_video.list":
         items = payload.get("items") or []
@@ -1732,6 +1737,8 @@ def _format_direct_image(skill: str, payload: dict[str, Any], max_items: int) ->
     if skill == "direct_image.start":
         plan = _cherry_plan_summary(images)
         lines = [f"已启动 {run_id}（{len(images)} 张图片{('，' + plan) if plan else ''}）"]
+        if payload.get("character_question"):
+            lines.append(str(payload.get("character_question")))
         return lines
     if skill == "direct_image.list":
         items = payload.get("items") or []
@@ -1786,7 +1793,11 @@ def _direct_video_status_item(payload: dict[str, Any], item: dict[str, Any]) -> 
         "run_stage": payload.get("stage") or "",
         "run_label": payload.get("run_label") or "",
         "updated_at": payload.get("updated_at") or "",
-        "name": item.get("source_name") or item.get("name") or item.get("source_path") or "未命名视频",
+        "name": _character_labeled_name(
+            item.get("source_name") or item.get("name") or item.get("source_path") or "未命名视频",
+            item.get("character_id"),
+        ),
+        "character_id": item.get("character_id") or "",
         "status": _media_status_from_stage(str(payload.get("status") or ""), str(payload.get("stage") or ""), frame_total, matte_done, smooth_done),
         "total": frame_total,
         "matte_done": matte_done,
@@ -1813,7 +1824,11 @@ def _direct_image_status_item(payload: dict[str, Any], item: dict[str, Any]) -> 
         "run_stage": payload.get("stage") or "",
         "run_label": payload.get("run_label") or "",
         "updated_at": payload.get("updated_at") or "",
-        "name": item.get("name") or item.get("source_path") or "未命名图片",
+        "name": _character_labeled_name(
+            item.get("source_name") or item.get("name") or item.get("source_path") or "未命名图片",
+            item.get("character_id"),
+        ),
+        "character_id": item.get("character_id") or "",
         "status": _media_status_from_stage(str(payload.get("status") or ""), str(payload.get("stage") or ""), 1, matte_done, smooth_done),
         "total": 1,
         "matte_done": matte_done,
@@ -1840,6 +1855,8 @@ def _media_status_from_stage(run_status: str, stage: str, total: int, matte_done
         return "重新抽帧"
     if stage == "waiting_matting_queue":
         return "等待独占抠图"
+    if stage == "waiting_character":
+        return "等待确认角色"
     if stage == "repair_matting":
         return "重新抠图" if matte_done else "准备抠图"
     if stage == "repair_postprocess":
@@ -1867,6 +1884,12 @@ def _media_status_from_stage(run_status: str, stage: str, total: int, matte_done
     if stage == "done":
         return "完成"
     return stage or run_status or "处理中"
+
+
+def _character_labeled_name(name: object, character_id: object) -> str:
+    base = str(name or "").strip()
+    character = str(character_id or "").strip()
+    return f"{base} · {character}" if character else base
 
 
 def _count_pngs_text(path_value: object) -> int:

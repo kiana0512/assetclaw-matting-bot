@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import shutil
 import socket
@@ -10,7 +11,7 @@ import subprocess
 import tempfile
 import time
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,13 @@ class CherryHtmlResult:
     steps: list[str]
     downloaded_zip: Path
     source_sha256: str = ""
+    executed_steps: list[str] = field(default_factory=list)
+    skipped_no_ref: list[str] = field(default_factory=list)
+    reference_loaded: bool = False
+    reference_sha256: str = ""
+    alignment_enabled: bool = False
+    alignment_transform: dict[str, Any] = field(default_factory=dict)
+    color_match_stats: dict[str, int] = field(default_factory=dict)
 
 
 def validate_cherry_html_runtime(html_path: Path, chrome_path: Path | None = None) -> dict[str, str]:
@@ -36,7 +44,18 @@ def validate_cherry_html_runtime(html_path: Path, chrome_path: Path | None = Non
     if not source.is_file():
         raise FileNotFoundError(f"Cherry algorithm HTML not found: {source}")
     html = source.read_text(encoding="utf-8", errors="ignore")
-    missing = [marker for marker in ("file-input", "btn-process", "btn-download") if marker not in html]
+    required_markers = (
+        "file-input",
+        "ref-input",
+        "btn-process",
+        "btn-download",
+        "colormatch",
+        "align",
+        "buildAlignTransform",
+        "colorMatchToRef",
+        "buildDiagnosticLog",
+    )
+    missing = [marker for marker in required_markers if marker not in html]
     if missing:
         raise ValueError(f"Cherry algorithm HTML is missing required controls: {', '.join(missing)}")
     browser = _resolve_chrome(chrome_path)
@@ -76,21 +95,30 @@ class CdpClient:
         fut: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._pending[msg_id] = fut
         await self._ws.send(json.dumps({"id": msg_id, "method": method, "params": params or {}}))
-        result = await asyncio.wait_for(fut, timeout=timeout)
+        try:
+            result = await asyncio.wait_for(fut, timeout=timeout)
+        finally:
+            # The reader normally removes completed requests.  A timeout must
+            # also release its Future or repeated CDP failures leak memory.
+            self._pending.pop(msg_id, None)
         if "error" in result:
             raise RuntimeError(f"CDP {method} failed: {result['error']}")
         return result.get("result") or {}
 
     async def wait_event(self, method: str, timeout: float = 30.0) -> dict[str, Any]:
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
         while True:
+            # Clear before scanning.  If the reader publishes between clear
+            # and scan, the queued event is seen; if it publishes after scan,
+            # wait() observes the set flag.  Scanning before clear loses that
+            # notification and can add a false 30-second delay.
+            self._event.clear()
             for index, event in enumerate(self._events):
                 if event.get("method") == method:
                     return self._events.pop(index)
-            remain = deadline - time.time()
+            remain = deadline - time.monotonic()
             if remain <= 0:
                 raise TimeoutError(f"timed out waiting for {method}")
-            self._event.clear()
             await asyncio.wait_for(self._event.wait(), timeout=remain)
 
     async def evaluate(self, expression: str, timeout: float = 30.0) -> Any:
@@ -118,6 +146,8 @@ class CdpClient:
                     fut.set_result(message)
             else:
                 self._events.append(message)
+                if len(self._events) > 256:
+                    del self._events[:-256]
                 self._event.set()
 
 
@@ -127,20 +157,35 @@ def run_cherry_html(
     output_root: Path,
     files: list[Path],
     *,
+    reference_path: Path | None = None,
+    reference_steps_required: bool = True,
+    alignment_transform: dict[str, Any] | None = None,
     chrome_path: Path | None = None,
     timeout_seconds: int = 900,
     storage_dir: Path | None = None,
 ) -> CherryHtmlResult:
+    async def run_with_overall_deadline() -> CherryHtmlResult:
+        try:
+            return await asyncio.wait_for(
+                _run_cherry_html_async(
+                    html_path=html_path,
+                    input_root=input_root,
+                    output_root=output_root,
+                    files=files,
+                    reference_path=reference_path,
+                    reference_steps_required=reference_steps_required,
+                    alignment_transform=alignment_transform,
+                    chrome_path=chrome_path,
+                    timeout_seconds=timeout_seconds,
+                    storage_dir=storage_dir,
+                ),
+                timeout=max(0.1, float(timeout_seconds)),
+            )
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(f"Cherry HTML run exceeded the overall {timeout_seconds}s deadline") from exc
+
     return asyncio.run(
-        _run_cherry_html_async(
-            html_path=html_path,
-            input_root=input_root,
-            output_root=output_root,
-            files=files,
-            chrome_path=chrome_path,
-            timeout_seconds=timeout_seconds,
-            storage_dir=storage_dir,
-        )
+        run_with_overall_deadline()
     )
 
 
@@ -150,6 +195,9 @@ async def _run_cherry_html_async(
     input_root: Path,
     output_root: Path,
     files: list[Path],
+    reference_path: Path | None,
+    reference_steps_required: bool,
+    alignment_transform: dict[str, Any] | None,
     chrome_path: Path | None,
     timeout_seconds: int,
     storage_dir: Path | None,
@@ -158,6 +206,7 @@ async def _run_cherry_html_async(
     input_root = input_root.resolve()
     output_root = output_root.resolve()
     files = [path.resolve() for path in files]
+    reference_path = Path(reference_path).resolve() if reference_path else None
     if not html_path.exists():
         raise FileNotFoundError(str(html_path))
     if not files:
@@ -165,10 +214,22 @@ async def _run_cherry_html_async(
     for path in files:
         if not path.exists():
             raise FileNotFoundError(str(path))
+    if reference_steps_required and reference_path is None:
+        raise ValueError("reference_path is required when Cherry reference post-processing is enabled")
+    if reference_path is not None:
+        _validate_reference_image(reference_path)
 
-    work_root = Path(storage_dir or tempfile.gettempdir()) / "cherry_html_runner"
+    # Keep browser sessions in a fresh inheritable directory.  The legacy
+    # ``cherry_html_runner`` directory may carry an old protected Windows ACL;
+    # merely checking that it exists does not mean the current service account
+    # can create children in it.
+    work_root = Path(storage_dir or tempfile.gettempdir()) / "cherry_browser_sessions"
     work_root.mkdir(parents=True, exist_ok=True)
-    _cleanup_old_sessions(work_root)
+    # Do not sweep abandoned Chromium profiles on the latency-critical path.
+    # A crashed browser can leave a very large cache tree, and even a bounded
+    # rmtree can monopolize Python for minutes before the new task starts.  The
+    # current session is removed in ``finally`` below; stale-session cleanup is
+    # an explicit maintenance operation.
 
     proc: subprocess.Popen[Any] | None = None
     session_dir: Path | None = None
@@ -180,7 +241,7 @@ async def _run_cherry_html_async(
         raise FileNotFoundError("Chrome or Edge executable not found")
     for browser in browsers:
         for attempt in range(1, 3):
-            candidate_session = Path(tempfile.mkdtemp(prefix="run_", dir=str(work_root)))
+            candidate_session = _create_session_dir(work_root)
             profile_dir = candidate_session / "chrome_profile"
             candidate_download = candidate_session / "downloads"
             stdout_path = candidate_session / "browser.stdout.log"
@@ -204,7 +265,7 @@ async def _run_cherry_html_async(
                 detail = _browser_start_failure(browser, attempt, port, exc, stdout_path, stderr_path)
                 launch_errors.append(detail)
                 _write_browser_start_failure(work_root, detail)
-                shutil.rmtree(candidate_session, ignore_errors=True)
+                _remove_session_dir(candidate_session)
                 continue
             proc = candidate_proc
             session_dir = candidate_session
@@ -224,6 +285,12 @@ async def _run_cherry_html_async(
         runtime_html = session_dir / "cherry-postprocess.html"
         shutil.copy2(html_path, runtime_html)
         source_sha256 = _sha256_file(runtime_html)
+        runtime_reference: Path | None = None
+        reference_sha256 = ""
+        if reference_path is not None:
+            runtime_reference = session_dir / f"color-reference{reference_path.suffix.lower()}"
+            shutil.copy2(reference_path, runtime_reference)
+            reference_sha256 = _sha256_file(runtime_reference)
         async with CdpClient(ws_url) as cdp:
             await cdp.send("Page.enable")
             await cdp.send("Runtime.enable")
@@ -239,6 +306,12 @@ async def _run_cherry_html_async(
                 pass
             await _wait_ready(cdp)
             doc = await cdp.send("DOM.getDocument", {"depth": 1, "pierce": True})
+            await _install_processing_probe(cdp)
+            if reference_steps_required:
+                assert runtime_reference is not None
+                reference = await _load_reference(cdp, doc["root"]["nodeId"], runtime_reference)
+                if not reference.get("referenceLoaded"):
+                    raise RuntimeError("Cherry color reference did not load")
             node = await cdp.send(
                 "DOM.querySelector",
                 {"nodeId": doc["root"]["nodeId"], "selector": "#file-input"},
@@ -259,12 +332,31 @@ async def _run_cherry_html_async(
                 _file_input_preset_script(len(files)),
                 timeout=30.0,
             )
+            preset = dict(preset or {})
             if int((preset or {}).get("count") or 0) != len(files):
                 raise RuntimeError(f"cherry html loaded {(preset or {}).get('count')} files, expected {len(files)}")
+            if reference_steps_required:
+                forced = await _force_reference_finishing_steps(cdp)
+                if not forced.get("colormatchEnabled") or not forced.get("alignEnabled"):
+                    raise RuntimeError("Cherry module policy could not be enforced (colormatch=on, align=on)")
+                expected_alignment = _normalize_alignment_transform(alignment_transform) if alignment_transform else None
+                if expected_alignment:
+                    await _install_fixed_alignment_transform(cdp, expected_alignment)
+            else:
+                forced = await _force_reference_steps_disabled(cdp)
+                expected_alignment = None
+            preset["steps"] = [str(step) for step in (forced.get("configuredSteps") or [])]
             await cdp.evaluate("document.getElementById('btn-process').click();", timeout=10.0)
             await _wait_processing_done(cdp, timeout_seconds)
+            report = await _read_processing_report(cdp)
+            _validate_processing_report(
+                report,
+                expected_alignment_transform=expected_alignment,
+                reference_steps_required=reference_steps_required,
+                expected_frames=len(files),
+            )
             await cdp.evaluate("document.getElementById('btn-download').click();", timeout=10.0)
-            downloaded = _wait_download(download_dir, timeout_seconds)
+            downloaded = await _wait_download(download_dir, timeout_seconds)
 
         _extract_outputs(downloaded, input_root, output_root, files)
         resize = str((preset or {}).get("resize") or "")
@@ -277,10 +369,20 @@ async def _run_cherry_html_async(
             steps=[str(step) for step in ((preset or {}).get("steps") or [])],
             downloaded_zip=downloaded,
             source_sha256=source_sha256,
+            executed_steps=[str(step) for step in (report.get("executedSteps") or [])],
+            skipped_no_ref=[str(step) for step in (report.get("skippedNoRef") or [])],
+            reference_loaded=bool(report.get("referenceLoaded")),
+            reference_sha256=reference_sha256,
+            alignment_enabled=bool(report.get("alignEnabled")),
+            alignment_transform=dict(report.get("alignmentTransform") or {}),
+            color_match_stats={
+                key: int((report.get("colorMatchStats") or {}).get(key) or 0)
+                for key in ("calls", "applied", "insufficient")
+            },
         )
     finally:
         _stop_chrome(proc)
-        shutil.rmtree(session_dir, ignore_errors=True)
+        _remove_session_dir(session_dir)
 
 
 def _file_input_preset_script(expected_count: int) -> str:
@@ -309,11 +411,290 @@ def _file_input_preset_script(expected_count: int) -> str:
         )
 
 
+async def _install_processing_probe(cdp: CdpClient) -> None:
+    """Capture the algorithm's actual post-run step list without changing its code."""
+
+    state = await cdp.evaluate(
+        """
+        (()=>{
+          if(typeof buildDiagnosticLog !== 'function' || typeof colorMatchToRef !== 'function'){
+            return {installed:false,error:'Cherry diagnostic functions are unavailable'};
+          }
+          if(!window.__assetclawOriginalColorMatchToRef){
+            window.__assetclawOriginalColorMatchToRef=colorMatchToRef;
+            colorMatchToRef=function(image,ref,opts){
+              const threshold=Math.round(Number(opts?.threshold??0.01)*255);
+              let subjectPixels=0;
+              for(let i=3;i<image.data.length;i+=4){if(image.data[i]>threshold)subjectPixels++;}
+              window.__assetclawColorMatchStats.calls++;
+              if(subjectPixels<64)window.__assetclawColorMatchStats.insufficient++;
+              else window.__assetclawColorMatchStats.applied++;
+              return window.__assetclawOriginalColorMatchToRef.call(this,image,ref,opts);
+            };
+          }
+          if(!window.__assetclawOriginalBuildDiagnosticLog){
+            window.__assetclawOriginalBuildDiagnosticLog=buildDiagnosticLog;
+            buildDiagnosticLog=function(stats,order,...rest){
+              window.__assetclawCherryReport={
+                referenceLoaded:typeof refImageData !== 'undefined' && !!refImageData,
+                executedSteps:Array.isArray(order)?order.slice():[],
+                skippedNoRef:Array.isArray(stats?.skippedNoRef)?stats.skippedNoRef.slice():[],
+                colormatchEnabled:!!moduleState?.colormatch,
+                alignEnabled:!!moduleState?.align,
+                alignmentTransform:stats?.alignInfo ? {
+                  s:Number(stats.alignInfo.s),
+                  tx:Number(stats.alignInfo.tx),
+                  ty:Number(stats.alignInfo.ty),
+                  anchor:String(stats.alignInfo.anchor||'')
+                } : null,
+                colorMatchStats:{...window.__assetclawColorMatchStats}
+              };
+              return window.__assetclawOriginalBuildDiagnosticLog.call(this,stats,order,...rest);
+            };
+          }
+          window.__assetclawColorMatchStats={calls:0,applied:0,insufficient:0};
+          window.__assetclawCherryReport=null;
+          return {installed:true};
+        })()
+        """,
+        timeout=10.0,
+    )
+    if not isinstance(state, dict) or not state.get("installed"):
+        detail = state.get("error") if isinstance(state, dict) else "unknown error"
+        raise RuntimeError(f"Cherry processing verification probe could not be installed: {detail}")
+
+
+async def _load_reference(
+    cdp: CdpClient,
+    root_node_id: int,
+    reference_path: Path,
+    *,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    node = await cdp.send(
+        "DOM.querySelector",
+        {"nodeId": root_node_id, "selector": "#ref-input"},
+    )
+    node_id = node.get("nodeId")
+    if not node_id:
+        raise RuntimeError("cherry html color reference input not found")
+    await cdp.send("DOM.setFileInputFiles", {"nodeId": node_id, "files": [str(reference_path)]})
+
+    deadline = time.monotonic() + timeout_seconds
+    last_state: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        state = await cdp.evaluate(
+            """
+            (()=>({
+              referenceLoaded:typeof refImageData !== 'undefined' && !!refImageData,
+              width:typeof refImageData !== 'undefined' && refImageData ? refImageData.width : 0,
+              height:typeof refImageData !== 'undefined' && refImageData ? refImageData.height : 0,
+              info:document.getElementById('ref-info')?.textContent || ''
+            }))()
+            """,
+            timeout=10.0,
+        )
+        if isinstance(state, dict):
+            last_state = state
+            if state.get("referenceLoaded") and int(state.get("width") or 0) > 0 and int(state.get("height") or 0) > 0:
+                return state
+            if "失败" in str(state.get("info") or ""):
+                raise RuntimeError(str(state.get("info")))
+        await asyncio.sleep(0.1)
+    detail = str(last_state.get("info") or "reference decode did not finish")
+    raise TimeoutError(f"Cherry color reference did not load: {detail}")
+
+
+async def _force_reference_finishing_steps(cdp: CdpClient) -> dict[str, Any]:
+    """Make color matching then reference alignment the final two active steps."""
+
+    state = await cdp.evaluate(
+        """
+        (()=>{
+          if(typeof setModuleState !== 'function' || typeof currentOrder !== 'function'){
+            return {ok:false,error:'Cherry module controls are unavailable'};
+          }
+          const modules=document.getElementById('modules');
+          const colorModule=document.getElementById('mod-colormatch');
+          const alignModule=document.getElementById('mod-align');
+          if(!modules || !colorModule || !alignModule){
+            return {ok:false,error:'Cherry reference module DOM is unavailable'};
+          }
+          setModuleState('colormatch',true);
+          setModuleState('align',true);
+          modules.appendChild(colorModule);
+          modules.appendChild(alignModule);
+          const configuredSteps=currentOrder().filter(step=>!!moduleState[step]);
+          return {
+            ok:true,
+            colormatchEnabled:!!moduleState.colormatch,
+            alignEnabled:!!moduleState.align,
+            configuredSteps
+          };
+        })()
+        """,
+        timeout=10.0,
+    )
+    if not isinstance(state, dict) or not state.get("ok"):
+        detail = state.get("error") if isinstance(state, dict) else "unknown error"
+        raise RuntimeError(f"Cherry module policy could not be enforced: {detail}")
+    configured = [str(step) for step in (state.get("configuredSteps") or [])]
+    if configured[-2:] != ["colormatch", "align"]:
+        raise RuntimeError("Cherry color matching and alignment could not be placed last in order")
+    return state
+
+
+async def _force_reference_steps_disabled(cdp: CdpClient) -> dict[str, Any]:
+    """Preserve legacy non-reference Cherry callers without silently color-matching."""
+
+    state = await cdp.evaluate(
+        """
+        (()=>{
+          if(typeof setModuleState !== 'function' || typeof currentOrder !== 'function'){
+            return {ok:false,error:'Cherry module controls are unavailable'};
+          }
+          setModuleState('colormatch',false);
+          setModuleState('align',false);
+          return {
+            ok:true,
+            colormatchEnabled:!!moduleState.colormatch,
+            alignEnabled:!!moduleState.align,
+            configuredSteps:currentOrder().filter(step=>!!moduleState[step])
+          };
+        })()
+        """,
+        timeout=10.0,
+    )
+    if not isinstance(state, dict) or not state.get("ok"):
+        detail = state.get("error") if isinstance(state, dict) else "unknown error"
+        raise RuntimeError(f"Cherry legacy module policy could not be enforced: {detail}")
+    if state.get("colormatchEnabled") or state.get("alignEnabled"):
+        raise RuntimeError("Cherry reference steps could not be disabled for a legacy run")
+    return state
+
+
+async def _install_fixed_alignment_transform(cdp: CdpClient, transform: dict[str, Any]) -> None:
+    """Reuse the first micro-batch's transform across the rest of one sequence."""
+
+    payload = json.dumps(_normalize_alignment_transform(transform), ensure_ascii=True)
+    state = await cdp.evaluate(
+        f"""
+        (()=>{{
+          if(typeof buildAlignTransform !== 'function'){{
+            return {{ok:false,error:'buildAlignTransform is unavailable'}};
+          }}
+          const fixed={payload};
+          window.__assetclawOriginalBuildAlignTransform ||= buildAlignTransform;
+          buildAlignTransform=function(){{
+            return {{s:fixed.s,tx:fixed.tx,ty:fixed.ty,assetclawFixed:true}};
+          }};
+          return {{ok:true,fixed}};
+        }})()
+        """,
+        timeout=10.0,
+    )
+    if not isinstance(state, dict) or not state.get("ok"):
+        detail = state.get("error") if isinstance(state, dict) else "unknown error"
+        raise RuntimeError(f"Cherry fixed alignment transform could not be installed: {detail}")
+
+
+async def _read_processing_report(cdp: CdpClient) -> dict[str, Any]:
+    report = await cdp.evaluate(
+        """
+        (()=>{
+          const report=window.__assetclawCherryReport;
+          return report ? {
+            referenceLoaded:!!report.referenceLoaded,
+            executedSteps:Array.isArray(report.executedSteps)?report.executedSteps.slice():[],
+            skippedNoRef:Array.isArray(report.skippedNoRef)?report.skippedNoRef.slice():[],
+            colormatchEnabled:!!report.colormatchEnabled,
+            alignEnabled:!!report.alignEnabled,
+            alignmentTransform:report.alignmentTransform ? {
+              s:Number(report.alignmentTransform.s),
+              tx:Number(report.alignmentTransform.tx),
+              ty:Number(report.alignmentTransform.ty),
+              anchor:String(report.alignmentTransform.anchor||'')
+            } : null,
+            colorMatchStats:report.colorMatchStats ? {
+              calls:Number(report.colorMatchStats.calls||0),
+              applied:Number(report.colorMatchStats.applied||0),
+              insufficient:Number(report.colorMatchStats.insufficient||0)
+            } : null
+          } : null;
+        })()
+        """,
+        timeout=10.0,
+    )
+    if not isinstance(report, dict):
+        raise RuntimeError("Cherry completed without an execution verification report")
+    return report
+
+
+def _validate_processing_report(
+    report: dict[str, Any],
+    *,
+    expected_alignment_transform: dict[str, Any] | None = None,
+    reference_steps_required: bool = True,
+    expected_frames: int | None = None,
+) -> None:
+    executed = [str(step) for step in (report.get("executedSteps") or [])]
+    skipped = [str(step) for step in (report.get("skippedNoRef") or [])]
+    if not reference_steps_required:
+        if report.get("colormatchEnabled") or report.get("alignEnabled"):
+            raise RuntimeError("Cherry reference steps unexpectedly remained enabled")
+        if "colormatch" in executed or "align" in executed:
+            raise RuntimeError("Cherry unexpectedly executed reference-dependent steps")
+        return
+    if not report.get("referenceLoaded"):
+        raise RuntimeError("Cherry completed without a loaded color reference")
+    if skipped:
+        raise RuntimeError(f"Cherry skipped reference-dependent steps: {', '.join(skipped)}")
+    if not report.get("colormatchEnabled") or "colormatch" not in executed:
+        raise RuntimeError("Cherry color matching was not executed")
+    if not report.get("alignEnabled") or "align" not in executed:
+        raise RuntimeError("Cherry reference alignment was not executed")
+    if executed[-2:] != ["colormatch", "align"]:
+        raise RuntimeError("Cherry color matching and alignment were not the final executed steps in order")
+    color_stats = report.get("colorMatchStats") or {}
+    calls = int(color_stats.get("calls") or 0)
+    applied = int(color_stats.get("applied") or 0)
+    insufficient = int(color_stats.get("insufficient") or 0)
+    if insufficient or calls <= 0 or applied != calls:
+        raise RuntimeError("Cherry color matching was a no-op for one or more frames")
+    if expected_frames is not None and calls != int(expected_frames):
+        raise RuntimeError(f"Cherry color matching covered {calls}/{int(expected_frames)} frames")
+    actual_transform = _normalize_alignment_transform(report.get("alignmentTransform"))
+    if expected_alignment_transform:
+        expected = _normalize_alignment_transform(expected_alignment_transform)
+        if any(abs(float(actual_transform[key]) - float(expected[key])) > 1e-6 for key in ("s", "tx", "ty")):
+            raise RuntimeError("Cherry did not reuse the frozen sequence alignment transform")
+
+
+def _normalize_alignment_transform(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise RuntimeError("Cherry completed without a verifiable alignment transform")
+    normalized: dict[str, Any] = {}
+    for key in ("s", "tx", "ty"):
+        try:
+            number = float(value.get(key))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Cherry returned an invalid alignment transform") from exc
+        if not math.isfinite(number) or (key == "s" and number <= 0):
+            raise RuntimeError("Cherry returned an invalid alignment transform")
+        normalized[key] = number
+    normalized["anchor"] = str(value.get("anchor") or "")
+    return normalized
+
+
 async def _wait_ready(cdp: CdpClient) -> None:
-    deadline = time.time() + 30
-    while time.time() < deadline:
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
         value = await cdp.evaluate(
-            "document.readyState === 'complete' && !!document.getElementById('file-input') && typeof setFiles === 'function'",
+            "document.readyState === 'complete' && !!document.getElementById('file-input') && "
+            "!!document.getElementById('ref-input') && typeof setFiles === 'function' && "
+            "typeof setRefFromFile === 'function' && typeof setModuleState === 'function' && "
+            "typeof buildDiagnosticLog === 'function' && typeof buildAlignTransform === 'function'"
+            " && typeof colorMatchToRef === 'function'",
             timeout=5.0,
         )
         if value is True:
@@ -322,9 +703,21 @@ async def _wait_ready(cdp: CdpClient) -> None:
     raise TimeoutError("cherry html did not become ready")
 
 
+def _validate_reference_image(reference_path: Path) -> None:
+    if not reference_path.is_file():
+        raise FileNotFoundError(f"Cherry color reference not found: {reference_path}")
+    if reference_path.suffix.lower() not in {".png", ".webp", ".jpg", ".jpeg"}:
+        raise ValueError(f"unsupported Cherry color reference format: {reference_path.suffix}")
+    try:
+        with Image.open(reference_path) as image:
+            image.verify()
+    except Exception as exc:
+        raise ValueError(f"invalid Cherry color reference image: {reference_path}") from exc
+
+
 async def _wait_processing_done(cdp: CdpClient, timeout_seconds: int) -> None:
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
         state = await cdp.evaluate(
             """
             (()=>{
@@ -539,25 +932,70 @@ def _write_browser_start_failure(work_root: Path, detail: str) -> None:
         pass
 
 
-def _wait_download(download_dir: Path, timeout_seconds: int) -> Path:
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
+async def _wait_download(download_dir: Path, timeout_seconds: int) -> Path:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
         partials = list(download_dir.glob("*.crdownload"))
         zips = sorted(download_dir.glob("*.zip"), key=lambda path: path.stat().st_mtime, reverse=True)
         if zips and not partials:
             return zips[0]
-        time.sleep(0.2)
+        await asyncio.sleep(0.2)
     raise TimeoutError("cherry html zip download timed out")
 
 
-def _cleanup_old_sessions(work_root: Path, max_age_seconds: int = 3600) -> None:
+def _create_session_dir(work_root: Path) -> Path:
+    """Create one browser session without tempfile's Windows permission loop.
+
+    ``tempfile.mkdtemp`` deliberately retries ``PermissionError`` on Windows
+    because older Windows versions can report a name collision that way.  On
+    a genuinely unwritable inherited ACL it therefore spins through TMP_MAX
+    candidates at 100% CPU.  Our names include pid + nanoseconds, so a real
+    permission error must fail immediately and visibly.
+    """
+    for attempt in range(8):
+        candidate = work_root / f"run_{os.getpid()}_{time.time_ns()}_{attempt}"
+        try:
+            candidate.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        except PermissionError as exc:
+            raise PermissionError(f"Cherry browser session directory is not writable: {work_root}") from exc
+        return candidate
+    raise FileExistsError(f"could not allocate a unique Cherry browser session under {work_root}")
+
+
+def _remove_session_dir(session_dir: Path, timeout_seconds: float = 5.0) -> bool:
+    """Wait briefly for Chromium to release its Windows profile locks."""
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while True:
+        try:
+            shutil.rmtree(session_dir)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.1)
+
+
+def _cleanup_old_sessions(work_root: Path, max_age_seconds: int = 24 * 3600) -> None:
+    """Remove abandoned browser sessions without walking Chromium profiles.
+
+    Chrome profiles contain large, deeply nested cache trees (and can contain
+    Windows reparse points).  Recursively scanning every previous profile on
+    the hot path made a new one-frame Cherry run spend minutes at 100% CPU
+    before it even created its own session directory.  The run directory's
+    mtime is sufficient here: every session is created immediately before the
+    browser starts, and the 24-hour grace period is far longer than the
+    processing timeout.
+    """
     now = time.time()
     for path in work_root.glob("run_*"):
         try:
             if not path.is_dir():
                 continue
-            newest = max((item.stat().st_mtime for item in path.rglob("*")), default=path.stat().st_mtime)
-            if now - newest > max_age_seconds:
+            if now - path.stat().st_mtime > max_age_seconds:
                 shutil.rmtree(path, ignore_errors=True)
         except OSError:
             continue
@@ -628,6 +1066,7 @@ def verify_and_promote_cherry_html(
             input_dir,
             output_dir,
             [probe],
+            reference_path=probe,
             chrome_path=chrome_path,
             timeout_seconds=max(30, int(timeout_seconds)),
             storage_dir=storage,
@@ -662,6 +1101,9 @@ def verify_and_promote_cherry_html(
         "verified_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "canary_resize": result.resize,
         "canary_steps": result.steps,
+        "canary_executed_steps": result.executed_steps,
+        "canary_reference_loaded": result.reference_loaded,
+        "canary_reference_sha256": result.reference_sha256,
     }
     release_root.mkdir(parents=True, exist_ok=True)
     metadata_tmp = release_root / "active.json.tmp"

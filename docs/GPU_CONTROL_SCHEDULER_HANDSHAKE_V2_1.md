@@ -16,8 +16,8 @@ GPU Control 只负责 ImageClip RGBA 抠图。动画管家继续负责飞书接�
 
 1. `GET /health/ready`，要求 HTTP 200 且 `status=ready`。
 2. `GET /api/v1/scheduler/capacity`。这是 V2.1 可选扩展；当前服务返回 404 时，动画管家使用 readiness + 本地持久化的在途远端批次数作为兼容兜底。
-3. 只有握手允许且单批不超过 5000 帧时才选择远端；否则 hybrid 模式回落本机 4070 Ti。显式 `gpu_control` 模式在集群不可接单时拒绝新建，避免悄悄改变执行位置。
-4. 容量响应只用于路由建议，不预占槽位。最终是否接单仍以原 V2 `POST /api/v1/batches/imageclip-rgba` 为准。
+3. 单批不超过 5000 帧且达到大帧阈值时选择远端；显式 `gpu_control` 同样直接选择远端。容量快照不得把已选远端任务留在客户端等待。
+4. 容量响应只用于遥测和路由建议，不预占槽位，也不承担 admission。最终是否接单、持久化排队和幂等恢复均以原 V2 `POST /api/v1/batches/imageclip-rgba` 为准。
 
 请求头沿用 V2：
 
@@ -53,7 +53,7 @@ GET /api/v1/scheduler/capacity
 字段语义：
 
 - `accepting_batches`：此刻是否建议客户端创建新批次。
-- `suggested_max_new_batches`：短时间内建议该客户端新增的父批次数；`0` 等同暂不接单。
+- `suggested_max_new_batches`：短时间内的负载建议；`0` 表示当前负载较高，但不能阻止大帧任务调用 `create_batch` 进入服务端队列。
 - `idle_nodes` / `busy_nodes` / `online_nodes`：节点快照，只展示和辅助路由，不允许客户端指定节点。
 - `queue_depth` / `active_batches`：服务端全局持久化队列快照。
 - `max_batch_frames`：必须不小于冻结 V2 对当前服务声明的上限；客户端仍取双方限制的较小值。
@@ -67,7 +67,7 @@ GET /api/v1/scheduler/capacity
 
 - 假模式永远本机。
 - 单批超过远端上限时保持整个父任务在本机，禁止拆到不同批次。
-- 集群未 ready、明确不接单或握手失败时回落本机。
+- capacity 未部署、快照饱和或探针失败时只记录遥测；达到大帧阈值的任务仍直接调用 `create_batch`，由服务端决定接单与排队。
 - 4070 Ti 空闲且帧数低于阈值时走本机。
 - 帧数达到阈值，或本机已有活动抠图任务时走集群。
 - 可选容量接口未部署时，客户端最多保留 `GPU_CONTROL_MAX_INFLIGHT_BATCHES` 个远端在途批次；当前默认 8。

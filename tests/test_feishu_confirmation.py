@@ -142,6 +142,30 @@ def test_duplicate_direct_video_confirmations_start_once(monkeypatch) -> None:
     assert "当前没有等待你确认的操作。" in replies
 
 
+def test_direct_video_intent_followup_confirms_pending_upload(monkeypatch) -> None:
+    replies: list[str] = []
+    calls: list[tuple[str, dict]] = []
+    args = {
+        "video_paths": [r".\storage\feishu_inbox\2-3.mp4"],
+        "source_names": ["2-3.mp4"],
+        "run_label": "2-3.mp4",
+    }
+    monkeypatch.setattr("assetclaw_matting.feishu.processor._try_reply", lambda _mid, _cid, text: replies.append(text))
+    monkeypatch.setattr("assetclaw_matting.feishu.processor._try_send_chat", lambda _cid, text: replies.append(text))
+    monkeypatch.setattr(
+        "assetclaw_matting.skills.registry.call_skill",
+        lambda skill, arguments, requested_by="brain": calls.append((skill, arguments))
+        or {"ok": True, "skill": skill, "result": {"run_id": "VID_2_3", "videos": [{"name": "2-3.mp4"}]}},
+    )
+    create_pending_confirmation("feishu:chat_confirm:user_confirm", "user_confirm", "direct_video.start", args)
+
+    result = process_feishu_message(_event("我需要表情包", f"evt_video_intent_{uuid.uuid4().hex}"))
+
+    assert result.ok is True
+    assert calls == [("direct_video.start", args)]
+    assert "收到，开始处理。" in replies
+
+
 def test_cancel_named_comfy_run_is_not_treated_as_confirmation_cancel(monkeypatch) -> None:
     replies: list[str] = []
     seen: list[str] = []

@@ -94,6 +94,57 @@ CREATE TABLE IF NOT EXISTS pending_confirmations (
     expires_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS character_resolution_questions (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    chat_id TEXT,
+    user_id TEXT NOT NULL,
+    run_kind TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    outbound_message_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS character_resolutions (
+    unit_id TEXT PRIMARY KEY,
+    run_kind TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    run_dir TEXT NOT NULL,
+    item_index INTEGER NOT NULL,
+    group_key TEXT,
+    conversation_id TEXT NOT NULL,
+    chat_id TEXT,
+    user_id TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    question_id TEXT,
+    question_token TEXT NOT NULL,
+    status TEXT NOT NULL,
+    character_id TEXT,
+    resolution_method TEXT,
+    confidence REAL,
+    evidence_json TEXT,
+    catalog_revision TEXT,
+    reference_source_path TEXT,
+    reference_snapshot_path TEXT,
+    reference_sha256 TEXT,
+    resolved_by_message_id TEXT,
+    version INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT,
+    UNIQUE(run_kind, run_id, item_index),
+    UNIQUE(conversation_id, question_token),
+    FOREIGN KEY(question_id) REFERENCES character_resolution_questions(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_character_resolutions_pending
+ON character_resolutions(conversation_id, user_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_character_resolutions_run
+ON character_resolutions(run_kind, run_id, status);
+
 CREATE TABLE IF NOT EXISTS comfyui_runs (
     id TEXT PRIMARY KEY,
     status TEXT,

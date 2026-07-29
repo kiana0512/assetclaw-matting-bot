@@ -9,7 +9,33 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from assetclaw_matting.services.gpu_control_batch import GpuControlError, build_input_batch, verify_and_publish_result
+from assetclaw_matting.services.gpu_control_batch import (
+    GpuControlError,
+    _normalize_relative_path,
+    _normalize_scheduler_capacity,
+    build_input_batch,
+    merge_remote_state,
+    result_artifact,
+    verify_and_publish_result,
+)
+
+
+def test_v3_scheduler_capacity_accepting_field_is_normalized() -> None:
+    payload = _normalize_scheduler_capacity({
+        "accepting": True,
+        "cluster": {
+            "eligible_nodes": 3,
+            "available_slots": 3,
+            "queued_jobs": 0,
+            "running_jobs": 0,
+        },
+        "client": {"queued_jobs": 0, "max_queued": 20},
+    })
+
+    assert payload["accepting_batches"] is True
+    assert payload["suggested_max_new_batches"] == 3
+    assert payload["idle_nodes"] == 3
+    assert payload["active_batches"] == 0
 from assetclaw_matting.services import hybrid_matting_router
 from assetclaw_matting.skills import comfyui_skills
 
@@ -165,6 +191,76 @@ def test_invalid_result_does_not_touch_existing_output(tmp_path: Path) -> None:
     assert marker.read_text(encoding="utf-8") == "keep"
 
 
+def test_result_archive_rejects_explicit_directory_entries(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    source = input_root / "frame.png"
+    input_root.mkdir()
+    Image.new("RGB", (16, 16), (255, 40, 20)).save(source)
+    prepared = build_input_batch("COMFY_TEST", input_root, [source], tmp_path / "handoff", preserve_structure=True)
+    archive_path, _ = _result_archive(tmp_path, prepared)
+    with zipfile.ZipFile(archive_path, "a", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("results/", b"")
+
+    with pytest.raises(GpuControlError, match="explicit directory"):
+        verify_and_publish_result(archive_path, _sha256(archive_path), prepared, tmp_path / "matte", "COMFY_TEST")
+
+
+def test_relative_path_rejects_empty_segments() -> None:
+    with pytest.raises(GpuControlError, match="empty segment"):
+        _normalize_relative_path("shot//frame.png")
+
+
+def test_remote_progress_merge_is_monotonic_and_keeps_v3_identity() -> None:
+    merged = merge_remote_state(
+        {"progress": 72.5},
+        {
+            "batch_id": "batch-1",
+            "status": "RUNNING",
+            "progress": 68.0,
+            "workflow_key": "imageclip-rgba",
+            "workflow_version": "2026.07.27-721f7d6-r1",
+            "pipeline_commit": "721f7d68635ee36d45f545ce2c82037046147442",
+            "pipeline_sha256": "0" * 64,
+        },
+    )
+
+    assert merged["progress"] == 72.5
+    assert merged["workflow_version"] == "2026.07.27-721f7d6-r1"
+    assert merged["pipeline_commit"].startswith("721f7d6")
+
+    cancelled = merge_remote_state(
+        merged,
+        {
+            "batch_id": "batch-1",
+            "status": "CANCELLING",
+            "_response_meta": {"http_status": 202, "request_id": "cancel-1"},
+        },
+    )
+    assert cancelled["workflow_version"] == "2026.07.27-721f7d6-r1"
+    assert cancelled["pipeline_commit"].startswith("721f7d6")
+    assert cancelled["progress"] == 72.5
+
+
+def test_result_artifact_requires_exactly_one_complete_archive() -> None:
+    valid = {
+        "batch_id": "batch-1",
+        "artifacts": [
+            {
+                "id": "artifact-1",
+                "kind": "result_archive",
+                "filename": "batch-1-rgba.zip",
+                "content_type": "application/zip",
+                "size_bytes": 123,
+                "sha256": "a" * 64,
+                "download_url": "/api/v1/batches/batch-1/artifacts/artifact-1",
+            }
+        ],
+    }
+    assert result_artifact(valid)["id"] == "artifact-1"
+    with pytest.raises(GpuControlError, match="exactly one"):
+        result_artifact({"batch_id": "batch-1", "artifacts": []})
+
+
 def test_partial_skip_run_preserves_preexisting_outputs_on_publish(tmp_path: Path) -> None:
     input_root = tmp_path / "input"
     source = input_root / "new" / "frame.png"
@@ -246,7 +342,7 @@ def test_hybrid_router_persists_accepted_scheduler_handshake(monkeypatch) -> Non
     assert recorded == handshake
 
 
-def test_hybrid_router_falls_back_local_when_cluster_is_draining(monkeypatch) -> None:
+def test_hybrid_router_keeps_large_batch_remote_when_cluster_is_draining(monkeypatch) -> None:
     from assetclaw_matting.config import settings
 
     monkeypatch.setattr(settings, "comfyui_fake_mode", False)
@@ -262,9 +358,49 @@ def test_hybrid_router_falls_back_local_when_cluster_is_draining(monkeypatch) ->
 
     backend, reason, recorded = hybrid_matting_router.select_matting_backend(120, include_handshake=True)
 
-    assert backend == "local"
-    assert "handshake unavailable" in reason
+    assert backend == "gpu_control"
+    assert "submitting to the server queue" in reason
     assert recorded["accepting_batches"] is False
+
+
+def test_remote_admission_is_advisory_and_never_waits_for_capacity(monkeypatch) -> None:
+    row = {"status": "RUNNING"}
+    saved: list[dict] = []
+
+    class FakeClient:
+        def scheduler_capacity(self, *, request_id):
+            assert request_id == "comfy_advisory_test-admission-000001"
+            return {
+                "supported": True,
+                "accepting_batches": False,
+                "suggested_max_new_batches": 0,
+                "queue_depth": 9,
+                "active_batches": 3,
+                "idle_nodes": 0,
+            }
+
+    monkeypatch.setattr(comfyui_skills, "_get_run", lambda _run_id: row)
+    monkeypatch.setattr(
+        comfyui_skills,
+        "_save_run_progress",
+        lambda _run_id, _prompt_ids, options: saved.append(json.loads(json.dumps(options))),
+    )
+    options: dict = {}
+    remote_state: dict = {}
+
+    comfyui_skills._wait_for_gpu_control_admission(
+        "COMFY_ADVISORY_TEST",
+        FakeClient(),
+        options,
+        remote_state,
+        [],
+    )
+
+    admission = saved[-1]["gpu_control"]["admission"]
+    assert admission["status"] == "SUBMITTING"
+    assert admission["policy"] == "server_queue_authoritative"
+    assert admission["accepting_batches"] is False
+    assert admission["suggested_max_new_batches"] == 0
 
 
 def test_remote_worker_submits_validates_and_publishes_one_isolated_batch(monkeypatch, tmp_path: Path) -> None:
@@ -348,7 +484,11 @@ def test_remote_worker_submits_validates_and_publishes_one_isolated_batch(monkey
                 "node_distribution": {"worker-3090-a": 1},
                 "artifacts": [
                     {
+                        "id": "artifact-1",
                         "kind": "result_archive",
+                        "filename": "batch-1-rgba.zip",
+                        "content_type": "application/zip",
+                        "size_bytes": self.result_archive.stat().st_size,
                         "sha256": self.artifact_sha,
                         "download_url": "/artifact/result.zip",
                     }
@@ -385,8 +525,64 @@ def test_remote_worker_submits_validates_and_publishes_one_isolated_batch(monkey
 
     assert row["status"] == "DONE"
     assert calls["idempotency_key"] == options["external_batch_id"]
-    assert calls["request_id"] == "comfy_remote_test-create"
+    assert calls["request_id"] == "comfy_remote_test-create-01"
     assert (output_root / "video_01" / "frame_0001.png").is_file()
     saved_options = json.loads(row["options_json"])
     assert saved_options["gpu_control"]["batch_id"] == "batch-1"
     assert saved_options["prompt_map"][0]["src_path"] == str(source)
+
+
+def test_remote_cancel_waits_for_terminal_and_uses_frozen_key(monkeypatch) -> None:
+    row = {
+        "id": "COMFY_CANCEL_TEST",
+        "status": "RUNNING",
+        "prompt_ids_json": "[]",
+        "options_json": json.dumps(
+            {
+                "matting_backend": "gpu_control",
+                "external_batch_id": "assetclaw:VID_CANCEL:matting:g1",
+                "gpu_control": {
+                    "batch_id": "batch-cancel",
+                    "status": "RUNNING",
+                    "progress": 30,
+                },
+            }
+        ),
+    }
+    calls: dict[str, str] = {}
+
+    class FakeClient:
+        def cancel_batch(self, batch_id, *, idempotency_key, request_id=None):
+            calls.update(
+                batch_id=batch_id,
+                idempotency_key=idempotency_key,
+                request_id=request_id or "",
+            )
+            return {
+                "batch_id": batch_id,
+                "external_batch_id": "assetclaw:VID_CANCEL:matting:g1",
+                "status": "CANCELLING",
+                "progress": 30,
+                "_response_meta": {"http_status": 202, "request_id": "server-cancel-1"},
+            }
+
+    def save_progress(_run_id, prompt_ids, options):
+        row["prompt_ids_json"] = json.dumps(prompt_ids)
+        row["options_json"] = json.dumps(options)
+
+    monkeypatch.setattr(comfyui_skills, "_get_run", lambda _run_id: row)
+    monkeypatch.setattr(comfyui_skills, "_save_run_progress", save_progress)
+    monkeypatch.setattr(comfyui_skills, "_set_run_status", lambda _run_id, status: row.update(status=status))
+    monkeypatch.setattr(comfyui_skills, "_notify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("assetclaw_matting.services.gpu_control_batch.GpuControlBatchClient", FakeClient)
+
+    result = comfyui_skills.run_cancel(row["id"], notify=False)
+
+    assert result["ok"] is True
+    assert result["status"] == "CANCELING"
+    assert row["status"] == "CANCELING"
+    assert calls["idempotency_key"] == "assetclaw:VID_CANCEL:matting:g1:cancel"
+    assert calls["request_id"] == "comfy_cancel_test-cancel-01"
+    saved = json.loads(row["options_json"])["gpu_control"]
+    assert saved["status"] == "CANCELLING"
+    assert saved["cancel_response_meta"]["request_id"] == "server-cancel-1"

@@ -46,6 +46,19 @@ def plan_direct_image_task(message: BrainMessage) -> tuple[list[ToolCall], str] 
 
     paths = [str(item["local_path"]) for item in images if item.get("local_path")]
     names = [str(item.get("file_name") or Path(path).name) for item, path in zip(images, paths)]
+    character_group_keys: list[str] = []
+    character_evidence: list[list[str]] = []
+    for index, (item, path, name) in enumerate(zip(images, paths, names), start=1):
+        collection = str(item.get("source_collection") or "").strip()
+        sequence_source = bool(item.get("sequence_source") or collection)
+        resource_key = str(item.get("resource_key") or "").strip()
+        sequence_group = str(item.get("sequence_group") or "root").strip()
+        if sequence_source:
+            group_key = "collection:" + (resource_key or collection or str(Path(path).parent)) + ":" + sequence_group
+        else:
+            group_key = f"item:{index:04d}"
+        character_group_keys.append(group_key)
+        character_evidence.append([value for value in (collection, name, path) if value])
     collections = [str(item.get("source_collection") or "").strip() for item in images if item.get("source_collection")]
     package_as_sequence = len(paths) > 1 or any(bool(item.get("sequence_source")) for item in images)
     if len(paths) > 1 and collections and len(set(collections)) == 1:
@@ -63,6 +76,8 @@ def plan_direct_image_task(message: BrainMessage) -> tuple[list[ToolCall], str] 
                     "source_names": names,
                     "run_label": run_label,
                     "package_as_sequence": package_as_sequence,
+                    "character_group_keys": character_group_keys,
+                    "character_evidence": character_evidence,
                 },
             )
         ],
@@ -100,6 +115,8 @@ def _expand_image_set_attachment(item: dict[str, Any]) -> list[dict[str, Any]]:
     if not image_paths:
         return []
     source_name = str(item.get("file_name") or path.name or "图片合集")
+    source_root = path if path.is_dir() else (_archive_target_root(path) if path.suffix.lower() in ARCHIVE_EXTS else path.parent)
+    sequence_groups = _sequence_groups(image_paths, source_root)
     return [
         {
             **item,
@@ -108,6 +125,7 @@ def _expand_image_set_attachment(item: dict[str, Any]) -> list[dict[str, Any]]:
             "file_name": image_path.name,
             "source_collection": source_name,
             "sequence_source": True,
+            "sequence_group": sequence_groups.get(image_path, "root"),
         }
         for image_path in image_paths[:MAX_IMAGE_SET_ITEMS]
     ]
@@ -137,8 +155,7 @@ def _extract_archive_images(path: Path) -> list[Path]:
         fingerprint = f"{path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
     except OSError:
         return []
-    digest = hashlib.sha1(fingerprint.encode("utf-8", errors="ignore")).hexdigest()[:10]
-    target_root = Path(settings.storage_dir) / "direct_image_imports" / f"{path.stem}_{digest}"
+    target_root = _archive_target_root(path, fingerprint=fingerprint)
     if _image_paths_in_dir(target_root):
         return _image_paths_in_dir(target_root)
     target_root.mkdir(parents=True, exist_ok=True)
@@ -172,6 +189,30 @@ def _extract_archive_images(path: Path) -> list[Path]:
     except (OSError, zipfile.BadZipFile):
         return []
     return sorted(extracted, key=lambda item: _natural_path_key(item, target_root))
+
+
+def _archive_target_root(path: Path, *, fingerprint: str = "") -> Path:
+    if not fingerprint:
+        stat = path.stat()
+        fingerprint = f"{path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
+    digest = hashlib.sha1(fingerprint.encode("utf-8", errors="ignore")).hexdigest()[:10]
+    return Path(settings.storage_dir) / "direct_image_imports" / f"{path.stem}_{digest}"
+
+
+def _sequence_groups(image_paths: list[Path], source_root: Path) -> dict[Path, str]:
+    relatives: dict[Path, Path] = {}
+    for image_path in image_paths:
+        try:
+            relatives[image_path] = image_path.relative_to(source_root)
+        except ValueError:
+            relatives[image_path] = Path(image_path.name)
+    top_folders = {relative.parts[0] for relative in relatives.values() if len(relative.parts) > 1}
+    has_root_frames = any(len(relative.parts) == 1 for relative in relatives.values())
+    split_by_top_folder = not has_root_frames and len(top_folders) > 1
+    return {
+        image_path: (relative.parts[0] if split_by_top_folder else "root")
+        for image_path, relative in relatives.items()
+    }
 
 
 def _natural_path_key(path: Path, root: Path) -> tuple[tuple[tuple[int, object], ...], ...]:

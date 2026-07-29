@@ -911,7 +911,9 @@ function flowDisplay(run) {
 function normalizeDirectTask(module, raw) {
   const isImage = module === "DIRECT_IMAGE";
   const items = isImage ? (raw.images || []) : (raw.videos || []);
-  const sourcePaths = items.map((item) => item.original_path || item.source_path || item.name).filter(Boolean);
+  const sourcePaths = items.map((item) => item.source_path || item.original_path || item.name).filter(Boolean);
+  const sourceNames = items.map((item) => item.source_name || item.name).filter(Boolean);
+  const displayName = raw.run_label || sourceNames.join("、") || raw.run_id || raw.id || "未命名任务";
   const status = String(raw.status || "UNKNOWN").toUpperCase();
   const stage = String(raw.stage || raw.current_stage || "");
   const stageInfo = directStageProgress(raw, isImage);
@@ -920,6 +922,7 @@ function normalizeDirectTask(module, raw) {
     module,
     category: isImage ? "image" : "video",
     label: isImage ? "图片直发" : "视频直发",
+    name: displayName,
     id: raw.run_id || raw.id || "",
     status,
     stage,
@@ -1371,7 +1374,7 @@ function toast(message, type = "ok") {
           <div class="panel-title"><div><h3>统一任务队列</h3><span>按先后顺序查看所有来源的父任务</span></div><div class="queue-overall"><span>总体进度</span><b>{{ queueSummary.progress }}%</b></div></div>
           <div class="queue-summary"><span><b>{{ queueSummary.total }}</b> 队列任务</span><span><b>{{ queueSummary.running }}</b> 正在处理</span><span><b>{{ queueSummary.waiting }}</b> 等待 / 暂停</span><div class="progress"><i :style="{ width: `${queueSummary.progress}%` }"></i></div></div>
           <div v-if="!unifiedQueue.length" class="empty">当前队列为空。</div>
-          <div v-else class="queue-track"><button v-for="task in unifiedQueue" :key="task.module + task.id" class="queue-item" @click="state.detail = task.raw"><strong>{{ task.queueIndex }}</strong><span><b>{{ task.label || task.module }}</b><small>{{ task.id }}</small></span><em>{{ task.queueLabel }}</em><span class="queue-stage"><b>{{ task.stageLabel || formatStage(task.stage) }}</b><small>{{ task.count || `${task.progress}%` }}</small></span><i>{{ task.progress }}%</i></button></div>
+          <div v-else class="queue-track"><button v-for="task in unifiedQueue" :key="task.module + task.id" class="queue-item" @click="state.detail = task.raw"><strong>{{ task.queueIndex }}</strong><span><b>{{ task.name || task.label || task.module }}</b><small>{{ task.label }} · {{ task.id }} · 启动 {{ task.time || "-" }}</small></span><em>{{ task.queueLabel }}</em><span class="queue-stage"><b>{{ task.stageLabel || formatStage(task.stage) }}</b><small>{{ task.count || `${task.progress}%` }}</small></span><i>{{ task.progress }}%</i></button></div>
         </section>
         <section class="panel">
           <div class="panel-title"><div><h3>任务中心</h3><span>父任务管理视图；子任务明细可在详情中查看</span></div><span>{{ filteredTasks.length }} 条</span></div>
@@ -1381,9 +1384,9 @@ function toast(message, type = "ok") {
           <div v-if="!filteredTasks.length" class="empty">这个分类当前没有任务。</div>
           <article v-for="task in filteredTasks" :key="task.module + task.id" class="task-row large">
             <div class="task-main">
-              <b>{{ task.label || task.module }}</b>
-              <span>{{ task.id }}</span>
-              <small>{{ task.count || task.time }}</small>
+              <b :title="task.name || task.label || task.module">{{ task.name || task.label || task.module }}</b>
+              <span>{{ task.label }} · {{ task.id }}</span>
+              <small>启动 {{ task.time || "-" }} · {{ task.count || "-" }}</small>
             </div>
             <span :class="['status-pill', statusClass(task.status)]">{{ task.status }}</span>
             <span class="stage-name">{{ task.stageLabel || task.last || formatStage(task.stage) }}</span>

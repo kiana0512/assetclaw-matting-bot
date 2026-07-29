@@ -52,6 +52,10 @@ def plan_direct_video_task(message: BrainMessage) -> tuple[list[ToolCall], str] 
         return None, "我收到了视频附件，但还没有拿到本地文件，等下载完成后再处理。"
     paths = [str(item["local_path"]) for item in videos if item.get("local_path")]
     names = [str(item.get("file_name") or Path(path).name) for item, path in zip(videos, paths)]
+    character_evidence = [
+        [value for value in (name, path) if value]
+        for name, path in zip(names, paths)
+    ]
     return (
         [
             ToolCall(
@@ -60,6 +64,7 @@ def plan_direct_video_task(message: BrainMessage) -> tuple[list[ToolCall], str] 
                     "video_paths": paths,
                     "source_names": names,
                     "run_label": "、".join(names[:3]),
+                    "character_evidence": character_evidence,
                 },
             )
         ],

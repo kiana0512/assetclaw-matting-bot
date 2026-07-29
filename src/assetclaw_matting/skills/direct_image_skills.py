@@ -33,6 +33,8 @@ def start(
     notify_interval_seconds: int = 60,
     run_label: str = "",
     package_as_sequence: bool = False,
+    character_group_keys: list[str] | None = None,
+    character_evidence: list[list[str]] | None = None,
     **_: Any,
 ) -> dict[str, Any]:
     if not image_paths:
@@ -46,6 +48,8 @@ def start(
         workflow_path = str(pipeline.get("workflow_path") or "")
         pipeline_notice = str(pipeline.get("message") or "")
     names = list(source_names or [])
+    group_keys = list(character_group_keys or [])
+    evidence_sets = list(character_evidence or [])
     run_id = "IMG_" + uuid.uuid4().hex[:12].upper()
     run_dir = _active_runs_root() / run_id
     originals_dir = run_dir / "original_images"
@@ -56,6 +60,8 @@ def start(
     smooth_dir.mkdir(parents=True, exist_ok=True)
 
     items = []
+    group_units: dict[str, str] = {}
+    resolution_units: dict[str, dict[str, Any]] = {}
     for index, image in enumerate(images, start=1):
         name = _safe_name(names[index - 1] if index - 1 < len(names) else image.name)
         suffix = image.suffix if image.suffix.lower() in IMAGE_EXTS else ".png"
@@ -65,9 +71,32 @@ def start(
         shutil.copy2(image, target)
         width, height = _image_size(target)
         aspect = "square" if width and height and width == height else "portrait"
+        default_group = "sequence:default" if package_as_sequence else f"item:{index:04d}"
+        group_key = str(group_keys[index - 1] if index - 1 < len(group_keys) else default_group)
+        if group_key not in group_units:
+            group_units[group_key] = f"{run_id}:image:{len(group_units) + 1:02d}"
+        unit_id = group_units[group_key]
+        supplied_evidence = evidence_sets[index - 1] if index - 1 < len(evidence_sets) else []
+        unit = resolution_units.setdefault(
+            group_key,
+            {
+                "unit_id": unit_id,
+                "item_index": index,
+                "group_key": group_key,
+                "source_name": name,
+                "evidence": [],
+            },
+        )
+        for value in [*supplied_evidence, name, str(image)]:
+            value_text = str(value or "").strip()
+            if value_text and value_text not in unit["evidence"]:
+                unit["evidence"].append(value_text)
         items.append(
             {
                 "index": index,
+                "item_id": f"{run_id}:image-item:{index:04d}",
+                "character_unit_id": unit_id,
+                "character_group_key": group_key,
                 "source_path": str(image),
                 "source_name": name,
                 "original_path": str(target),
@@ -97,6 +126,7 @@ def start(
         "package_as_sequence": bool(package_as_sequence or len(items) > 1),
         "chat_id": (ctx.get("chat_id") or "") if ctx.get("channel") == "feishu" else "",
         "conversation_id": ctx.get("conversation_id") or "",
+        "user_id": (ctx.get("open_id") or ctx.get("user_id") or "") if ctx.get("channel") == "feishu" else "",
         "images": items,
         "children": {},
         "workflow_path": workflow_path or "",
@@ -106,6 +136,27 @@ def start(
         "error": "",
         "log": [],
         "worker_pid": os.getpid(),
+    }
+    from assetclaw_matting.services.character_resolution import (
+        bind_run_items,
+        initialize_run_resolutions,
+    )
+
+    character_state = initialize_run_resolutions(
+        run_kind="direct_image",
+        run_id=run_id,
+        run_dir=run_dir,
+        conversation_id=str(run.get("conversation_id") or ""),
+        chat_id=str(run.get("chat_id") or ""),
+        user_id=str(run.get("user_id") or ""),
+        units=resolution_units.values(),
+    )
+    bind_run_items("direct_image", run_id, items)
+    run["character_question"] = str(character_state.get("prompt") or "")
+    run["character_resolution"] = {
+        "question_id": str(character_state.get("question_id") or ""),
+        "total": len(character_state.get("items") or []),
+        "pending": len(character_state.get("pending") or []),
     }
     _save(run)
     _start_worker(run_id)
@@ -139,12 +190,25 @@ def recover_incomplete_runs() -> dict[str, Any]:
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     closed: list[str] = []
     still_running: list[str] = []
+    waiting_character: list[str] = []
     for status_path in sorted(RUNS_ROOT.glob("IMG_*/status.json"), key=lambda item: item.stat().st_mtime):
         try:
             run = json.loads(status_path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if str(run.get("status") or "").upper() not in {"RUNNING", "QUEUED", "PENDING"}:
+        current_status = str(run.get("status") or "").upper()
+        if current_status == "WAITING_CHARACTER":
+            run_id = str(run.get("id") or status_path.parent.name)
+            from assetclaw_matting.services.character_resolution import all_run_units_frozen, reconcile_resolved_units
+
+            reconcile_resolved_units("direct_image", run_id)
+            if all_run_units_frozen("direct_image", run_id):
+                resume_after_character_resolution(run_id)
+                closed.append(run_id)
+            else:
+                waiting_character.append(run_id)
+            continue
+        if current_status not in {"RUNNING", "QUEUED", "PENDING"}:
             continue
         run = _reconcile_terminal_child(run)
         if str(run.get("status") or "").upper() in FINISHED:
@@ -166,7 +230,7 @@ def recover_incomplete_runs() -> dict[str, Any]:
         _save(run)
         _start_recovery_worker(run_id)
         closed.append(run_id)
-    return {"ok": True, "closed": closed, "still_running": still_running}
+    return {"ok": True, "closed": closed, "still_running": still_running, "waiting_character": waiting_character}
 
 
 def cancel(run_id: str | None = None, **_: Any) -> dict[str, Any]:
@@ -174,6 +238,9 @@ def cancel(run_id: str | None = None, **_: Any) -> dict[str, Any]:
     if not run:
         return {"ok": False, "error": "direct image run not found"}
     cancel_results = _cancel_child_runs(run)
+    from assetclaw_matting.services.character_resolution import cancel_run_resolutions
+
+    cancel_run_resolutions("direct_image", str(run["id"]))
     run["status"] = "CANCELED"
     run["stage"] = "canceled"
     run.setdefault("children", {})["cancel_results"] = cancel_results
@@ -185,6 +252,29 @@ def cancel(run_id: str | None = None, **_: Any) -> dict[str, Any]:
     return {"ok": True, "run_id": run["id"], "status": "CANCELED", "cancel_results": cancel_results, **_public(run)}
 
 
+def resume_after_character_resolution(run_id: str) -> dict[str, Any]:
+    from assetclaw_matting.services.character_resolution import all_run_units_frozen
+
+    run = _load(run_id)
+    if not run:
+        return {"ok": False, "run_id": run_id, "error": "direct image run not found"}
+    if not all_run_units_frozen("direct_image", run_id):
+        return {"ok": False, "run_id": run_id, "status": run.get("status"), "error": "character resolution is incomplete"}
+    if str(run.get("status") or "") != "WAITING_CHARACTER":
+        return {"ok": True, "run_id": run_id, "status": run.get("status"), "scheduled": False}
+    run["status"] = "QUEUED"
+    run["stage"] = "character_resolved"
+    run["recovery_from_stage"] = "postprocess"
+    run["worker_pid"] = 0
+    run["error"] = ""
+    _append_log(run, "角色已全部确认，从已完成的抠图结果继续后处理；不会重复抠图。")
+    if not _save(run, expected_statuses={"WAITING_CHARACTER"}):
+        latest = _load(run_id) or run
+        return {"ok": True, "run_id": run_id, "status": latest.get("status"), "scheduled": False}
+    scheduled = _start_recovery_worker(run_id)
+    return {"ok": True, "run_id": run_id, "status": "QUEUED", "scheduled": scheduled}
+
+
 def _worker(run_id: str) -> None:
     run = _load(run_id)
     if not run:
@@ -193,6 +283,9 @@ def _worker(run_id: str) -> None:
         _mark(run, "RUNNING", "matting")
         _run_comfyui(run)
         if _is_canceled(run):
+            return
+
+        if not _prepare_character_gate(run):
             return
 
         _mark(run, "RUNNING", "postprocess")
@@ -210,11 +303,12 @@ def _worker(run_id: str) -> None:
         _append_log(run, f"结果文件发送完成：{len(sent)} 个")
         _save(run)
         plan = _cherry_plan_summary(run.get("images") or [])
+        character_lines = _character_completion_lines(run.get("images") or [])
         suffix = f"，{plan}" if plan else ""
         if bool(run.get("package_as_sequence")) or len(run.get("images") or []) > 1:
-            _notify(run, f"序列帧完成：{run['id']}，共 {len(run.get('images') or [])} 帧，已按顺序发回 1 个 ZIP{suffix}。")
+            _notify(run, f"序列帧完成：{run['id']}，共 {len(run.get('images') or [])} 帧，已按顺序发回 1 个 ZIP{suffix}。{character_lines}")
         else:
-            _notify(run, f"图片完成：{run['id']}，已发回抠图、后处理、三联对比 3 份结果{suffix}。")
+            _notify(run, f"图片完成：{run['id']}，已发回抠图、后处理、三联对比 3 份结果{suffix}。{character_lines}")
     except Exception as exc:
         run = _load(run_id) or run
         if run.get("status") != "CANCELED":
@@ -230,6 +324,7 @@ def _worker(run_id: str) -> None:
             latest["worker_pid"] = 0
             _save(latest)
         _WORKERS.discard(run_id)
+        _restart_character_resume_if_needed(run_id)
 
 
 def _run_comfyui(run: dict[str, Any]) -> None:
@@ -270,7 +365,26 @@ def _run_cherry(run: dict[str, Any]) -> None:
     from assetclaw_matting.skills.cherry_skills import run_start, run_status
 
     run.setdefault("children", {})["cherry_run_ids"] = []
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for item in run["images"]:
+        unit_id = str(item.get("character_unit_id") or item.get("item_id") or f"item:{item.get('index')}")
+        profile = str(item.get("cherry_profile") or "auto")
+        reference_path = str(item.get("color_reference_path") or "")
+        grouped.setdefault((unit_id, profile, reference_path), []).append(item)
+
+    for group_index, ((_unit_id, profile, reference_path), group_items) in enumerate(grouped.items(), start=1):
+        if len(group_items) > 1:
+            _run_cherry_sequence_group(
+                run,
+                group_items,
+                group_index=group_index,
+                profile=profile,
+                reference_path=reference_path,
+                run_start=run_start,
+                run_status=run_status,
+            )
+            continue
+        item = group_items[0]
         matte_dir = Path(str(item["matte_dir"]))
         smooth_dir = Path(str(item["smooth_dir"]))
         if not _wait_for_images(matte_dir):
@@ -281,7 +395,11 @@ def _run_cherry(run: dict[str, Any]) -> None:
             recursive=True,
             skip_existing=False,
             notify_interval_seconds=run["notify_interval_seconds"],
-            profile=str(item.get("cherry_profile") or "auto"),
+            profile=profile,
+            reference_path=reference_path,
+            reference_sha256=str(item.get("color_reference_sha256") or ""),
+            color_match_required=True,
+            alignment_enabled=True,
         )
         options = result.get("options") if isinstance(result.get("options"), dict) else {}
         if options.get("resize_width") and options.get("resize_height"):
@@ -291,18 +409,117 @@ def _run_cherry(run: dict[str, Any]) -> None:
         run["children"].setdefault("cherry_run_ids", []).append(child_id)
         _append_log(run, f"Cherry 后处理任务已启动：{child_id}，image={item['index']}，profile={item.get('cherry_profile')}")
         _save(run)
-        while True:
-            if _is_canceled(run):
-                return
-            payload = run_status(child_id, include_gpu=False)
-            run["children"]["cherry"] = payload
-            run["children"].setdefault("cherry_runs", {})[child_id] = payload
-            _save(run)
-            if payload.get("status") in {"DONE", "FAILED", "CANCELED", "DONE_WITH_ERRORS"}:
-                if payload.get("status") != "DONE":
-                    raise RuntimeError(_format_child_failure("Cherry", child_id, payload))
-                break
-            time.sleep(5)
+        if not _wait_cherry_child(run, child_id, run_status):
+            return
+        _mark_reference_postprocess_done(item, child_id)
+        _save(run)
+
+
+def _run_cherry_sequence_group(
+    run: dict[str, Any],
+    items: list[dict[str, Any]],
+    *,
+    group_index: int,
+    profile: str,
+    reference_path: str,
+    run_start: Any,
+    run_status: Any,
+) -> None:
+    """Process one logical sequence together so alignment is shared by every frame."""
+
+    stage_root = _run_dir(run) / "cherry_sequences" / f"group_{group_index:03d}_{uuid.uuid4().hex[:8]}"
+    input_dir = stage_root / "input"
+    output_dir = stage_root / "output"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    mappings: list[tuple[dict[str, Any], Path, Path]] = []
+    for position, item in enumerate(sorted(items, key=lambda value: int(value.get("index") or 0)), start=1):
+        matte_dir = Path(str(item["matte_dir"]))
+        if not _wait_for_images(matte_dir):
+            raise RuntimeError(f"matte_dir has no images: {matte_dir}")
+        matte = _latest_image(matte_dir)
+        if not matte:
+            raise RuntimeError(f"matte_dir has no result image: {matte_dir}")
+        staged = input_dir / f"{position:06d}{matte.suffix.lower()}"
+        shutil.copy2(matte, staged)
+        mappings.append((item, matte, staged))
+
+    result = run_start(
+        input_dir=str(input_dir),
+        output_dir=str(output_dir),
+        recursive=False,
+        skip_existing=False,
+        notify_interval_seconds=run["notify_interval_seconds"],
+        profile=profile,
+        reference_path=reference_path,
+        reference_sha256=str(items[0].get("color_reference_sha256") or ""),
+        color_match_required=True,
+        alignment_enabled=True,
+    )
+    options = result.get("options") if isinstance(result.get("options"), dict) else {}
+    child_id = result["run_id"]
+    run["children"]["cherry_run_id"] = child_id
+    run["children"].setdefault("cherry_run_ids", []).append(child_id)
+    _append_log(run, f"Cherry 序列后处理任务已启动：{child_id}，frames={len(items)}，profile={profile}")
+    _save(run)
+    if not _wait_cherry_child(run, child_id, run_status):
+        return
+
+    for item, matte, staged in mappings:
+        processed = output_dir / staged.with_suffix(".png").name
+        if not processed.is_file():
+            raise FileNotFoundError(f"Cherry sequence output missing: {processed}")
+        smooth_dir = Path(str(item["smooth_dir"]))
+        smooth_dir.mkdir(parents=True, exist_ok=True)
+        target = smooth_dir / matte.with_suffix(".png").name
+        shutil.copy2(processed, target)
+        if options.get("resize_width") and options.get("resize_height"):
+            item["cherry_output_size"] = f"{options.get('resize_width')}x{options.get('resize_height')}"
+        item["cherry_sequence_group"] = child_id
+        _mark_reference_postprocess_done(item, child_id)
+    _save(run)
+
+
+def _wait_cherry_child(run: dict[str, Any], child_id: str, run_status: Any) -> bool:
+    while True:
+        if _is_canceled(run):
+            return False
+        payload = run_status(child_id, include_gpu=False)
+        run["children"]["cherry"] = payload
+        run["children"].setdefault("cherry_runs", {})[child_id] = payload
+        _save(run)
+        if payload.get("status") in {"DONE", "FAILED", "CANCELED", "DONE_WITH_ERRORS"}:
+            if payload.get("status") != "DONE":
+                raise RuntimeError(_format_child_failure("Cherry", child_id, payload))
+            return True
+        time.sleep(5)
+
+
+def _mark_reference_postprocess_done(item: dict[str, Any], child_id: str) -> None:
+    item["color_correction_status"] = "DONE"
+    item["position_alignment_status"] = "DONE"
+    item["reference_postprocess_status"] = "DONE"
+    item["color_correction_run_id"] = child_id
+
+
+def _prepare_character_gate(run: dict[str, Any]) -> bool:
+    from assetclaw_matting.services.character_resolution import bind_run_items
+
+    result = bind_run_items("direct_image", str(run["id"]), list(run.get("images") or []))
+    if result.get("ready"):
+        run.setdefault("character_resolution", {})["pending"] = 0
+        run["character_question"] = ""
+        _append_log(run, "角色参考图已逐项冻结；Cherry 将在流程末尾依次执行校色和位置矫正。")
+        _save(run)
+        return True
+    run["status"] = "WAITING_CHARACTER"
+    run["stage"] = "waiting_character"
+    run["recovery_from_stage"] = "postprocess"
+    run.setdefault("character_resolution", {})["pending"] = len(result.get("missing") or [])
+    run["updated_at"] = _now()
+    _append_log(run, "抠图已完成，等待用户确认角色后继续 Cherry 校色/矫正：" + "、".join(result.get("missing") or []))
+    _save(run)
+    return False
 
 
 def _send_results(run: dict[str, Any]) -> list[str]:
@@ -621,9 +838,9 @@ def _start_worker(run_id: str) -> None:
     ).start()
 
 
-def _start_recovery_worker(run_id: str) -> None:
+def _start_recovery_worker(run_id: str) -> bool:
     if run_id in _WORKERS:
-        return
+        return False
     _WORKERS.add(run_id)
     threading.Thread(
         target=_worker_with_runs_root,
@@ -631,6 +848,7 @@ def _start_recovery_worker(run_id: str) -> None:
         name=f"direct_image_recovery_{run_id}",
         daemon=True,
     ).start()
+    return True
 
 
 def _worker_with_runs_root(worker: Any, run_id: str, runs_root: Path) -> None:
@@ -663,6 +881,8 @@ def _resume_worker(run_id: str) -> None:
             return
 
         if any(token in previous_stage for token in ("postprocess", "cherry", "smooth")):
+            if not _prepare_character_gate(run):
+                return
             _mark(run, "RUNNING", "recovery_postprocess")
             _run_cherry(run)
         if _is_canceled(run):
@@ -692,6 +912,19 @@ def _resume_worker(run_id: str) -> None:
             latest["worker_pid"] = 0
             _save(latest)
         _WORKERS.discard(run_id)
+        _restart_character_resume_if_needed(run_id)
+
+
+def _restart_character_resume_if_needed(run_id: str) -> None:
+    latest = _load(run_id)
+    if not latest or str(latest.get("status") or "") != "QUEUED":
+        return
+    if str(latest.get("stage") or "") != "character_resolved":
+        return
+    from assetclaw_matting.services.character_resolution import all_run_units_frozen
+
+    if all_run_units_frozen("direct_image", run_id):
+        _start_recovery_worker(run_id)
 
 
 def _resume_existing_comfyui_child(run: dict[str, Any]) -> None:
@@ -803,6 +1036,8 @@ def _public(run: dict[str, Any]) -> dict[str, Any]:
         "sent_files": run.get("sent_files") or [],
         "sequence_zip_path": run.get("sequence_zip_path") or "",
         "drive_file": run.get("drive_file") or {},
+        "character_question": run.get("character_question") or "",
+        "character_resolution": run.get("character_resolution") or {},
         "pipeline_notice": run.get("pipeline_notice") or "",
         "error": run.get("error") or "",
         "last_log": (run.get("log") or [{}])[-1].get("message", ""),
@@ -835,6 +1070,20 @@ def _cherry_plan_summary(items: list[dict[str, Any]]) -> str:
     if not counts:
         return ""
     return "后处理 " + "，".join(f"{key}×{count}" for key, count in counts.items())
+
+
+def _character_completion_lines(items: list[dict[str, Any]]) -> str:
+    seen: set[str] = set()
+    lines: list[str] = []
+    for item in items:
+        unit_id = str(item.get("character_unit_id") or item.get("item_id") or item.get("index") or "")
+        if unit_id in seen:
+            continue
+        seen.add(unit_id)
+        name = str(item.get("source_name") or item.get("name") or "图片")
+        character = str(item.get("character_id") or "未知角色")
+        lines.append(f"{name} · {character} · 后处理（含校色/矫正）完成")
+    return ("\n" + "\n".join(lines)) if lines else ""
 
 
 def _load(run_id: str | None = None) -> dict[str, Any] | None:
@@ -887,10 +1136,11 @@ def _find_run_by_text(value: str) -> dict[str, Any] | None:
     return fallback
 
 
-def _save(run: dict[str, Any]) -> None:
+def _save(run: dict[str, Any], *, expected_statuses: set[str] | None = None) -> bool:
+    from assetclaw_matting.services.atomic_json_state import atomic_save_task_json
+
     path = _run_dir(run) / "status.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8")
+    return atomic_save_task_json(path, run, expected_statuses=expected_statuses)
 
 
 def _run_dir(run: dict[str, Any]) -> Path:

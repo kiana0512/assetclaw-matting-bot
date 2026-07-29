@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 from pathlib import Path
@@ -188,8 +189,88 @@ def test_feishu_send_large_file_uses_drive_without_message_upload(monkeypatch, t
 
     result = client.send_file_to_chat("oc_large", target, target.name)
 
-    assert result == {"file_token": "drive_token", "url": "https://lilithgames.feishu.cn/file/large"}
+    assert result == {
+        "file_token": "drive_token",
+        "url": "https://lilithgames.feishu.cn/file/large",
+        "delivery_method": "drive_link",
+    }
     assert sent == {"chat_id": "oc_large", "text": "文件已生成：large-result.zip\nhttps://lilithgames.feishu.cn/file/large"}
+
+
+def test_feishu_send_text_returns_message_receipt(monkeypatch) -> None:
+    from assetclaw_matting.feishu.client import FeishuClient
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {"code": 0, "data": {"message_id": "om_receipt", "chat_id": "oc_test", "create_time": "123"}}
+
+    client = FeishuClient()
+    monkeypatch.setattr(client, "_headers", lambda: {})
+    monkeypatch.setattr(client, "_post_with_retry", lambda *_args, **_kwargs: Response())
+
+    assert client.send_text_to_chat("oc_test", "done") == {
+        "message_id": "om_receipt",
+        "chat_id": "oc_test",
+        "create_time": "123",
+        "delivery_method": "text",
+    }
+
+
+def test_direct_video_status_and_list_are_scoped_to_current_feishu_conversation(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.runtime_context import reset_runtime_context, set_runtime_context
+    from assetclaw_matting.skills import direct_video_skills
+
+    monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", tmp_path / "runs")
+    mine = {
+        "id": "VID_MINE",
+        "status": "DONE",
+        "stage": "done",
+        "conversation_id": "feishu:oc_mine:ou_mine",
+        "videos": [],
+        "children": {},
+        "log": [],
+    }
+    other = {
+        "id": "VID_OTHER",
+        "status": "RUNNING",
+        "stage": "matting",
+        "conversation_id": "feishu:oc_other:ou_other",
+        "videos": [],
+        "children": {},
+        "log": [],
+    }
+    direct_video_skills._save(mine)
+    direct_video_skills._save(other)
+    token = set_runtime_context(channel="feishu", conversation_id="feishu:oc_mine:ou_mine")
+    try:
+        current = direct_video_skills.status()
+        listed = direct_video_skills.list_runs(limit=10)
+    finally:
+        reset_runtime_context(token)
+
+    assert current["ok"] is True
+    assert current["run_id"] == "VID_MINE"
+    assert [item["run_id"] for item in listed["items"]] == ["VID_MINE"]
+
+
+def test_direct_video_delivery_requires_message_receipt(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.feishu.client import feishu_client
+    from assetclaw_matting.skills import direct_video_skills
+
+    target = tmp_path / "result.zip"
+    target.write_bytes(b"zip")
+    run = {"id": "VID_RECEIPT", "chat_id": "oc_test", "log": []}
+    monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(feishu_client, "send_file_to_chat", lambda *_args, **_kwargs: {})
+
+    try:
+        direct_video_skills._send_zip(run, target)
+    except RuntimeError as exc:
+        assert "no message receipt" in str(exc)
+    else:
+        raise AssertionError("delivery without a Feishu message receipt must fail")
 
 
 def test_feishu_drive_request_retries_write_timeout(monkeypatch) -> None:
@@ -419,7 +500,7 @@ def test_direct_video_confirmation_is_human_readable() -> None:
     assert "收到 1 个动画视频，可以开始处理。" in text
     assert "7月13日思考-1_3.mp4" in text
     assert "正方形 256x256，长方形 384x512" in text
-    assert "回复“确认执行”开始。" in text
+    assert "无需再次确认" in text
     assert "abc123" not in text
     assert "direct_video.start" not in text
 
@@ -739,6 +820,35 @@ def test_direct_image_zip_uses_natural_frame_order_and_stays_a_sequence(monkeypa
     tool_calls, _reason = planned
     assert [Path(path).name for path in tool_calls[0].arguments["image_paths"]] == ["1.png", "2.png", "10.png"]
     assert tool_calls[0].arguments["package_as_sequence"] is True
+
+
+def test_direct_image_zip_splits_distinct_top_level_character_sequences(monkeypatch, tmp_path: Path) -> None:
+    import zipfile
+    from assetclaw_matting.config import settings
+
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    archive = tmp_path / "characters.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        for character, color in (("huggy", 10), ("tasha", 20)):
+            for frame in (1, 2):
+                image = tmp_path / f"{character}_{frame}.png"
+                Image.new("RGBA", (8, 8), (color, 0, 0, 255)).save(image)
+                zf.write(image, f"{character}/{frame:04d}.png")
+
+    planned = plan_direct_image_task(BrainMessage(
+        text="处理序列帧",
+        conversation_id="feishu:chat_multi_role:user",
+        user_id="user",
+        attachments=[{"type": "file", "file_name": archive.name, "downloaded": True, "local_path": str(archive)}],
+    ))
+
+    assert planned is not None
+    tool_calls, _reason = planned
+    group_keys = tool_calls[0].arguments["character_group_keys"]
+    assert len(set(group_keys)) == 2
+    assert group_keys[0] == group_keys[1]
+    assert group_keys[2] == group_keys[3]
+    assert group_keys[0] != group_keys[2]
 
 
 def test_direct_image_followup_uses_recent_image_set(monkeypatch, tmp_path: Path) -> None:
@@ -1105,6 +1215,66 @@ def test_direct_image_cherry_profile_and_size_are_recorded(monkeypatch, tmp_path
 
     assert [call["profile"] for call in calls] == ["half", "full"]
     assert [item["cherry_output_size"] for item in run["images"]] == ["256x256", "384x512"]
+
+
+def test_direct_image_sequence_uses_one_cherry_run_and_shared_alignment(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.skills import direct_image_skills
+
+    reference = tmp_path / "huggy.png"
+    Image.new("RGBA", (8, 8), (1, 2, 3, 255)).save(reference)
+    reference_sha = hashlib.sha256(reference.read_bytes()).hexdigest()
+    calls: list[dict[str, object]] = []
+    items = []
+    for index in range(1, 4):
+        matte_dir = tmp_path / "matte" / f"image_{index:02d}"
+        matte_dir.mkdir(parents=True)
+        Image.new("RGBA", (8, 8), (index, 0, 0, 255)).save(matte_dir / f"frame_{index:04d}.png")
+        items.append({
+            "index": index,
+            "character_unit_id": "IMG_SEQUENCE:image:01",
+            "character_id": "huggy",
+            "color_reference_path": str(reference),
+            "color_reference_sha256": reference_sha,
+            "matte_dir": str(matte_dir),
+            "smooth_dir": str(tmp_path / "smooth" / f"image_{index:02d}"),
+            "cherry_profile": "full",
+        })
+
+    def fake_run_start(**kwargs):
+        calls.append(kwargs)
+        source = Path(str(kwargs["input_dir"]))
+        output = Path(str(kwargs["output_dir"]))
+        output.mkdir(parents=True, exist_ok=True)
+        for frame in source.glob("*.png"):
+            shutil.copy2(frame, output / frame.name)
+        return {"run_id": "CHERRY_SEQUENCE", "options": {"resize_width": 384, "resize_height": 512}}
+
+    monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", tmp_path / "runs")
+    monkeypatch.setattr("assetclaw_matting.skills.cherry_skills.run_start", fake_run_start)
+    monkeypatch.setattr(
+        "assetclaw_matting.skills.cherry_skills.run_status",
+        lambda run_id, include_gpu=False: {"run_id": run_id, "status": "DONE", "completed": 3, "total": 3},
+    )
+    run = {
+        "id": "IMG_SEQUENCE",
+        "status": "RUNNING",
+        "stage": "postprocess",
+        "updated_at": "",
+        "children": {},
+        "notify_interval_seconds": 60,
+        "chat_id": "",
+        "images": items,
+        "log": [],
+    }
+
+    direct_image_skills._run_cherry(run)
+
+    assert len(calls) == 1
+    assert [path.name for path in Path(str(calls[0]["input_dir"])).glob("*.png")] == ["000001.png", "000002.png", "000003.png"]
+    assert calls[0]["reference_path"] == str(reference)
+    assert calls[0]["reference_sha256"] == reference_sha
+    assert all(any(Path(str(item["smooth_dir"])).glob("*.png")) for item in items)
+    assert all(item["position_alignment_status"] == "DONE" for item in items)
 
 
 def test_direct_image_start_uses_exact_square_rule(monkeypatch) -> None:

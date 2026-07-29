@@ -435,26 +435,41 @@ def run_cancel(run_id: str | None = None, interrupt_current: bool = True, notify
     row = _get_run(run_id)
     if not row:
         return {"ok": False, "error": "comfyui run not found"}
-    _set_run_status(row["id"], "CANCELED")
     prompt_ids = json.loads(row["prompt_ids_json"] or "[]")
     options = json.loads(row["options_json"] or "{}")
     backend = str(options.get("matting_backend") or "local")
     queue_error = ""
+    status = "CANCELED"
     if backend == "gpu_control":
         remote_state = dict(options.get("gpu_control") or {})
         remote_batch_id = str(remote_state.get("batch_id") or "")
         if remote_batch_id:
             try:
-                from assetclaw_matting.services.gpu_control_batch import GpuControlBatchClient
+                from assetclaw_matting.services.gpu_control_batch import GpuControlBatchClient, merge_remote_state
 
-                GpuControlBatchClient().cancel_batch(
+                response = GpuControlBatchClient().cancel_batch(
                     remote_batch_id,
                     idempotency_key=f"{options.get('external_batch_id') or row['id']}:cancel",
-                    request_id=f"{row['id'].lower()}-cancel",
+                    request_id=f"{row['id'].lower()}-cancel-01",
                 )
+                latest = _get_run(row["id"])
+                latest_options = json.loads(latest["options_json"] or "{}") if latest else options
+                latest_remote = dict(latest_options.get("gpu_control") or remote_state)
+                latest_remote = merge_remote_state(latest_remote, response)
+                latest_remote["cancel_requested_at"] = _now()
+                latest_remote["cancel_response_meta"] = dict(response.get("_response_meta") or {})
+                latest_options["gpu_control"] = latest_remote
+                _save_run_progress(row["id"], prompt_ids, latest_options)
+                status = "CANCELING"
             except Exception as exc:
                 queue_error = str(exc)
+                status = str(row["status"] or "RUNNING")
+        # If create has not returned a batch id, the create worker observes
+        # CANCELED and submits the exact <external_batch_id>:cancel key as soon
+        # as the remote id becomes known.
+        _set_run_status(row["id"], status)
     elif not settings.comfyui_fake_mode:
+        _set_run_status(row["id"], status)
         try:
             if prompt_ids:
                 comfyui_client.delete_from_queue(prompt_ids)
@@ -462,9 +477,22 @@ def run_cancel(run_id: str | None = None, interrupt_current: bool = True, notify
                 comfyui_client.interrupt()
         except Exception as exc:
             queue_error = str(exc)
+    else:
+        _set_run_status(row["id"], status)
     if notify:
-        _notify(row["id"], f"ComfyUI 任务已终止：{row['id']}")
-    return {"ok": True, "run_id": row["id"], "status": "CANCELED", "backend": backend, "queue_error": queue_error}
+        message = (
+            f"GPU Control 取消请求已提交，正在等待远端收敛：{row['id']}"
+            if status == "CANCELING"
+            else f"ComfyUI 任务已终止：{row['id']}"
+        )
+        _notify(row["id"], message)
+    return {
+        "ok": not bool(queue_error),
+        "run_id": row["id"],
+        "status": status,
+        "backend": backend,
+        "queue_error": queue_error,
+    }
 
 
 def run_preview(
@@ -679,6 +707,7 @@ def _run_gpu_control_worker(run_id: str) -> None:
         TERMINAL_BATCH_STATUSES,
         build_input_batch,
         compact_remote_state,
+        merge_remote_state,
         result_artifact,
         verify_and_publish_result,
     )
@@ -718,6 +747,7 @@ def _run_gpu_control_worker(run_id: str) -> None:
         client = GpuControlBatchClient()
         batch_id = str(remote_state.get("batch_id") or "")
         if not batch_id:
+            _wait_for_gpu_control_admission(run_id, client, options, remote_state, prompt_ids)
             latest = _get_run(run_id)
             if not latest or latest["status"] == "CANCELED":
                 return
@@ -725,12 +755,12 @@ def _run_gpu_control_worker(run_id: str) -> None:
                 Path(prepared["archive_path"]),
                 prepared["manifest"],
                 idempotency_key=prepared["idempotency_key"],
-                request_id=f"{run_id.lower()}-create",
+                request_id=f"{run_id.lower()}-create-01",
             )
             returned_external_id = str(created.get("external_batch_id") or "")
             if returned_external_id and returned_external_id != prepared["external_batch_id"]:
                 raise GpuControlError("GPU Control returned a mismatched external_batch_id")
-            remote_state.update(compact_remote_state(created))
+            remote_state = merge_remote_state(remote_state, created)
             remote_state["create_response_meta"] = dict(created.get("_response_meta") or {})
             batch_id = str(remote_state.get("batch_id") or "")
             if not batch_id:
@@ -743,7 +773,7 @@ def _run_gpu_control_worker(run_id: str) -> None:
                     client.cancel_batch(
                         batch_id,
                         idempotency_key=f"{prepared['idempotency_key']}:cancel",
-                        request_id=f"{run_id.lower()}-cancel-after-create",
+                        request_id=f"{run_id.lower()}-cancel-after-create-01",
                     )
                 except Exception:
                     pass
@@ -757,16 +787,24 @@ def _run_gpu_control_worker(run_id: str) -> None:
                 return
             if time.monotonic() - started > int(settings.gpu_control_execution_timeout_seconds or 86400):
                 try:
-                    client.cancel_batch(
+                    cancelled = client.cancel_batch(
                         batch_id,
-                        idempotency_key=f"{prepared['idempotency_key']}:timeout-cancel",
-                        request_id=f"{run_id.lower()}-timeout-cancel",
+                        idempotency_key=f"{prepared['idempotency_key']}:cancel",
+                        request_id=f"{run_id.lower()}-timeout-cancel-01",
                     )
+                    remote_state["timeout_cancel_response"] = dict(cancelled)
+                    options["gpu_control"] = remote_state
+                    _save_run_progress(run_id, prompt_ids, options)
                 except Exception:
                     pass
                 raise GpuControlError("GPU Control batch exceeded the configured execution timeout")
+            poll_sequence = int(remote_state.get("poll_sequence") or 0) + 1
+            remote_state["poll_sequence"] = poll_sequence
             try:
-                payload = client.get_batch(batch_id, request_id=f"{run_id.lower()}-poll")
+                payload = client.get_batch(
+                    batch_id,
+                    request_id=f"{run_id.lower()}-poll-{poll_sequence:06d}",
+                )
                 consecutive_poll_errors = 0
             except Exception as exc:
                 consecutive_poll_errors += 1
@@ -775,10 +813,14 @@ def _run_gpu_control_worker(run_id: str) -> None:
                 options["gpu_control"] = remote_state
                 _save_run_progress(run_id, prompt_ids, options)
                 poll_error_limit = max(3, int(settings.gpu_control_poll_error_limit or 20))
-                if consecutive_poll_errors >= poll_error_limit:
-                    raise GpuControlError(f"GPU Control status polling repeatedly failed: {exc}") from exc
-                base_delay = max(1, int(settings.gpu_control_poll_interval_seconds or 3))
-                time.sleep(min(60, base_delay * (2 ** min(consecutive_poll_errors - 1, 5))))
+                if consecutive_poll_errors == poll_error_limit:
+                    _notify(
+                        run_id,
+                        f"GPU Control 状态查询已连续失败 {consecutive_poll_errors} 次；"
+                        "远端状态不明确，继续用原 batch_id 恢复查询，不会改走本机。",
+                    )
+                retry_delays = (1, 2, 4, 8, 15, 30)
+                time.sleep(retry_delays[min(consecutive_poll_errors - 1, len(retry_delays) - 1)])
                 continue
 
             returned_batch_id = str(payload.get("batch_id") or "")
@@ -787,7 +829,7 @@ def _run_gpu_control_worker(run_id: str) -> None:
                 raise GpuControlError("GPU Control status returned a mismatched batch_id")
             if returned_external_id and returned_external_id != prepared["external_batch_id"]:
                 raise GpuControlError("GPU Control status returned a mismatched external_batch_id")
-            remote_state.update(compact_remote_state(payload))
+            remote_state = merge_remote_state(remote_state, payload)
             remote_state.pop("poll_error", None)
             remote_state.pop("poll_error_count", None)
             options["gpu_control"] = remote_state
@@ -807,14 +849,15 @@ def _run_gpu_control_worker(run_id: str) -> None:
             counts = dict(remote_state.get("counts") or {})
             if int(counts.get("total") or -1) != len(files) or int(counts.get("succeeded") or -1) != len(files):
                 raise GpuControlError(f"GPU Control SUCCEEDED counts do not match the submitted total: {counts}")
-            if int(counts.get("failed") or 0) != 0:
-                raise GpuControlError(f"GPU Control SUCCEEDED response contains failed frames: {counts}")
+            for count_name in ("pending", "queued", "running", "failed", "cancelled"):
+                if int(counts.get(count_name) or 0) != 0:
+                    raise GpuControlError(f"GPU Control SUCCEEDED response contains unfinished frames: {counts}")
             artifact = result_artifact(payload)
             result_zip = workspace / "result.zip"
             download = client.download_artifact(
                 artifact,
                 result_zip,
-                request_id=f"{run_id.lower()}-download",
+                request_id=f"{run_id.lower()}-download-01",
             )
             latest = _get_run(run_id)
             if not latest or latest["status"] == "CANCELED":
@@ -853,6 +896,56 @@ def _run_gpu_control_worker(run_id: str) -> None:
             _notify(run_id, f"GPU Control 抠图批任务失败：{exc}")
     finally:
         _WORKER_RUNS.discard(run_id)
+
+
+def _wait_for_gpu_control_admission(
+    run_id: str,
+    client,
+    options: dict[str, Any],
+    remote_state: dict[str, Any],
+    prompt_ids: list[str],
+) -> None:
+    """Record scheduler telemetry without blocking server-side queue admission.
+
+    The V3 capacity endpoint is advisory.  ``create_batch`` is the authoritative
+    admission operation and the server owns queueing, so a saturated suggestion
+    (or a failed capacity probe) must never strand a remote-routed task locally.
+    """
+
+    if not hasattr(client, "scheduler_capacity"):
+        return
+    sequence = int(remote_state.get("admission_poll_sequence") or 0)
+    sequence += 1
+    try:
+        capacity = client.scheduler_capacity(request_id=f"{run_id.lower()}-admission-{sequence:06d}")
+        supported = bool(capacity.get("supported"))
+        accepting = capacity.get("accepting_batches") is True
+        suggested = capacity.get("suggested_max_new_batches")
+        admission = {
+            "status": "SUBMITTING",
+            "policy": "server_queue_authoritative",
+            "supported": supported,
+            "accepting_batches": capacity.get("accepting_batches"),
+            "queue_depth": capacity.get("queue_depth"),
+            "active_batches": capacity.get("active_batches"),
+            "idle_nodes": capacity.get("idle_nodes"),
+            "suggested_max_new_batches": suggested,
+            "updated_at": _now(),
+        }
+        if supported and not accepting:
+            admission["note"] = "capacity advisory is saturated; create_batch still owns queue admission"
+    except Exception as exc:
+        admission = {
+            "status": "SUBMITTING",
+            "policy": "server_queue_authoritative",
+            "supported": False,
+            "probe_error": str(exc),
+            "updated_at": _now(),
+        }
+    remote_state["admission_poll_sequence"] = sequence
+    remote_state["admission"] = admission
+    options["gpu_control"] = remote_state
+    _save_run_progress(run_id, prompt_ids, options)
 
 
 def _run_worker(run_id: str) -> None:

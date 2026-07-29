@@ -59,9 +59,9 @@ class FeishuClient:
         if data.get("code") != 0:
             log.error("feishu reply failed code=%s msg=%s", data.get("code"), data.get("msg"))
 
-    def send_text_to_chat(self, chat_id: str, text: str) -> None:
+    def send_text_to_chat(self, chat_id: str, text: str) -> dict[str, str]:
         if not chat_id:
-            return
+            raise ValueError("chat_id is required")
         payload = {
             "receive_id": chat_id,
             "msg_type": "text",
@@ -77,6 +77,7 @@ class FeishuClient:
         data = response.json()
         if data.get("code") != 0:
             raise RuntimeError(f"send_text_to_chat failed: code={data.get('code')} msg={data.get('msg')} error={data.get('error')}")
+        return _message_receipt(data, delivery_method="text")
 
     def add_message_reaction(self, message_id: str, emoji_type: str) -> bool:
         if not message_id or not emoji_type:
@@ -116,7 +117,7 @@ class FeishuClient:
             raise RuntimeError(f"upload_file failed: code={data.get('code')} msg={data.get('msg')} error={data.get('error')}")
         return data["data"]["file_key"]
 
-    def send_file_to_chat(self, chat_id: str, path: Path, file_name: str | None = None) -> dict[str, str] | None:
+    def send_file_to_chat(self, chat_id: str, path: Path, file_name: str | None = None) -> dict[str, str]:
         # Large one-shot message uploads can spend the whole 60-second timeout
         # writing the request body. Route them straight to Drive's chunked API.
         if path.stat().st_size > DIRECT_MESSAGE_UPLOAD_MAX_BYTES:
@@ -145,7 +146,9 @@ class FeishuClient:
         data = response.json()
         if data.get("code") != 0:
             raise RuntimeError(f"send_file_to_chat failed: code={data.get('code')} msg={data.get('msg')} error={data.get('error')}")
-        return None
+        receipt = _message_receipt(data, delivery_method="message_attachment")
+        receipt["file_key"] = file_key
+        return receipt
 
     def _send_drive_file_to_chat(
         self,
@@ -164,7 +167,10 @@ class FeishuClient:
             if cause is not None:
                 raise error from cause
             raise error
-        self.send_text_to_chat(chat_id, f"文件已生成：{file_name or path.name}\n{url}")
+        receipt = self.send_text_to_chat(chat_id, f"文件已生成：{file_name or path.name}\n{url}")
+        if isinstance(receipt, dict):
+            drive_file.update({key: str(value) for key, value in receipt.items() if value})
+        drive_file["delivery_method"] = "drive_link"
         return drive_file
 
     def upload_drive_file(self, path: Path, file_name: str | None = None) -> dict[str, str]:
@@ -399,6 +405,19 @@ class FeishuClient:
 
 
 feishu_client = FeishuClient()
+
+
+def _message_receipt(data: dict, delivery_method: str) -> dict[str, str]:
+    payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+    message_id = str(payload.get("message_id") or "")
+    if not message_id:
+        raise RuntimeError(f"Feishu accepted request without message_id: {data}")
+    return {
+        "message_id": message_id,
+        "chat_id": str(payload.get("chat_id") or ""),
+        "create_time": str(payload.get("create_time") or ""),
+        "delivery_method": delivery_method,
+    }
 
 
 def _feishu_file_type(file_name: str) -> str:

@@ -68,6 +68,10 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
         _try_reply(event.message_id, event.chat_id, "你没有使用此机器人的权限。")
         return FeishuProcessResult(ok=False, trace_id=trace_id, error={"reason": "user_blocked"})
 
+    character_result = _try_handle_character_resolution(event, conversation_id, user_key, trace_id, dedup_key)
+    if character_result is not None:
+        return character_result
+
     confirmation_result = _try_handle_confirmation(event, conversation_id, user_key, trace_id, dedup_key)
     if confirmation_result is not None:
         return confirmation_result
@@ -206,6 +210,66 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
         )
 
 
+def _try_handle_character_resolution(
+    event: FeishuMessageEvent,
+    conversation_id: str,
+    user_id: str,
+    trace_id: str,
+    dedup_key: str,
+) -> FeishuProcessResult | None:
+    if event.attachments or not str(event.text or "").strip():
+        return None
+    from assetclaw_matting.db.repos import update_event_dedup_status
+    from assetclaw_matting.services.character_resolution import try_resolve_reply
+
+    result = try_resolve_reply(
+        conversation_id=conversation_id,
+        user_id=user_id,
+        message_id=event.message_id,
+        text=event.text,
+    )
+    if not result.get("handled"):
+        return None
+
+    resume_results: list[dict[str, object]] = []
+    if result.get("ok"):
+        for target in result.get("affected_runs") or []:
+            kind = str(target.get("run_kind") or "")
+            run_id = str(target.get("run_id") or "")
+            try:
+                if kind == "direct_image":
+                    from assetclaw_matting.skills.direct_image_skills import resume_after_character_resolution
+
+                    resumed = resume_after_character_resolution(run_id)
+                elif kind == "direct_video":
+                    from assetclaw_matting.skills.direct_video_skills import resume_after_character_resolution
+
+                    resumed = resume_after_character_resolution(run_id)
+                else:
+                    continue
+                resume_results.append({"run_kind": kind, "run_id": run_id, **resumed})
+            except Exception as exc:
+                log.exception("failed to resume character-gated run %s %s", kind, run_id)
+                resume_results.append({"run_kind": kind, "run_id": run_id, "ok": False, "error": str(exc)})
+
+    text_out = str(result.get("message") or "角色信息已更新。")
+    failed_resume = [item for item in resume_results if item.get("ok") is False]
+    if failed_resume:
+        text_out += "\n角色绑定已保存；任务恢复会由后台重试，不会重新抠图。"
+    _try_reply(event.message_id, event.chat_id, text_out)
+    _log_direct_brain_message(conversation_id, event, text_out)
+    update_event_dedup_status(dedup_key, "success")
+    trace(
+        "feishu.character_resolution",
+        trace_id=trace_id,
+        conversation_id=conversation_id,
+        message_id=event.message_id,
+        ok=bool(result.get("ok")),
+        affected_runs=result.get("affected_runs") or [],
+    )
+    return FeishuProcessResult(ok=bool(result.get("ok")), trace_id=trace_id, reply_text=text_out)
+
+
 def _try_handle_confirmation(
     event: FeishuMessageEvent,
     conversation_id: str,
@@ -216,9 +280,16 @@ def _try_handle_confirmation(
     text = event.text.strip()
     provided_ids = re.findall(r"\b[a-fA-F0-9]{6,}\b", text)
     bare_confirmation_code = bool(re.fullmatch(r"\s*[a-fA-F0-9]{6,}\s*", text))
-    confirm_like = re.search(r"\b(?:yes|y)\b|确认(?:执行)?", text, re.IGNORECASE) or bare_confirmation_code
+    confirm_like = bool(re.search(r"\b(?:yes|y)\b|确认(?:执行)?", text, re.IGNORECASE) or bare_confirmation_code)
+    implicit_video_confirm = bool(
+        re.search(
+            r"(?:我(?:要|需要)|帮我|给我).*(?:表情包|处理|制作|做)|(?:开始|执行|处理|制作|做)(?:吧|这个|视频)?$",
+            text,
+            re.IGNORECASE,
+        )
+    )
     cancel_like = _is_confirmation_cancel(text)
-    if not confirm_like and not cancel_like:
+    if not confirm_like and not cancel_like and not implicit_video_confirm:
         return None
 
     from assetclaw_matting.db.repos import (
@@ -254,6 +325,11 @@ def _try_handle_confirmation(
         _try_reply(event.message_id, event.chat_id, text_out)
         update_event_dedup_status(dedup_key, "success")
         return FeishuProcessResult(ok=True, trace_id=trace_id, reply_text=text_out)
+
+    if implicit_video_confirm and not confirm_like:
+        if not all(str(item.get("skill") or "") == "direct_video.start" for item in pending_items):
+            return None
+        confirm_like = True
 
     if cancel_like and not confirm_like:
         lines = []

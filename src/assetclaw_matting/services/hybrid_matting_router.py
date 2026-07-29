@@ -85,9 +85,10 @@ def select_matting_backend(
         if forced == "local":
             return result("local", "explicit backend=local")
         handshake = _cluster_handshake() if include_handshake else None
+        reason = "explicit backend=gpu_control"
         if handshake and not handshake.get("accepting_batches"):
-            raise RuntimeError(f"GPU Control is not accepting batches: {handshake.get('reason') or 'capacity unavailable'}")
-        return result("gpu_control", "explicit backend=gpu_control", handshake)
+            reason += "; scheduler advisory is saturated; submitting to the server queue"
+        return result("gpu_control", reason, handshake)
 
     if mode == "local":
         return result("local", "matting_backend_mode=local")
@@ -98,22 +99,26 @@ def select_matting_backend(
             raise RuntimeError("MATTING_BACKEND_MODE=gpu_control but GPU_CONTROL_BASE_URL is empty")
         return result("local", "GPU Control is not configured")
     handshake = _cluster_handshake() if include_handshake else None
-    if handshake and not handshake.get("accepting_batches"):
-        if mode == "gpu_control":
-            raise RuntimeError(f"GPU Control is not accepting batches: {handshake.get('reason') or 'capacity unavailable'}")
-        return result("local", f"GPU Control handshake unavailable: {handshake.get('reason') or 'not accepting'}", handshake)
     if mode == "gpu_control":
         maximum = max(1, int(settings.gpu_control_max_batch_frames or 1))
         if int(total) > maximum:
             raise RuntimeError(f"GPU Control batch has {total} frames, exceeding configured limit {maximum}")
-        return result("gpu_control", "matting_backend_mode=gpu_control", handshake)
+        reason = "matting_backend_mode=gpu_control"
+        if handshake and not handshake.get("accepting_batches"):
+            reason += "; scheduler advisory is saturated; submitting to the server queue"
+        return result("gpu_control", reason, handshake)
 
     maximum = max(1, int(settings.gpu_control_max_batch_frames or 1))
     if int(total) > maximum:
         return result("local", f"batch size {total} exceeds remote limit {maximum}; keep the intact task local", handshake)
     threshold = max(1, int(settings.gpu_control_large_batch_threshold or 1))
     if int(total) >= threshold:
-        return result("gpu_control", f"batch size {total} reached remote threshold {threshold}", handshake)
+        reason = f"batch size {total} reached remote threshold {threshold}"
+        if handshake and not handshake.get("accepting_batches"):
+            reason += "; scheduler advisory is saturated; submitting to the server queue"
+        return result("gpu_control", reason, handshake)
+    if handshake and not handshake.get("accepting_batches"):
+        return result("local", f"GPU Control handshake unavailable: {handshake.get('reason') or 'not accepting'}", handshake)
     if _active_local_run_count() > 0:
         return result("gpu_control", "local 4070Ti already has an active matting run", handshake)
     return result("local", "local 4070Ti is idle and the batch is below the remote threshold", handshake)
@@ -166,9 +171,6 @@ def _cluster_handshake() -> dict[str, Any]:
                 if capacity.get(key) is not None
             }
             accepting = capacity.get("accepting_batches") is True
-            suggested = capacity.get("suggested_max_new_batches")
-            if suggested is not None:
-                accepting = accepting and int(suggested) > 0
         else:
             accepting = active_batches < client_limit
         base["accepting_batches"] = bool(base["ready"] and accepting)

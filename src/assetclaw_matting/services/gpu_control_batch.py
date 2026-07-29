@@ -22,7 +22,7 @@ from assetclaw_matting.comfyui.output_resolver import inspect_local_png
 
 
 TERMINAL_BATCH_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
-RETRYABLE_HTTP_STATUSES = {429, 502, 503, 504}
+RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
 V2_ALLOWED_INPUT_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 V2_MAX_FRAMES = 5000
 V2_MAX_MANIFEST_BYTES = 4 * 1024 * 1024
@@ -33,6 +33,28 @@ V2_MAX_ARCHIVE_BYTES = 100 * 1024 * 1024 * 1024
 
 class GpuControlError(RuntimeError):
     pass
+
+
+def _normalize_scheduler_capacity(payload: dict[str, Any]) -> dict[str, Any]:
+    """Flatten the V3 capacity shape while preserving legacy V2 extension keys."""
+
+    result = dict(payload or {})
+    cluster = result.get("cluster") if isinstance(result.get("cluster"), dict) else {}
+    client = result.get("client") if isinstance(result.get("client"), dict) else {}
+    if result.get("accepting_batches") is None:
+        accepting = result.get("accepting")
+        if accepting is None and cluster.get("available_slots") is not None:
+            accepting = int(cluster.get("available_slots") or 0) > 0
+        result["accepting_batches"] = accepting
+    result.setdefault("queue_depth", cluster.get("queued_jobs"))
+    result.setdefault("active_batches", cluster.get("running_jobs"))
+    result.setdefault("idle_nodes", cluster.get("available_slots"))
+    result.setdefault("online_nodes", cluster.get("eligible_nodes"))
+    if result.get("suggested_max_new_batches") is None:
+        available = int(cluster.get("available_slots") or 0)
+        client_room = max(0, int(client.get("max_queued") or available) - int(client.get("queued_jobs") or 0))
+        result["suggested_max_new_batches"] = min(available, client_room)
+    return result
 
 
 class _CaBundleAdapter(HTTPAdapter):
@@ -125,7 +147,7 @@ class GpuControlBatchClient:
             }
         if response.status_code != 200:
             _raise_response(response, "scheduler capacity")
-        payload = _response_json(response)
+        payload = _normalize_scheduler_capacity(_response_json(response))
         payload["supported"] = True
         payload["_response_meta"] = _response_meta(response)
         return payload
@@ -235,8 +257,9 @@ class GpuControlBatchClient:
     def download_artifact(self, artifact: dict[str, Any], destination: Path, *, request_id: str | None = None) -> dict[str, Any]:
         raw_url = str(artifact.get("download_url") or "")
         expected_sha = str(artifact.get("sha256") or "").lower()
-        if not raw_url or len(expected_sha) != 64:
-            raise GpuControlError("result artifact is missing download_url or sha256")
+        expected_size = int(artifact.get("size_bytes") or 0)
+        if not raw_url or len(expected_sha) != 64 or expected_size <= 0:
+            raise GpuControlError("result artifact is missing download_url, sha256, or size_bytes")
         destination.parent.mkdir(parents=True, exist_ok=True)
         partial = destination.with_suffix(destination.suffix + ".part")
         if partial.exists():
@@ -268,6 +291,11 @@ class GpuControlBatchClient:
             actual_sha = digest.hexdigest()
             if actual_sha != expected_sha:
                 raise GpuControlError(f"result archive sha256 mismatch: expected {expected_sha}, got {actual_sha}")
+            actual_size = partial.stat().st_size
+            if actual_size != expected_size:
+                raise GpuControlError(
+                    f"result archive size mismatch: expected {expected_size}, got {actual_size}"
+                )
             os.replace(partial, destination)
             return {
                 "path": str(destination),
@@ -565,10 +593,27 @@ def verify_and_publish_result(
 
 
 def result_artifact(batch_status: dict[str, Any]) -> dict[str, Any]:
-    for item in batch_status.get("artifacts") or []:
-        if str(item.get("kind") or "") == "result_archive":
-            return dict(item)
-    raise GpuControlError("SUCCEEDED batch has no result_archive artifact")
+    matches = [
+        dict(item)
+        for item in batch_status.get("artifacts") or []
+        if str(item.get("kind") or "") == "result_archive"
+    ]
+    if len(matches) != 1:
+        raise GpuControlError(f"SUCCEEDED batch must have exactly one result_archive artifact, got {len(matches)}")
+    artifact = matches[0]
+    batch_id = str(batch_status.get("batch_id") or "")
+    expected_filename = f"{batch_id}-rgba.zip" if batch_id else ""
+    if not str(artifact.get("id") or ""):
+        raise GpuControlError("result_archive artifact has no id")
+    if expected_filename and str(artifact.get("filename") or "") != expected_filename:
+        raise GpuControlError("result_archive filename does not match batch_id")
+    if str(artifact.get("content_type") or "").lower() != "application/zip":
+        raise GpuControlError("result_archive content_type must be application/zip")
+    if int(artifact.get("size_bytes") or 0) <= 0:
+        raise GpuControlError("result_archive size_bytes must be positive")
+    if len(str(artifact.get("sha256") or "")) != 64 or not str(artifact.get("download_url") or ""):
+        raise GpuControlError("result_archive is missing sha256 or download_url")
+    return artifact
 
 
 def compact_remote_state(payload: dict[str, Any]) -> dict[str, Any]:
@@ -581,9 +626,49 @@ def compact_remote_state(payload: dict[str, Any]) -> dict[str, Any]:
         "node_distribution": dict(payload.get("node_distribution") or {}),
         "error": payload.get("error"),
         "artifacts": list(payload.get("artifacts") or []),
+        "workflow_key": payload.get("workflow_key") or "",
+        "workflow_version": payload.get("workflow_version") or "",
+        "pipeline_commit": payload.get("pipeline_commit") or payload.get("imageclip_commit") or "",
+        "pipeline_sha256": payload.get("pipeline_sha256") or "",
+        "created_at": payload.get("created_at") or "",
+        "started_at": payload.get("started_at") or "",
+        "finished_at": payload.get("finished_at") or "",
         "updated_at": payload.get("updated_at") or payload.get("finished_at") or "",
         "response_meta": dict(payload.get("_response_meta") or {}),
     }
+
+
+def merge_remote_state(current: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """Merge one server observation while keeping user-visible progress monotonic."""
+
+    merged = dict(current or {})
+    previous_progress = float(merged.get("progress") or 0)
+    observation = compact_remote_state(payload)
+    # Create/cancel responses are intentionally sparse. Do not erase facts
+    # learned from a richer parent-status response merely because a later
+    # action response omitted those fields.
+    optional_sources = {
+        "counts": ("counts",),
+        "node_distribution": ("node_distribution",),
+        "error": ("error",),
+        "artifacts": ("artifacts",),
+        "workflow_key": ("workflow_key",),
+        "workflow_version": ("workflow_version",),
+        "pipeline_commit": ("pipeline_commit", "imageclip_commit"),
+        "pipeline_sha256": ("pipeline_sha256",),
+        "created_at": ("created_at",),
+        "started_at": ("started_at",),
+        "finished_at": ("finished_at",),
+        "updated_at": ("updated_at", "finished_at"),
+        "response_meta": ("_response_meta",),
+    }
+    for field, source_keys in optional_sources.items():
+        if not any(key in payload for key in source_keys):
+            observation.pop(field, None)
+    observed_progress = float(observation.get("progress") or 0)
+    observation["progress"] = max(previous_progress, min(100.0, max(0.0, observed_progress)))
+    merged.update(observation)
+    return merged
 
 
 def _validated_archive_members(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
@@ -591,7 +676,10 @@ def _validated_archive_members(archive: zipfile.ZipFile) -> dict[str, zipfile.Zi
     collision_keys: set[str] = set()
     for member in archive.infolist():
         if member.is_dir():
-            continue
+            raise GpuControlError(f"result zip contains an explicit directory entry: {member.filename}")
+        unix_mode = (member.external_attr >> 16) & 0xF000
+        if unix_mode == 0xA000:
+            raise GpuControlError(f"result zip contains a symbolic link: {member.filename}")
         name = _normalize_relative_path(member.filename)
         key = _normalized_collision_key(name)
         if key in collision_keys:
@@ -655,6 +743,8 @@ def _normalize_relative_path(value: str) -> str:
         raise GpuControlError(f"relative path must be NFC and at most 2048 characters: {value!r}")
     if "\\" in normalized or "\x00" in normalized:
         raise GpuControlError(f"invalid relative path: {value!r}")
+    if any(part == "" for part in normalized.split("/")):
+        raise GpuControlError(f"relative path contains an empty segment: {value!r}")
     path = PurePosixPath(normalized)
     if not normalized or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise GpuControlError(f"invalid relative path: {value!r}")

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import math
+import re
+import shutil
 import threading
 import time
 import uuid
@@ -48,7 +52,8 @@ def info() -> dict[str, Any]:
         "runtime_ready": not runtime_error,
         "runtime_error": runtime_error,
         "browser_path": runtime.get("browser_path", ""),
-        "steps": ["fringe", "hairinset", "feather(rect only)", "blur", "resize2"],
+        "steps": ["fringe", "hairinset", "feather(rect only)", "blur", "resize2", "colormatch(final-2)", "align(final)"],
+        "position_alignment": "required_with_character_reference",
         "temporal_smooth": "controlled_by_html_default_off",
         "defaults": _default_options(),
         "presets": {"auto": preset_options("auto"), "full": preset_options("full"), "half": preset_options("half")},
@@ -60,6 +65,7 @@ def run_preview(
     output_dir: str,
     recursive: bool = True,
     max_images: int = 10000,
+    reference_path: str | None = None,
     **options: Any,
 ) -> dict[str, Any]:
     src = validate_path(input_dir, must_exist=True)
@@ -68,6 +74,12 @@ def run_preview(
         raise ValueError("input_dir must be a directory")
     files = _collect_images(src, recursive=recursive, max_images=max_images)
     groups = _group_sequences(src, files)
+    reference = _require_color_reference(reference_path) if reference_path else None
+    preview_options = _merge_options(options)
+    if not reference:
+        preview_options["html_modules"] = [step for step in preview_options.get("html_modules") or [] if step not in {"colormatch", "align"}]
+        preview_options["html_colormatch_enabled"] = False
+        preview_options["html_align_enabled"] = False
     return {
         "ok": True,
         "input_dir": str(src),
@@ -77,7 +89,9 @@ def run_preview(
         "sample_inputs": [str(path.relative_to(src)) for path in files[:8]],
         "recursive": recursive,
         "preserve_structure": True,
-        "options": _merge_options(options),
+        "reference_path": str(reference) if reference else "",
+        "reference_ready": bool(reference),
+        "options": preview_options,
     }
 
 
@@ -88,8 +102,11 @@ def run_start(
     max_images: int = 10000,
     skip_existing: bool = False,
     notify_interval_seconds: int = 60,
+    reference_path: str | None = None,
+    reference_sha256: str | None = None,
     **options: Any,
 ) -> dict[str, Any]:
+    from assetclaw_matting.config import settings
     from assetclaw_matting.db.sqlite import get_connection
     from assetclaw_matting.runtime_context import get_runtime_context
 
@@ -98,6 +115,15 @@ def run_start(
     dst = validate_path(output_dir, must_exist=False)
     if not src.is_dir():
         raise ValueError("input_dir must be a directory")
+    reference_steps_required = bool(options.get("color_match_required") or options.get("reference_postprocess_required"))
+    reference = _require_color_reference(reference_path) if str(reference_path or "").strip() else None
+    if reference_steps_required and reference is None:
+        raise ValueError("reference_path is required for Cherry color matching and alignment")
+    reference_steps_enabled = reference is not None
+    actual_reference_sha256 = _sha256_path(reference) if reference else ""
+    expected_reference_sha256 = str(reference_sha256 or actual_reference_sha256).lower()
+    if reference and actual_reference_sha256.lower() != expected_reference_sha256:
+        raise ValueError("reference_path SHA-256 does not match the frozen character reference")
     files = _collect_images(src, recursive=recursive, max_images=max_images)
     if not files:
         raise ValueError("input_dir has no supported images")
@@ -105,20 +131,32 @@ def run_start(
         files = [path for path in files if not _output_target(src, dst, path).exists()]
     dst.mkdir(parents=True, exist_ok=True)
 
+    run_id = _run_id()
+    pinned_source, pinned_source_sha256 = _pin_html_for_run(run_id, _tool_source_path(), Path(settings.storage_dir))
     ctx = get_runtime_context()
     opts = _merge_options(options)
+    if not reference_steps_enabled:
+        opts["html_modules"] = [step for step in opts.get("html_modules") or [] if step not in {"colormatch", "align"}]
+        opts["html_colormatch_enabled"] = False
+        opts["html_align_enabled"] = False
     opts.update(
         {
             "recursive": recursive,
             "skip_existing": skip_existing,
             "notify_interval_seconds": max(30, min(int(notify_interval_seconds), 3600)),
+            "reference_path": str(reference) if reference else "",
+            "reference_sha256_expected": expected_reference_sha256,
+            "reference_postprocess_required": reference_steps_enabled,
+            "colormatch_required": reference_steps_enabled,
+            "position_alignment_enabled": reference_steps_enabled,
+            "source_path": str(pinned_source),
+            "source_sha256_pinned": pinned_source_sha256,
             "chat_id": (ctx.get("chat_id") or "") if ctx.get("channel") == "feishu" else "",
             "archived": False,
             "processed": [],
             "errors": [],
         }
     )
-    run_id = _run_id()
     created_at = _now()
     with get_connection() as conn:
         conn.execute(
@@ -319,20 +357,52 @@ def _run_worker_html(run_id: str, row: Any) -> None:
     dst = Path(row["output_dir"])
     files = [Path(path) for path in json.loads(row["files_json"] or "[]")]
     options = json.loads(row["options_json"] or "{}")
+    reference_steps_required = bool(options.get("reference_postprocess_required"))
+    reference_path = _require_color_reference(options.get("reference_path")) if str(options.get("reference_path") or "").strip() else None
+    if reference_steps_required and reference_path is None:
+        raise RuntimeError("Cherry reference post-processing is enabled without a reference image")
+    expected_reference_sha256 = str(options.get("reference_sha256_expected") or "").lower()
+    if reference_steps_required and (
+        not expected_reference_sha256
+        or reference_path is None
+        or _sha256_path(reference_path).lower() != expected_reference_sha256
+    ):
+        raise RuntimeError("frozen character reference changed before Cherry processing")
     processed = options.get("processed") or []
     errors = options.get("errors") or []
     done = {item.get("src_path") for item in processed}
     groups = _group_sequences(src, files)
     options.setdefault("engine", "headless_chrome_html")
-    options["source_path"] = str(_tool_source_path())
+    source_path = Path(str(options.get("source_path") or ""))
+    expected_source_sha256 = str(options.get("source_sha256_pinned") or "")
+    if not source_path.is_file() or not expected_source_sha256:
+        source_path, expected_source_sha256 = _pin_html_for_run(run_id, _tool_source_path(), Path(settings.storage_dir))
+        options["source_path"] = str(source_path)
+        options["source_sha256_pinned"] = expected_source_sha256
+    if _sha256_path(source_path) != expected_source_sha256:
+        raise RuntimeError("pinned Cherry HTML snapshot changed before processing")
+    saved_group_transforms = options.setdefault("sequence_alignment_transforms", {})
 
     for group_files in groups:
         latest = _get_run(run_id)
         if not latest or latest["status"] == "CANCELED":
             return
+        group_key = str(group_files[0].parent.relative_to(src)).replace("\\", "/") if group_files else "."
+        group_alignment_transform = saved_group_transforms.get(group_key)
         pending = [path for path in group_files if str(path) not in done]
         if not pending:
             continue
+        if reference_steps_required and not group_alignment_transform and len(pending) != len(group_files):
+            # A pre-upgrade/interrupted run may have partial outputs without
+            # the frozen transform. Re-run this one group so all frames share
+            # one verifiable transform instead of mixing two alignments.
+            group_paths = {str(path) for path in group_files}
+            processed = [item for item in processed if str(item.get("src_path") or "") not in group_paths]
+            done.difference_update(group_paths)
+            pending = list(group_files)
+        if reference_steps_required:
+            anchor = _sequence_alignment_anchor(pending)
+            pending = [anchor, *(path for path in pending if path != anchor)]
         queue = _chunk_html_files(
             pending,
             max_files=int(settings.cherry_html_batch_max_files),
@@ -348,15 +418,37 @@ def _run_worker_html(run_id: str, row: Any) -> None:
             if not latest or latest["status"] == "CANCELED":
                 return
             try:
-                result = _run_html_group_with_retries(run_id, src, dst, batch, options)
+                result = _run_html_group_with_retries(
+                    run_id,
+                    src,
+                    dst,
+                    batch,
+                    options,
+                    reference_path=reference_path,
+                    alignment_transform=group_alignment_transform,
+                    html_path=source_path,
+                    expected_source_sha256=expected_source_sha256,
+                    expected_reference_sha256=expected_reference_sha256,
+                    reference_steps_required=reference_steps_required,
+                )
+                _validate_html_result(result, reference_steps_required=reference_steps_required)
+                if reference_steps_required and group_alignment_transform is None:
+                    group_alignment_transform = dict(result.alignment_transform or {})
+                    saved_group_transforms[group_key] = group_alignment_transform
                 width, height = _parse_resize(result.resize)
                 if width and height:
                     options["resize_width"] = width
                     options["resize_height"] = height
                 options["inferred_profile"] = result.profile
                 options["html_feather_enabled"] = result.feather_enabled
-                options["html_steps"] = result.steps
+                options["html_configured_steps"] = result.steps
+                options["html_steps"] = result.executed_steps
                 options["source_sha256"] = result.source_sha256
+                options["reference_loaded"] = result.reference_loaded
+                options["reference_sha256"] = result.reference_sha256
+                options["color_match_stats"] = result.color_match_stats
+                options["position_alignment_enabled"] = result.alignment_enabled
+                options["sequence_alignment_transform"] = group_alignment_transform
                 options.setdefault("html_runs", []).append(
                     {
                         "input_dir": str(batch[0].parent),
@@ -364,7 +456,14 @@ def _run_worker_html(run_id: str, row: Any) -> None:
                         "profile": result.profile,
                         "resize": result.resize,
                         "feather_enabled": result.feather_enabled,
-                        "steps": result.steps,
+                        "configured_steps": result.steps,
+                        "executed_steps": result.executed_steps,
+                        "skipped_no_ref": result.skipped_no_ref,
+                        "reference_loaded": result.reference_loaded,
+                        "reference_sha256": result.reference_sha256,
+                        "color_match_stats": result.color_match_stats,
+                        "position_alignment_enabled": result.alignment_enabled,
+                        "alignment_transform": result.alignment_transform,
                         "source_sha256": result.source_sha256,
                     }
                 )
@@ -418,6 +517,12 @@ def _run_html_group_with_retries(
     pending: list[Path],
     options: dict[str, Any],
     *,
+    reference_path: Path | None,
+    alignment_transform: dict[str, Any] | None = None,
+    html_path: Path,
+    expected_source_sha256: str,
+    expected_reference_sha256: str,
+    reference_steps_required: bool,
     attempts: int = 3,
 ):
     from assetclaw_matting.config import settings
@@ -431,14 +536,21 @@ def _run_html_group_with_retries(
         started_at = _now()
         try:
             result = run_cherry_html(
-                _tool_source_path(),
+                html_path,
                 src,
                 dst,
                 pending,
+                reference_path=reference_path,
+                reference_steps_required=reference_steps_required,
+                alignment_transform=alignment_transform,
                 chrome_path=Path(settings.cherry_browser_path) if settings.cherry_browser_path else None,
                 timeout_seconds=int(settings.cherry_html_timeout_seconds),
                 storage_dir=Path(settings.storage_dir),
             )
+            if result.source_sha256 != expected_source_sha256:
+                raise RuntimeError("Cherry HTML source changed within one task")
+            if reference_steps_required and result.reference_sha256.lower() != expected_reference_sha256.lower():
+                raise RuntimeError("Cherry used a different character reference than the frozen task binding")
             options.setdefault("html_attempts", []).append(
                 {
                     "input_dir": str(pending[0].parent),
@@ -496,6 +608,39 @@ def _chunk_html_files(files: list[Path], *, max_files: int, max_pixels: int) -> 
     if current:
         batches.append(current)
     return batches
+
+
+def _sequence_alignment_anchor(files: list[Path]) -> Path:
+    """Mirror the HTML's smallest trailing-number rule over the whole sequence."""
+
+    if not files:
+        raise ValueError("sequence has no files")
+    ranked: list[tuple[int, int, str, Path]] = []
+    for index, path in enumerate(files):
+        numbers = re.findall(r"\d+", path.name)
+        number = int(numbers[-1]) if numbers else math.inf
+        ranked.append((0 if numbers else 1, number, f"{index:09d}:{path.name.casefold()}", path))
+    return min(ranked, key=lambda item: item[:3])[3]
+
+
+def _pin_html_for_run(run_id: str, source: Path, storage_dir: Path) -> tuple[Path, str]:
+    source = Path(source).resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"Cherry algorithm HTML not found: {source}")
+    snapshot_dir = Path(storage_dir) / "cherry_run_snapshots" / run_id
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    snapshot = snapshot_dir / "cherry-postprocess.html"
+    if not snapshot.is_file():
+        shutil.copy2(source, snapshot)
+    return snapshot.resolve(), _sha256_path(snapshot)
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _image_pixel_count(path: Path, *, fallback_pixels: int) -> int:
@@ -713,6 +858,52 @@ def _parse_resize(value: str) -> tuple[int | None, int | None]:
         return None, None
 
 
+def _require_color_reference(reference_path: str | Path | None) -> Path:
+    if not str(reference_path or "").strip():
+        raise ValueError("reference_path is required for Cherry color matching")
+    reference = validate_path(str(reference_path), must_exist=True)
+    if not reference.is_file():
+        raise ValueError("reference_path must be an image file")
+    if reference.suffix.lower() not in {".png", ".webp", ".jpg", ".jpeg"}:
+        raise ValueError(f"unsupported Cherry color reference format: {reference.suffix}")
+    try:
+        with Image.open(reference) as image:
+            image.verify()
+    except Exception as exc:
+        raise ValueError(f"invalid Cherry color reference image: {reference}") from exc
+    return reference
+
+
+def _validate_html_result(result: Any, *, reference_steps_required: bool = True) -> None:
+    executed = [str(step) for step in (result.executed_steps or [])]
+    if not reference_steps_required:
+        if result.alignment_enabled or "align" in executed or "colormatch" in executed:
+            raise RuntimeError("Cherry unexpectedly executed reference-dependent steps")
+        return
+    if not result.reference_loaded:
+        raise RuntimeError("Cherry returned output without a loaded color reference")
+    if result.skipped_no_ref:
+        raise RuntimeError(f"Cherry skipped reference-dependent steps: {', '.join(result.skipped_no_ref)}")
+    if not result.alignment_enabled or "align" not in executed:
+        raise RuntimeError("Cherry reference alignment was not executed")
+    if executed[-2:] != ["colormatch", "align"]:
+        raise RuntimeError("Cherry color matching and alignment were not the final executed steps in order")
+    color_stats = result.color_match_stats or {}
+    calls = int(color_stats.get("calls") or 0)
+    applied = int(color_stats.get("applied") or 0)
+    insufficient = int(color_stats.get("insufficient") or 0)
+    if insufficient or calls != int(result.total) or applied != calls:
+        raise RuntimeError("Cherry color matching did not apply to every frame")
+    transform = result.alignment_transform or {}
+    for key in ("s", "tx", "ty"):
+        try:
+            value = float(transform.get(key))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Cherry returned an invalid alignment transform") from exc
+        if not math.isfinite(value) or (key == "s" and value <= 0):
+            raise RuntimeError("Cherry returned an invalid alignment transform")
+
+
 def _default_options() -> dict[str, Any]:
     return preset_options("auto")
 
@@ -772,8 +963,10 @@ def preset_options(profile: str = "full", use_smooth: bool = False) -> dict[str,
         "sharpen_radius": 2,
         "sharpen_threshold": 0.02,
         "sharpen_shrink": 11,
-        "html_modules": ["fringe", "hairinset", *([] if is_half else ["feather"]), "blur", "resize2"],
+        "html_modules": ["fringe", "hairinset", *([] if is_half else ["feather"]), "blur", "resize2", "colormatch", "align"],
         "html_feather_enabled": not is_half,
+        "html_colormatch_enabled": True,
+        "html_align_enabled": True,
     }
 
 
@@ -895,12 +1088,16 @@ def _merge_options(options: dict[str, Any]) -> dict[str, Any]:
         "sharpen_threshold",
     ):
         merged[key] = float(merged[key])
+    modules = [str(step) for step in (merged.get("html_modules") or []) if str(step) not in {"align", "colormatch"}]
+    merged["html_modules"] = [*modules, "colormatch", "align"]
+    merged["html_colormatch_enabled"] = True
+    merged["html_align_enabled"] = True
     return merged
 
 
 def _steps_text(options: dict[str, Any]) -> str:
     if options.get("engine") == "headless_chrome_html":
-        modules = options.get("html_modules") or ["fringe", "hairinset", "feather", "blur", "resize2"]
+        modules = options.get("html_modules") or ["fringe", "hairinset", "feather", "blur", "resize2", "colormatch", "align"]
         feather = "开" if options.get("html_feather_enabled") else "关"
         return f"HTML 默认预设，输出 {options.get('resize_width')}x{options.get('resize_height')}，feather {feather}，模块 {'/'.join(modules)}"
     steps = []
