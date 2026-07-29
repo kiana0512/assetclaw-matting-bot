@@ -1,5 +1,12 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive } from "vue";
+import PerformanceDashboard from "./components/PerformanceDashboard.vue";
+import TaskDetailDrawer from "./components/TaskDetailDrawer.vue";
+import {
+  buildTaskPerformance,
+  formatDurationMs,
+  summarizePerformance,
+} from "./domain/task-performance.js";
 
 const POLL_MS = 12000;
 const FINISHED = new Set(["DONE", "FAILED", "CANCELED", "BLOCKED", "DONE_WITH_ERRORS"]);
@@ -16,6 +23,7 @@ const STAGE_LABELS = {
 const tabs = [
   { id: "overview", label: "总览" },
   { id: "tasks", label: "任务" },
+  { id: "analysis", label: "分析" },
   { id: "launch", label: "启动" },
   { id: "agent", label: "Agent" },
 ];
@@ -129,9 +137,25 @@ const allTasks = computed(() => {
   });
   return [...managedParentTasks.value, ...standalone].sort((a, b) => b.timeValue - a.timeValue);
 });
+const performanceRecords = computed(() => {
+  // updatedAt keeps active elapsed time moving with the existing refresh cycle.
+  void state.updatedAt;
+  return managedParentTasks.value
+    .map((task) => buildTaskPerformance(task))
+    .sort((a, b) => (b.startMs || 0) - (a.startMs || 0));
+});
+const performanceSummary = computed(() => summarizePerformance(performanceRecords.value));
+const performanceByKey = computed(() => new Map(performanceRecords.value.map((item) => [item.key, item])));
+const selectedTask = computed(() => {
+  const selected = state.detail;
+  if (!selected) return null;
+  return allTasks.value.find((task) => taskKey(task) === selected.key) || selected.snapshot || null;
+});
+const selectedPerformance = computed(() => selectedTask.value ? taskPerformance(selectedTask.value) : null);
 const activeTasks = computed(() => allTasks.value.filter((task) => !FINISHED.has(task.status)));
 const taskCategories = computed(() => buildTaskCategories(activeTasks.value));
 const filteredTasks = computed(() => state.taskFilter === "all" ? allTasks.value : allTasks.value.filter((task) => task.category === state.taskFilter));
+const filteredTaskRows = computed(() => filteredTasks.value.map((task) => ({ ...task, performance: taskPerformance(task) })));
 const unifiedQueue = computed(() => [...activeTasks.value]
   .filter(isMeaningfulActiveTask)
   .sort((a, b) => {
@@ -223,12 +247,12 @@ async function refreshAll(silent = false) {
     state.comfyStatus = unwrapSkill(valueOf(comfyStatus));
     state.frameStatus = unwrapSkill(valueOf(frameStatus));
     state.cherryStatus = unwrapSkill(valueOf(cherryStatus));
-    state.comfyRuns = unwrapSkill(valueOf(comfyRuns))?.items || [];
-    state.frameRuns = unwrapSkill(valueOf(frameRuns))?.items || [];
-    state.cherryRuns = unwrapSkill(valueOf(cherryRuns))?.items || [];
-    state.directImageRuns = unwrapSkill(valueOf(directImageRuns))?.items || [];
-    state.directVideoRuns = unwrapSkill(valueOf(directVideoRuns))?.items || [];
-    state.jobs = valueOf(jobs)?.items || [];
+    state.comfyRuns = lastKnownItems(comfyRuns, state.comfyRuns);
+    state.frameRuns = lastKnownItems(frameRuns, state.frameRuns);
+    state.cherryRuns = lastKnownItems(cherryRuns, state.cherryRuns);
+    state.directImageRuns = lastKnownItems(directImageRuns, state.directImageRuns);
+    state.directVideoRuns = lastKnownItems(directVideoRuns, state.directVideoRuns);
+    state.jobs = lastKnownItems(jobs, state.jobs, false);
     const activeFlow = [state.flows?.current, ...(state.flows?.items || [])].filter(Boolean).find((item) => isActiveStatus(flowDisplay(item).status));
     const flowId = activeFlow?.run_id || activeFlow?.id || "";
     if (flowId) {
@@ -491,6 +515,12 @@ function valueOf(result) {
   return result.status === "fulfilled" ? result.value : null;
 }
 
+function lastKnownItems(result, previous, skillPayload = true) {
+  const payload = valueOf(result);
+  const resolved = skillPayload ? unwrapSkill(payload) : payload;
+  return Array.isArray(resolved?.items) ? resolved.items : previous;
+}
+
 function mergeCurrentTasks(tasks) {
   const merged = [...tasks];
   for (const [module, raw] of [["COMFY", state.comfyStatus], ["FRAME", state.frameStatus], ["CHERRY", state.cherryStatus]]) {
@@ -555,6 +585,19 @@ function flowActiveChild(run) {
     if (raw) return { module: "CHERRY", raw };
   }
   return null;
+}
+
+function taskKey(task) {
+  return `${task?.module || "TASK"}:${task?.id || task?.raw?.id || task?.raw?.run_id || ""}`;
+}
+
+function taskPerformance(task) {
+  return performanceByKey.value.get(taskKey(task)) || buildTaskPerformance(task);
+}
+
+function openTaskDetail(task) {
+  if (!task) return;
+  state.detail = { key: taskKey(task), snapshot: task };
 }
 
 async function cancelManagedTask(task) {
@@ -1283,9 +1326,9 @@ function toast(message, type = "ok") {
           </div>
           <div v-if="!unifiedQueue.length" class="empty">当前队列为空。</div>
           <div v-else class="queue-track">
-            <button v-for="task in unifiedQueue" :key="task.module + task.id" class="queue-item" @click="state.detail = task.raw">
+            <button v-for="task in unifiedQueue" :key="task.module + task.id" class="queue-item" @click="openTaskDetail(task)">
               <strong>{{ task.queueIndex }}</strong>
-              <span><b>{{ task.label || task.module }}</b><small>{{ task.id }}</small></span>
+              <span><b>{{ task.name || task.label || task.module }}</b><small>{{ task.id }} · 已用 {{ formatDurationMs(taskPerformance(task).totalMs) }}</small></span>
               <em>{{ task.queueLabel }}</em>
               <span class="queue-stage"><b>{{ task.stageLabel || formatStage(task.stage) }}</b><small>{{ task.count || `${task.progress}%` }}</small></span>
               <i>{{ task.progress }}%</i>
@@ -1313,7 +1356,7 @@ function toast(message, type = "ok") {
                 <strong>{{ category.tasks.length }}</strong>
               </div>
               <div v-if="!category.tasks.length" class="category-empty">当前无任务</div>
-              <button v-for="task in category.tasks.slice(0, 3)" :key="task.id" class="category-task" @click="state.detail = task.raw">
+              <button v-for="task in category.tasks.slice(0, 3)" :key="task.id" class="category-task" @click="openTaskDetail(task)">
                 <span><b>{{ task.id }}</b><small>{{ task.stageLabel || formatStage(task.stage) }}</small></span>
                 <em>{{ task.count || `${task.progress}%` }}</em>
               </button>
@@ -1374,15 +1417,15 @@ function toast(message, type = "ok") {
           <div class="panel-title"><div><h3>统一任务队列</h3><span>按先后顺序查看所有来源的父任务</span></div><div class="queue-overall"><span>总体进度</span><b>{{ queueSummary.progress }}%</b></div></div>
           <div class="queue-summary"><span><b>{{ queueSummary.total }}</b> 队列任务</span><span><b>{{ queueSummary.running }}</b> 正在处理</span><span><b>{{ queueSummary.waiting }}</b> 等待 / 暂停</span><div class="progress"><i :style="{ width: `${queueSummary.progress}%` }"></i></div></div>
           <div v-if="!unifiedQueue.length" class="empty">当前队列为空。</div>
-          <div v-else class="queue-track"><button v-for="task in unifiedQueue" :key="task.module + task.id" class="queue-item" @click="state.detail = task.raw"><strong>{{ task.queueIndex }}</strong><span><b>{{ task.name || task.label || task.module }}</b><small>{{ task.label }} · {{ task.id }} · 启动 {{ task.time || "-" }}</small></span><em>{{ task.queueLabel }}</em><span class="queue-stage"><b>{{ task.stageLabel || formatStage(task.stage) }}</b><small>{{ task.count || `${task.progress}%` }}</small></span><i>{{ task.progress }}%</i></button></div>
+          <div v-else class="queue-track"><button v-for="task in unifiedQueue" :key="task.module + task.id" class="queue-item" @click="openTaskDetail(task)"><strong>{{ task.queueIndex }}</strong><span><b>{{ task.name || task.label || task.module }}</b><small>{{ task.label }} · {{ task.id }} · 已用 {{ formatDurationMs(taskPerformance(task).totalMs) }}</small></span><em>{{ task.queueLabel }}</em><span class="queue-stage"><b>{{ task.stageLabel || formatStage(task.stage) }}</b><small>{{ task.count || `${task.progress}%` }}</small></span><i>{{ task.progress }}%</i></button></div>
         </section>
         <section class="panel">
-          <div class="panel-title"><div><h3>任务中心</h3><span>父任务管理视图；子任务明细可在详情中查看</span></div><span>{{ filteredTasks.length }} 条</span></div>
+          <div class="panel-title"><div><h3>任务中心</h3><span>保留状态、阶段与耗时；完整路径和原始字段移入详情</span></div><span>{{ filteredTaskRows.length }} 条</span></div>
           <div class="task-filters">
             <button v-for="item in [{key:'all',label:'全部'}, {key:'image',label:'图片直发'}, {key:'video',label:'视频直发'}, {key:'feishu',label:'飞书动画'}, {key:'standalone',label:'独立任务'}]" :key="item.key" :class="{ active: state.taskFilter === item.key }" @click="state.taskFilter = item.key">{{ item.label }} <span>{{ item.key === 'all' ? allTasks.length : allTasks.filter(task => task.category === item.key).length }}</span></button>
           </div>
-          <div v-if="!filteredTasks.length" class="empty">这个分类当前没有任务。</div>
-          <article v-for="task in filteredTasks" :key="task.module + task.id" class="task-row large">
+          <div v-if="!filteredTaskRows.length" class="empty">这个分类当前没有任务。</div>
+          <article v-for="task in filteredTaskRows" :key="task.module + task.id" class="task-row large performance-task-row">
             <div class="task-main">
               <b :title="task.name || task.label || task.module">{{ task.name || task.label || task.module }}</b>
               <span>{{ task.label }} · {{ task.id }}</span>
@@ -1390,21 +1433,23 @@ function toast(message, type = "ok") {
             </div>
             <span :class="['status-pill', statusClass(task.status)]">{{ task.status }}</span>
             <span class="stage-name">{{ task.stageLabel || task.last || formatStage(task.stage) }}</span>
-            <div class="path-cell">
-              <small><em>输入</em><span>{{ task.input || "-" }}</span></small>
-              <small><em>输出</em><span>{{ task.output || "-" }}</span></small>
-              <small v-if="task.position"><em>位置</em><span>{{ task.position }}</span></small>
-              <small v-if="task.eta"><em>ETA</em><span>{{ task.eta }}</span></small>
-              <small v-if="task.detail"><em>明细</em><span>{{ task.detail }}</span></small>
+            <div class="performance-cell">
+              <span><em>总耗时</em><b>{{ formatDurationMs(task.performance.totalMs) }}</b></span>
+              <small><em>瓶颈</em><span>{{ task.performance.bottleneck?.label || "暂无阶段拆分" }}<template v-if="task.performance.bottleneck"> · {{ Math.round(task.performance.bottleneck.share * 100) }}%</template></span></small>
+              <small><em>速度</em><span>{{ task.performance.throughput ? `${task.performance.throughput.toFixed(1)} 帧/分` : task.performance.backend }}</span></small>
             </div>
             <div class="task-actions">
               <button v-if="task.module === 'COMFY' && task.status === 'RUNNING'" class="ghost" @click="controlComfy('pause', task.id)">暂停</button>
               <button v-if="task.module === 'COMFY' && task.status === 'PAUSED'" class="ghost" @click="controlComfy('resume', task.id)">继续</button>
               <button v-if="isActiveStatus(task.status)" class="danger" @click="cancelManagedTask(task)">取消</button>
-              <button class="ghost" @click="state.detail = task.raw">详情</button>
+              <button class="ghost" @click="openTaskDetail(task)">耗时详情</button>
             </div>
           </article>
         </section>
+      </section>
+
+      <section v-if="state.tab === 'analysis'" class="view">
+        <PerformanceDashboard :records="performanceRecords" :summary="performanceSummary" @open="openTaskDetail" />
       </section>
 
       <section v-if="state.tab === 'launch'" class="view launch-grid">
@@ -1499,12 +1544,7 @@ function toast(message, type = "ok") {
       </section>
     </main>
 
-    <div v-if="state.detail" class="detail-backdrop" @click.self="state.detail = null">
-      <section class="detail-modal">
-        <div class="detail-head"><h3>详情</h3><button class="ghost" @click="state.detail = null">关闭</button></div>
-        <pre>{{ JSON.stringify(state.detail, null, 2) }}</pre>
-      </section>
-    </div>
+    <TaskDetailDrawer v-if="selectedTask && selectedPerformance" :task="selectedTask" :performance="selectedPerformance" @close="state.detail = null" />
 
     <div class="toasts">
       <article v-for="item in state.toasts" :key="item.id" :class="['toast', item.type]">{{ item.message }}</article>
