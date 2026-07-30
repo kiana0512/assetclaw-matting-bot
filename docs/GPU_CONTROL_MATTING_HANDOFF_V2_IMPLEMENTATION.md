@@ -1,6 +1,7 @@
 # GPU Control 抠图交接 V2（动画管家历史实现记录，已由 V3 取代）
 
-> 当前联调唯一入口为 [GPU_CONTROL_MATTING_HANDOFF_V3_ASSETCLAW_ALIGNMENT.md](GPU_CONTROL_MATTING_HANDOFF_V3_ASSETCLAW_ALIGNMENT.md)。本文件仅用于追溯 1.2.x/V2 的实现与历史验收。
+> 当前联调入口为 [GPU_CONTROL_MATTING_HANDOFF_V4_ASSETCLAW_ALIGNMENT.md](GPU_CONTROL_MATTING_HANDOFF_V4_ASSETCLAW_ALIGNMENT.md) 与
+> [gpu-control-v4.1-audit-alignment/README.md](gpu-control-v4.1-audit-alignment/README.md)。本文件仅用于追溯 1.2.x/V2 的实现与历史验收。
 
 更新时间：2026-07-24
 

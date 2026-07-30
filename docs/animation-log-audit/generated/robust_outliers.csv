@@ -1,0 +1,67 @@
+﻿task_id,name,category,backend,metric,value_s_per_item,group_median_s_per_item,multiple_of_median,robust_z,reason
+IMG_65E2185AA833,feishu_image_2.png,image_direct,local,postprocess_envelope_s,150273.927177,6.826746,22012.526491684326,110564.39979263765,robust_z>=3.5
+IMG_288AA489B664,feishu_image_3.png,image_direct,local,postprocess_envelope_s,150117.934461,6.826746,21989.676261721175,110449.6225661716,robust_z>=3.5
+IMG_65E2185AA833,feishu_image_2.png,image_direct,local,e2e_task_s,150387.0,95.5,1574.7329842931938,3495.57299137931,robust_z>=3.5
+IMG_288AA489B664,feishu_image_3.png,image_direct,local,e2e_task_s,150231.0,95.5,1573.0994764397906,3491.944646551724,robust_z>=3.5
+VID_B284DA228D08,1校色 creamy.mp4,video_direct,cluster,prepare_or_extract_s,28.452512690909092,0.03014589175257732,943.8272028717328,2928.249947087571,robust_z>=3.5
+VID_AF9BE191FC9A,valentina.mp4,video_direct,cluster,prepare_or_extract_s,15.188634084745763,0.03014589175257732,503.8376110883239,1561.7222366709148,robust_z>=3.5
+VID_0E6A798184FD,juria.mp4,video_direct,cluster,prepare_or_extract_s,15.17794466101695,0.03014589175257732,503.48302135462,1560.62094539952,robust_z>=3.5
+VID_8742D1526B59,2校色 打招呼.mp4,video_direct,local,handoff_s,16.542563703703703,0.0344982,479.51961852223315,383.8870310297274,robust_z>=3.5
+VID_58BFF279115F,newtashaback(1).mp4,video_direct,cluster,prepare_or_extract_s,13.99854621875,0.03014589175257732,464.35999749628223,1439.1119433319707,robust_z>=3.5
+VID_BD18EE2C8C8F,7.mp4,video_direct,cluster,postprocess_envelope_s,823.0500726315789,3.8639157902542376,213.0093193820417,1432.4166897676116,robust_z>=3.5
+IMG_D48264D8B767,valentina_third_wink.zip,sequence_zip,cluster,delivery_after_post_s,253.437052,1.8597344375,136.27593643998432,390.96440822865225,robust_z>=3.5
+VID_9D9B5590CA0B,tasha_back_-2_2.mp4,video_direct,local,matting_combined_s,2384.2682425909093,61.67061037037037,38.661336871354045,53.807576149268506,robust_z>=3.5
+VID_063EA11B95CE,7月14日待机.mp4,video_direct,local,delivery_after_post_s,38.16719960824742,1.084374984375,35.19741801333218,86.27602981030567,robust_z>=3.5
+VID_1B3CF9FFE74C,tasha_walk_-2.mp4,video_direct,local,prepare_or_extract_s,1955.6717129200001,112.70934827118643,17.351459687394517,11.031669439153127,robust_z>=3.5
+VID_BD18EE2C8C8F,7.mp4,video_direct,cluster,e2e_task_s,851.4152046783626,51.13109110169492,16.65161423966052,21.61914384714935,robust_z>=3.5
+VID_956323C76587,tasha_walk_back_-2.mp4,video_direct,local,prepare_or_extract_s,1698.93605492,112.70934827118643,15.073603751414153,9.494892038471283,robust_z>=3.5
+VID_64D6A7989314,tasha_walk_-1.mp4,video_direct,local,prepare_or_extract_s,1592.7128057666666,112.70934827118643,14.131150877871198,8.859057149007507,robust_z>=3.5
+VID_3BAFF77C7F7D,tasha_walk_back_-1.mp4,video_direct,local,prepare_or_extract_s,1497.1678576896552,112.70934827118643,13.283439933370625,8.287140812578418,robust_z>=3.5
+IMG_00067DFF9FB6,微笑转头看抠图.zip,sequence_zip,local,handoff_s,1.2443505,0.09952025,12.503490495652894,7.811433053239521,robust_z>=3.5
+IMG_D5E1F4494021,valentina_first_waitou_2.zip,sequence_zip,local,handoff_s,1.2096323333333332,0.09952025,12.154635195684628,7.574543230798266,robust_z>=3.5
+VID_D9336E64274E,莉莉丝飞书20260721-200459.mp4,video_direct,local,matting_combined_s,746.4364208557691,61.67061037037037,12.103600343388111,15.863956796030196,robust_z>=3.5
+VID_20C9498F6012,tasha_walk_-3.mp4,video_direct,local,prepare_or_extract_s,1311.5868313684211,112.70934827118643,11.636894822713847,7.176283328006427,robust_z>=3.5
+IMG_84F35E87BD2C,valentina_first_taitou_2.zip,sequence_zip,local,prepare_or_extract_s,0.27455233333333334,0.026298593333333332,10.439810595699797,9.466594723371216,robust_z>=3.5
+VID_8FE7646DADC3,tasha_walk_back_-3.mp4,video_direct,local,prepare_or_extract_s,998.7115360731708,112.70934827118643,8.860946774975597,5.303463296745327,robust_z>=3.5
+VID_1B3CF9FFE74C,tasha_walk_-2.mp4,video_direct,local,e2e_task_s,1993.56,226.91525423728814,8.785482521661189,7.354370249895393,robust_z>=3.5
+IMG_D5E1F4494021,valentina_first_waitou_2.zip,sequence_zip,local,prepare_or_extract_s,0.23043566666666668,0.026298593333333332,8.762281075109469,7.784305449987485,robust_z>=3.5
+VID_956323C76587,tasha_walk_back_-2.mp4,video_direct,local,e2e_task_s,1736.76,226.91525423728814,7.653782491783686,6.285336826677205,robust_z>=3.5
+VID_64D6A7989314,tasha_walk_-1.mp4,video_direct,local,e2e_task_s,1629.7333333333333,226.91525423728814,7.18212329449258,5.839795222929936,robust_z>=3.5
+IMG_0D5AA7A02443,valentina_first_wink.zip,sequence_zip,local,handoff_s,0.683103,0.09952025,6.863959847367747,3.9819157317431277,robust_z>=3.5
+VID_3BAFF77C7F7D,tasha_walk_back_-1.mp4,video_direct,local,e2e_task_s,1533.9655172413793,226.91525423728814,6.760081081359529,5.441123119071246,robust_z>=3.5
+IMG_84F35E87BD2C,valentina_first_taitou_2.zip,sequence_zip,local,handoff_s,0.652374,0.09952025,6.555188516909875,3.772244886399027,robust_z>=3.5
+VID_20C9498F6012,tasha_walk_-3.mp4,video_direct,local,e2e_task_s,1349.078947368421,226.91525423728814,5.945298617772396,4.671458311055837,robust_z>=3.5
+IMG_1C50AD8F55BC,微笑歪头关键帧_2.zip,sequence_zip,local,delivery_after_post_s,9.152197,1.7708579705882352,5.168227577821989,23.00911073863063,robust_z>=3.5
+IMG_00067DFF9FB6,微笑转头看抠图.zip,sequence_zip,local,prepare_or_extract_s,0.12789775,0.026298593333333332,4.863292434652399,3.8742539806233425,robust_z>=3.5
+IMG_C29C18CC8C18,兴奋嘟嘴抠图.zip,sequence_zip,local,prepare_or_extract_s,0.125523625,0.026298593333333332,4.773016693668533,3.783722094990426,robust_z>=3.5
+IMG_733F49B42E26,feishu_image.png,image_direct,local,matting_combined_s,355.28004,77.5635005,4.5805054917551065,7.1258684430159125,robust_z>=3.5
+IMG_733F49B42E26,feishu_image.png,image_direct,local,e2e_task_s,386.0,95.5,4.041884816753926,6.756629310344827,robust_z>=3.5
+IMG_D48264D8B767,valentina_third_wink.zip,sequence_zip,cluster,prepare_or_extract_s,0.240336,0.06074575,3.9564249350777625,5.2540818653102574,robust_z>=3.5
+IMG_733F49B42E26,feishu_image.png,image_direct,local,postprocess_envelope_s,20.321137,6.826746,2.976694460288987,9.928981375183128,robust_z>=3.5
+IMG_E39398A6ACB9,20260725-183728.png,image_direct,local,postprocess_envelope_s,19.514721,6.826746,2.8585684892919705,9.335631927649729,robust_z>=3.5
+IMG_AB1F7BCD2A73,关键帧,image_direct,local,delivery_after_post_s,21.061873863636364,7.8273035,2.69082115745689,10.64637947877094,robust_z>=3.5
+IMG_D04435517DC1,正常歪头抠图.zip,sequence_zip,cluster,matting_combined_s,246.4195596666667,92.7809465,2.65592849569245,2.6479621112882232,p95_and_2x_median
+VID_9D9B5590CA0B,tasha_back_-2_2.mp4,video_direct,local,delivery_after_post_s,2.8579816363636366,1.084374984375,2.6356026997532487,4.12643162787066,robust_z>=3.5
+IMG_00067DFF9FB6,微笑转头看抠图.zip,sequence_zip,local,e2e_task_s,313.5,128.63809523809525,2.4370696675797734,1.3147638854407548,p95_and_2x_median
+IMG_8AEEF8DECC28,0000.png,image_direct,local,delivery_after_post_s,19.062766,7.8273035,2.435419298612862,9.038222934925269,robust_z>=3.5
+IMG_00067DFF9FB6,微笑转头看抠图.zip,sequence_zip,local,matting_combined_s,301.31099975,125.23902921918767,2.405887378946855,1.2370693582242576,p95_and_2x_median
+IMG_379D240BC5B6,兴奋张嘴关键帧.zip,sequence_zip,local,matting_combined_s,287.7557112631579,125.23902921918767,2.2976520423161446,1.141830848776055,p95_and_2x_median
+IMG_F530BAE4B8AB,ChatGPT Image 2026年7月22日 11_35_12 (3).png,image_direct,local,postprocess_envelope_s,15.452345,6.826746,2.26350079525443,6.346593323166506,robust_z>=3.5
+IMG_D48264D8B767,valentina_third_wink.zip,sequence_zip,cluster,e2e_task_s,356.1525,158.1313,2.252258091851518,1.4910539963735423,p95_and_2x_median
+IMG_A39115A7EBB9,feishu_image_2.png,image_direct,local,matting_combined_s,170.099017,77.5635005,2.1930291426184407,2.374348744488545,p95_and_2x_median
+IMG_6BEA579D1585,susan_2.png,image_direct,local,handoff_s,4.95877,2.266825,2.1875398409669917,1.3412111507036917,p95_and_2x_median
+VID_49BB45CC93DB,2-3.mp4,video_direct,cluster,handoff_s,0.14504165476190475,0.06685578865979382,2.1694704029290865,6.651457950835374,robust_z>=3.5
+VID_4C13B10646C0,valentina_back(3)-1.mp4,video_direct,cluster,matting_combined_s,92.1015174074074,42.82484487912578,2.1506561825820105,1.7560271230453899,p95_and_2x_median
+IMG_B1476C5E1856,change_color_1.png,image_direct,cluster,handoff_s,4.57525,2.13442,2.1435565633755305,1.650143415572895,p95_and_2x_median
+IMG_AC8F368427A7,正常睁眼抠图.zip,sequence_zip,cluster,postprocess_envelope_s,8.97625525,4.240800125,2.1166419037492363,3.6625136161858967,robust_z>=3.5
+IMG_7000ACA5552B,兴奋捂手抠图.zip,sequence_zip,cluster,postprocess_envelope_s,8.9473185,4.240800125,2.109818486198993,3.6401332455381725,robust_z>=3.5
+IMG_3AEEA2FF77A3,ChatGPT Image 2026年7月22日 11_35_12 (1).png,image_direct,local,postprocess_envelope_s,14.198308,6.826746,2.079806103815786,5.423890696809339,robust_z>=3.5
+VID_B284DA228D08,1校色 creamy.mp4,video_direct,cluster,handoff_s,0.13879,0.06685578865979382,2.075960852189699,6.119614782178238,robust_z>=3.5
+IMG_F362A2FC9533,兴奋张嘴关键帧.zip,sequence_zip,local,e2e_task_s,264.10526315789474,128.63809523809525,2.0530874829036017,0.9634615648545133,p95_and_2x_median
+IMG_E70AE9083B5B,danny.png,image_direct,cluster,matting_combined_s,172.230141,84.713301,2.033094436964509,2.061967208109919,p95_and_2x_median
+IMG_9D3086DE41FD,img_v3_02141_a76386b2-5ff2-4d50-8b53-603b3ede013g.png,image_direct,local,postprocess_envelope_s,12.13848,6.826746,1.7780769930505689,3.9082984890482986,robust_z>=3.5
+VID_DA8D68EEDA48,循环走路-1.mp4,video_direct,cluster,handoff_s,0.11245266666666666,0.06685578865979382,1.6820183999159701,3.879035072093376,robust_z>=3.5
+IMG_E6861A196F65,正常到眨眼微笑关键帧.zip,sequence_zip,local,delivery_after_post_s,2.943694987179487,1.7708579705882352,1.662298747878501,3.6559676619086074,robust_z>=3.5
+VID_27A2F010EF51,tasha_back_-1_2.mp4,video_direct,local,postprocess_envelope_s,5.731867714285714,3.519663268292683,1.628527298597552,7.330061786433614,robust_z>=3.5
+VID_9D9B5590CA0B,tasha_back_-2_2.mp4,video_direct,local,postprocess_envelope_s,5.6845087272727275,3.519663268292683,1.6150717537334662,7.17313944520205,robust_z>=3.5
+IMG_F5BF4E2B4CE6,tasha_2.png,image_direct,cluster,delivery_after_post_s,9.959694,7.945562,1.253491445916601,4.804107827310814,robust_z>=3.5
