@@ -29,6 +29,7 @@ function videoTask(overrides = {}) {
           backend_handshake: { checked_at: "2026-07-28T09:29:25Z", capacity: { queue_depth: 9 } },
           updated_at: "2026-07-28T10:23:00Z",
         },
+        cherry_run_id: "CHERRY_SAMPLE",
         cherry_runs: {
           CHERRY_SAMPLE: {
             options: {
@@ -49,6 +50,7 @@ test("parses Feishu epoch milliseconds and ISO timestamps", () => {
   assert.equal(parseTimestamp("1785234702000"), 1785234702000);
   assert.equal(parseTimestamp("1785234702"), 1785234702000);
   assert.equal(parseTimestamp("2026-07-28T10:31:42Z"), Date.parse("2026-07-28T10:31:42Z"));
+  assert.equal(parseTimestamp("2026-07-29T18:09:04"), Date.parse("2026-07-29T18:09:04+08:00"));
 });
 
 test("builds a non-overlapping direct video critical path", () => {
@@ -99,6 +101,73 @@ test("marks a terminal task without a delivery receipt as not delivered", () => 
   assert.equal(result.endMs, Date.parse("2026-07-28T10:31:42Z"));
 });
 
+test("does not label canceled tail time as Feishu delivery", () => {
+  const task = videoTask({
+    status: "CANCELED",
+    stage: "canceled",
+    updated_at: "2026-07-28T10:00:00Z",
+    delivery: {},
+    children: {
+      comfyui: {
+        status: "CANCELED",
+        backend: "gpu_control",
+        backend_handshake: { checked_at: "2026-07-28T09:29:25Z" },
+        updated_at: "2026-07-28T09:40:00Z",
+      },
+    },
+  });
+  task.status = "CANCELED";
+  const result = buildTaskPerformance(task);
+  assert.equal(result.segments.some((item) => item.key === "delivery"), false);
+  assert.equal(result.segments.at(-1).key, "other");
+  assert.equal(result.segments.at(-1).baselineEligible, false);
+  assert.equal(result.throughput, null);
+});
+
+test("uses only the declared Cherry generation and ignores historical attempts", () => {
+  const task = videoTask();
+  task.raw.children.cherry_runs.CHERRY_OLD = {
+    options: {
+      html_attempts: [
+        { started_at: "2026-07-20T00:00:00Z", finished_at: "2026-07-21T00:00:00Z", input_dir: "old" },
+      ],
+    },
+  };
+  const result = buildTaskPerformance(task);
+  const cherry = result.segments.find((item) => item.key === "postprocess");
+  assert.equal(cherry.durationMs, 6 * 60 * 1000 + 38 * 1000);
+});
+
+test("keeps an active Cherry stage live after an earlier attempt finished", () => {
+  const task = videoTask({
+    status: "RUNNING",
+    stage: "postprocess",
+    delivery: {},
+  });
+  task.status = "RUNNING";
+  task.raw.children.cherry_runs.CHERRY_SAMPLE.options.html_attempts.push({
+    started_at: "2026-07-28T10:30:00Z",
+    input_dir: "retry",
+  });
+  const now = Date.parse("2026-07-28T10:35:00Z");
+  const result = buildTaskPerformance(task, now);
+  const cherry = result.segments.find((item) => item.key === "postprocess");
+  assert.equal(cherry.endMs, now);
+});
+
+test("does not mislabel an old lifecycle-only task as delivery", () => {
+  const task = videoTask({
+    created_at: "2026-07-28T09:00:00Z",
+    updated_at: "2026-07-28T10:00:00Z",
+    delivery: {},
+    children: {},
+  });
+  const result = buildTaskPerformance(task);
+  assert.deepEqual(result.segments.map((item) => item.key), ["other"]);
+  assert.equal(result.bottleneck, null);
+  assert.equal(summarizePerformance([result]).stages.length, 0);
+});
+
 test("summarizes successful records without counting failed totals", () => {
   const good = buildTaskPerformance(videoTask());
   const failedTask = videoTask({ status: "FAILED", delivery: {}, updated_at: "2026-07-28T09:39:23Z" });
@@ -110,6 +179,20 @@ test("summarizes successful records without counting failed totals", () => {
   assert.equal(summary.successfulCount, 1);
   assert.equal(summary.p50Ms, good.totalMs);
   assert.equal(summary.dominant.key, "matting");
+});
+
+test("keeps image throughput out of the video frames-per-minute KPI", () => {
+  const video = buildTaskPerformance(videoTask());
+  const image = {
+    ...video,
+    key: "DIRECT_IMAGE:IMG_SAMPLE",
+    module: "DIRECT_IMAGE",
+    category: "image",
+    throughput: 500,
+    throughputUnit: "张/分",
+  };
+  const summary = summarizePerformance([video, image]);
+  assert.equal(summary.averageThroughput, video.throughput);
 });
 
 test("formats missing, short and hour durations clearly", () => {

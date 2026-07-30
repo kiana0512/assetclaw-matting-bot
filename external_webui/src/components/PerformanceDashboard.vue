@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref } from "vue";
-import { formatDurationMs, formatTimestamp } from "../domain/task-performance.js";
+import { formatDurationMs, formatTimestamp, summarizePerformance } from "../domain/task-performance.js";
 
 const props = defineProps({
   records: { type: Array, default: () => [] },
@@ -24,20 +24,24 @@ const visibleRecords = computed(() => props.records.filter((record) => {
   return true;
 }));
 
-const queueDepth = computed(() => Math.max(0, ...props.records.map((record) => Number(
+const activeSummary = computed(() => filter.value === "all"
+  ? props.summary
+  : summarizePerformance(visibleRecords.value));
+
+const queueDepth = computed(() => Math.max(0, ...visibleRecords.value.map((record) => Number(
   record.source?.raw?.children?.comfyui?.backend_handshake?.capacity?.queue_depth || 0
 ))));
 
-const lowCoverage = computed(() => props.records.filter((record) => record.totalMs > 0 && record.measuredCoverage < 0.75).length);
-const activeCount = computed(() => props.records.filter((record) => record.active).length);
+const lowCoverage = computed(() => visibleRecords.value.filter((record) => record.totalMs > 0 && record.measuredCoverage < 0.75).length);
+const activeCount = computed(() => visibleRecords.value.filter((record) => record.active).length);
 
 const insights = computed(() => {
   const result = [];
-  if (props.summary.dominant) {
+  if (activeSummary.value.dominant) {
     result.push({
       tone: "hot",
-      title: `当前关键瓶颈：${props.summary.dominant.label}`,
-      text: `在 ${props.summary.dominant.sampleCount} 个可比较样本中累计占比 ${Math.round(props.summary.dominant.share * 100)}%，中位耗时 ${formatDurationMs(props.summary.dominant.p50Ms)}。`,
+      title: `当前关键瓶颈：${activeSummary.value.dominant.label}`,
+      text: `在 ${activeSummary.value.dominant.sampleCount} 个可比较样本中累计占比 ${Math.round(activeSummary.value.dominant.share * 100)}%，中位耗时 ${formatDurationMs(activeSummary.value.dominant.p50Ms)}。`,
     });
   }
   if (queueDepth.value > 0) {
@@ -64,11 +68,19 @@ const insights = computed(() => {
   if (!result.length) {
     result.push({ tone: "muted", title: "等待更多完成样本", text: "有任务完成并获得飞书回执后，会自动生成阶段基线与瓶颈结论。" });
   }
+  result.push({
+    tone: "muted",
+    title: "飞书入口等待暂未计入",
+    text: "现有父任务从动画管家 created_at 开始计时；飞书消息抵达至附件落盘没有独立时间点，因此不伪造这段耗时。",
+  });
   return result;
 });
 
 function recordMeta(record) {
-  if (record.throughput) return `${record.frames} 帧 · ${record.throughput.toFixed(1)} 帧/分`;
+  if (record.throughput) {
+    const volumeUnit = record.module === "DIRECT_VIDEO" ? "帧" : record.module === "DIRECT_IMAGE" ? "张" : "个";
+    return `${record.frames} ${volumeUnit} · ${record.throughput.toFixed(1)} ${record.throughputUnit}`;
+  }
   if (record.frames) return `${record.frames} 个处理单元`;
   return record.backend || "暂无吞吐数据";
 }
@@ -80,35 +92,35 @@ function recordMeta(record) {
       <div>
         <p class="section-kicker">PERFORMANCE</p>
         <h2>任务耗时分析</h2>
-        <p>从飞书任务创建到 ZIP / 文件回传，按真实时间点拆解关键路径。</p>
+        <p>从动画管家父任务创建到 ZIP / 文件回传，按真实时间点拆解关键路径。</p>
       </div>
       <div class="coverage-note">
-        <b>{{ summary.successfulCount }}</b>
+        <b>{{ activeSummary.successfulCount }}</b>
         <span>成功样本</span>
-        <small>最近加载 {{ summary.sampleCount }} 个父任务</small>
+        <small>当前筛选 {{ activeSummary.sampleCount }} 个父任务</small>
       </div>
     </section>
 
     <section class="performance-kpis">
       <article>
         <span>端到端中位数</span>
-        <b>{{ formatDurationMs(summary.p50Ms) }}</b>
+        <b>{{ formatDurationMs(activeSummary.p50Ms) }}</b>
         <small>比平均值更不受异常任务影响</small>
       </article>
       <article>
         <span>P90 完成耗时</span>
-        <b>{{ formatDurationMs(summary.p90Ms) }}</b>
+        <b>{{ formatDurationMs(activeSummary.p90Ms) }}</b>
         <small>约 90% 的成功任务不超过此值</small>
       </article>
       <article>
         <span>平均抠图吞吐</span>
-        <b>{{ summary.averageThroughput ? `${summary.averageThroughput.toFixed(1)} 帧/分` : "暂无数据" }}</b>
-        <small>抠图耗时包含本机 / 集群排队</small>
+        <b>{{ activeSummary.averageThroughput ? `${activeSummary.averageThroughput.toFixed(1)} 帧/分` : "暂无视频样本" }}</b>
+        <small>仅统计视频；抠图耗时包含本机 / 集群排队</small>
       </article>
       <article class="primary-kpi">
         <span>累计最慢步骤</span>
-        <b>{{ summary.dominant?.label || "等待样本" }}</b>
-        <small v-if="summary.dominant">占已分析阶段 {{ Math.round(summary.dominant.share * 100) }}%</small>
+        <b>{{ activeSummary.dominant?.label || "等待样本" }}</b>
+        <small v-if="activeSummary.dominant">占已分析阶段 {{ Math.round(activeSummary.dominant.share * 100) }}%</small>
         <small v-else>完成任务后自动定位</small>
       </article>
     </section>
@@ -117,10 +129,10 @@ function recordMeta(record) {
       <article class="analysis-panel stage-panel">
         <header>
           <div><h3>阶段基线</h3><p>成功任务的中位耗时与累计占比</p></div>
-          <span>{{ summary.stages.length }} 个阶段</span>
+          <span>{{ activeSummary.stages.length }} 个阶段</span>
         </header>
-        <div v-if="!summary.stages.length" class="analysis-empty">暂无可比较的完成任务。</div>
-        <div v-for="stage in summary.stages" :key="stage.key" class="stage-benchmark">
+        <div v-if="!activeSummary.stages.length" class="analysis-empty">暂无可比较的完成任务。</div>
+        <div v-for="stage in activeSummary.stages" :key="stage.key" class="stage-benchmark">
           <div class="stage-benchmark-copy">
             <b>{{ stage.label }}</b>
             <span>中位 {{ formatDurationMs(stage.p50Ms) }} · 平均 {{ formatDurationMs(stage.averageMs) }}</span>
@@ -180,6 +192,7 @@ function recordMeta(record) {
 .performance-kpis small { color: var(--muted); }
 .performance-kpis b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 21px; }
 .performance-kpis .primary-kpi { border-color: color-mix(in srgb, var(--teal) 44%, var(--line)); background: linear-gradient(135deg, color-mix(in srgb, var(--teal) 12%, var(--surface-2)), color-mix(in srgb, var(--blue) 5%, var(--surface-2))); }
+.performance-kpis .primary-kpi b { overflow: visible; white-space: normal; line-height: 1.25; }
 .analysis-columns { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(330px, .75fr); gap: 16px; }
 .analysis-panel { padding: 18px; }
 .analysis-panel > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }

@@ -21,13 +21,15 @@ export function buildTaskPerformance(task, nowMs = Date.now()) {
       share: totalMs > 0 ? Math.min(1, item.durationMs / totalMs) : 0,
     }));
   const bottleneck = normalized
-    .filter((item) => item.durationMs > 0)
+    .filter((item) => item.durationMs > 0 && item.baselineEligible !== false && item.key !== "other")
     .sort((a, b) => b.durationMs - a.durationMs)[0] || null;
   const frames = taskVolume(task);
   const matting = normalized.find((item) => item.key === "matting");
-  const throughput = matting?.durationMs > 0 && frames > 0
+  const throughputEligible = DONE.has(status) || !isTerminal;
+  const throughput = throughputEligible && matting?.durationMs > 0 && frames > 0
     ? frames / (matting.durationMs / 60000)
     : null;
+  const throughputUnit = task?.module === "DIRECT_VIDEO" ? "帧/分" : task?.module === "DIRECT_IMAGE" ? "张/分" : "个/分";
   const measuredMs = normalized.filter((item) => item.confidence === "measured").reduce((sum, item) => sum + item.durationMs, 0);
   const coveredMs = normalized.reduce((sum, item) => sum + item.durationMs, 0);
   const coverage = totalMs > 0 ? Math.min(1, coveredMs / totalMs) : 0;
@@ -50,6 +52,7 @@ export function buildTaskPerformance(task, nowMs = Date.now()) {
     delivered: Boolean(delivery),
     frames,
     throughput,
+    throughputUnit,
     backend,
     segments: normalized,
     bottleneck,
@@ -64,7 +67,10 @@ export function summarizePerformance(records) {
   const successful = records.filter((item) => item.successful && item.totalMs > 0);
   const completed = records.filter((item) => TERMINAL.has(item.status) && item.totalMs > 0);
   const totals = successful.map((item) => item.totalMs);
-  const throughputs = successful.map((item) => item.throughput).filter((value) => Number.isFinite(value));
+  const throughputs = successful
+    .filter((item) => item.module === "DIRECT_VIDEO")
+    .map((item) => item.throughput)
+    .filter((value) => Number.isFinite(value));
   const stages = stageBenchmarks(successful);
   const dominant = [...stages].sort((a, b) => b.totalMs - a.totalMs)[0] || null;
   return {
@@ -86,7 +92,7 @@ export function stageBenchmarks(records) {
   const buckets = new Map();
   for (const record of records) {
     for (const segment of record.segments || []) {
-      if (!(segment.durationMs >= 0)) continue;
+      if (!(segment.durationMs >= 0) || segment.baselineEligible === false || segment.key === "other") continue;
       const current = buckets.get(segment.key) || {
         key: segment.key,
         label: segment.label,
@@ -146,6 +152,10 @@ export function parseTimestamp(value) {
     const numeric = Number(text);
     return text.length >= 13 ? numeric : numeric * 1000;
   }
+  const localIso = text.replace(" ", "T");
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(localIso)) {
+    return Date.parse(`${localIso}+08:00`);
+  }
   const parsed = Date.parse(text);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -161,7 +171,7 @@ function buildDirectSegments(task, startMs, endMs, nowMs) {
   const postStart = minTime(attempts.map((item) => parseTimestamp(item.started_at)));
   const postFinished = maxTime(attempts.map((item) => parseTimestamp(item.finished_at)));
   const postActive = (stage.includes("post") || stage.includes("cherry") || stage.includes("smooth")) && !TERMINAL.has(status);
-  const postEnd = postFinished || (postActive ? nowMs : null);
+  const postEnd = postActive ? nowMs : postFinished;
   const handshake = parseTimestamp(
     comfy.backend_handshake?.checked_at
       || comfy.started_at
@@ -169,6 +179,18 @@ function buildDirectSegments(task, startMs, endMs, nowMs) {
   );
   const mattingStart = clampTime(handshake || startMs, startMs, endMs);
   const comfyUpdated = parseTimestamp(comfy.finished_at || comfy.completed_at || comfy.updated_at);
+  if (!handshake && !comfyUpdated && !postStart) {
+    return [{
+      key: "other",
+      label: "任务总生命周期",
+      startMs,
+      endMs,
+      durationMs: endMs - startMs,
+      confidence: "inferred",
+      baselineEligible: false,
+      note: "该旧任务只有起止时间，不能把中间时段误判为打包、回传或 GPU 计算",
+    }];
+  }
   let mattingEnd = null;
   if (["DONE", "FAILED", "CANCELED"].includes(comfyStatus) && comfyUpdated) mattingEnd = comfyUpdated;
   else if (postStart) mattingEnd = postStart;
@@ -179,11 +201,11 @@ function buildDirectSegments(task, startMs, endMs, nowMs) {
   const segments = [];
   addSegment(segments, {
     key: "prepare",
-    label: task.module === "DIRECT_VIDEO" ? "飞书接收与抽帧" : "飞书接收与准备",
+    label: task.module === "DIRECT_VIDEO" ? "任务创建与抽帧" : "任务创建与准备",
     startMs,
     endMs: mattingStart,
     confidence: handshake ? "measured" : "inferred",
-    note: task.module === "DIRECT_VIDEO" ? "视频下载/落盘和抽帧合计" : "附件落盘和任务准备合计",
+    note: task.module === "DIRECT_VIDEO" ? "父任务创建后到抠图握手，包含抽帧准备" : "父任务创建后到抠图握手的准备时间",
   });
   addSegment(segments, {
     key: "matting",
@@ -226,14 +248,27 @@ function buildDirectSegments(task, startMs, endMs, nowMs) {
   }
 
   const lastStageEnd = segments.length ? segments.at(-1).endMs : mattingEnd;
-  if (endMs > lastStageEnd && (TERMINAL.has(status) || stage.includes("send") || stage.includes("zip") || stage.includes("delivery"))) {
+  const hasDeliveryReceipt = Boolean(deliveryTimestamp(raw));
+  const isDeliveryStage = stage.includes("send") || stage.includes("zip") || stage.includes("delivery");
+  const reachedDelivery = hasDeliveryReceipt || isDeliveryStage || (DONE.has(status) && Boolean(postStart));
+  if (endMs > lastStageEnd && reachedDelivery) {
     addSegment(segments, {
       key: "delivery",
       label: "打包与飞书回传",
       startMs: lastStageEnd,
       endMs,
-      confidence: deliveryTimestamp(raw) ? "measured" : "inferred",
-      note: deliveryTimestamp(raw) ? "结束时间来自飞书文件回执" : "结束时间来自任务最后更新时间",
+      confidence: hasDeliveryReceipt ? "measured" : "inferred",
+      note: hasDeliveryReceipt ? "结束时间来自飞书文件回执" : "任务已进入打包或发送阶段，结束时间来自最后更新时间",
+    });
+  } else if (endMs > lastStageEnd) {
+    addSegment(segments, {
+      key: "other",
+      label: "任务等待或状态收尾",
+      startMs: lastStageEnd,
+      endMs,
+      confidence: "inferred",
+      baselineEligible: false,
+      note: "没有打包或飞书回传证据，该时段不计入阶段速度基线",
     });
   }
 
@@ -272,6 +307,7 @@ function buildGenericSegments(task, startMs, endMs) {
     endMs,
     durationMs: endMs - startMs,
     confidence: "inferred",
+    baselineEligible: false,
     note: "该类旧任务只有起止时间，暂无逐阶段埋点",
   }];
 }
@@ -284,8 +320,16 @@ function addSegment(target, segment) {
 function cherryAttempts(raw) {
   const children = raw.children || {};
   const runs = [];
-  if (children.cherry && typeof children.cherry === "object") runs.push(children.cherry);
-  if (children.cherry_runs && typeof children.cherry_runs === "object") runs.push(...Object.values(children.cherry_runs));
+  const declaredIds = [...new Set([
+    ...(Array.isArray(children.cherry_run_ids) ? children.cherry_run_ids : []),
+    children.cherry_run_id,
+  ].filter(Boolean))];
+  if (declaredIds.length && children.cherry_runs && typeof children.cherry_runs === "object") {
+    for (const id of declaredIds) {
+      if (children.cherry_runs[id] && typeof children.cherry_runs[id] === "object") runs.push(children.cherry_runs[id]);
+    }
+  }
+  if (!runs.length && children.cherry && typeof children.cherry === "object") runs.push(children.cherry);
   const seen = new Set();
   const result = [];
   for (const run of runs) {

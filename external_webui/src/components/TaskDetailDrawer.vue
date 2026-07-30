@@ -43,7 +43,7 @@ function statusClass(status) {
         <section class="detail-summary">
           <article><span>端到端耗时</span><b>{{ formatDurationMs(performance.totalMs) }}</b><small>{{ performance.active ? "仍在持续计时" : performance.delivered ? "结束于飞书回执" : "结束于任务最后状态" }}</small></article>
           <article><span>最慢步骤</span><b>{{ performance.bottleneck?.label || "暂无拆分" }}</b><small>{{ performance.bottleneck ? `${Math.round(performance.bottleneck.share * 100)}% · ${formatDurationMs(performance.bottleneck.durationMs)}` : "旧任务缺少阶段时间点" }}</small></article>
-          <article><span>抠图吞吐</span><b>{{ performance.throughput ? `${performance.throughput.toFixed(1)} 帧/分` : "暂无数据" }}</b><small>{{ performance.frames ? `${performance.frames} 个处理单元 · ${performance.backend}` : performance.backend }}</small></article>
+          <article><span>抠图吞吐</span><b>{{ performance.throughput ? `${performance.throughput.toFixed(1)} ${performance.throughputUnit}` : "暂无数据" }}</b><small>{{ performance.frames ? `${performance.frames} 个处理单元 · ${performance.backend}` : performance.backend }}</small></article>
           <article><span>实测覆盖率</span><b>{{ Math.round(performance.measuredCoverage * 100) }}%</b><small>推导区间会明确标识，不伪造时间点</small></article>
         </section>
 
