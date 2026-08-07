@@ -21,8 +21,13 @@ from requests.adapters import HTTPAdapter
 from assetclaw_matting.comfyui.output_resolver import inspect_local_png
 
 
-TERMINAL_BATCH_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
+TERMINAL_BATCH_STATUSES = {"SUCCEEDED", "PARTIAL_SUCCESS", "FAILED", "CANCELLED"}
 RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
+APPROVED_WORKFLOW_KEY = "imageclip-rgba"
+APPROVED_WORKFLOW_VERSION = "2026.07.30-691770c-r1"
+APPROVED_PIPELINE_COMMIT = "691770cd6a59fd7c51391456fe900dc57a313233"
+APPROVED_PIPELINE_SHA256 = "00e7104762f0a1fdf3a4c20e043bec2b9f088132452d5a5ce4302ba268edac0b"
+APPROVED_OUTPUT_NODE = "SaveImage #25"
 V2_ALLOWED_INPUT_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 V2_MAX_FRAMES = 5000
 V2_MAX_MANIFEST_BYTES = 4 * 1024 * 1024
@@ -33,6 +38,10 @@ V2_MAX_ARCHIVE_BYTES = 100 * 1024 * 1024 * 1024
 
 class GpuControlError(RuntimeError):
     pass
+
+
+class _IncompleteArtifactDownload(GpuControlError):
+    """A transport interruption that can be retried from the persisted .part file."""
 
 
 def _normalize_scheduler_capacity(payload: dict[str, Any]) -> dict[str, Any]:
@@ -262,52 +271,126 @@ class GpuControlBatchClient:
             raise GpuControlError("result artifact is missing download_url, sha256, or size_bytes")
         destination.parent.mkdir(parents=True, exist_ok=True)
         partial = destination.with_suffix(destination.suffix + ".part")
-        if partial.exists():
-            partial.unlink()
-        digest = hashlib.sha256()
-        response = self.session.get(
-            self._url(raw_url),
-            headers=self._headers(request_id=request_id),
-            timeout=(self.connect_timeout, self.download_timeout),
-            verify=self.verify,
-            stream=True,
-        )
-        if response.status_code != 200:
-            _raise_response(response, "download artifact")
-        try:
-            response_header_sha = str(response.headers.get("X-Artifact-SHA256") or "").lower()
-            if response_header_sha != expected_sha:
-                raise GpuControlError(
-                    f"artifact response header sha256 mismatch: expected {expected_sha}, got {response_header_sha or 'missing'}"
-                )
-            with partial.open("wb") as handle:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if not chunk:
-                        continue
-                    handle.write(chunk)
-                    digest.update(chunk)
-                handle.flush()
-                os.fsync(handle.fileno())
-            actual_sha = digest.hexdigest()
-            if actual_sha != expected_sha:
-                raise GpuControlError(f"result archive sha256 mismatch: expected {expected_sha}, got {actual_sha}")
-            actual_size = partial.stat().st_size
-            if actual_size != expected_size:
-                raise GpuControlError(
-                    f"result archive size mismatch: expected {expected_size}, got {actual_size}"
-                )
-            os.replace(partial, destination)
-            return {
-                "path": str(destination),
-                "sha256": actual_sha,
-                "header_sha256": response_header_sha,
-                "size_bytes": destination.stat().st_size,
-                "request_id": response.headers.get("X-Request-ID") or "",
-            }
-        finally:
-            response.close()
-            if partial.exists():
+        if destination.is_file() and destination.stat().st_size == expected_size:
+            existing_sha = _sha256_file(destination)
+            if existing_sha == expected_sha:
+                return {
+                    "path": str(destination),
+                    "sha256": existing_sha,
+                    "header_sha256": expected_sha,
+                    "size_bytes": expected_size,
+                    "request_id": "",
+                    "attempts": 0,
+                    "resumed_from_bytes": expected_size,
+                    "cache_hit": True,
+                }
+
+        last_error: Exception | None = None
+        for attempt in range(1, self.retries + 1):
+            response: requests.Response | None = None
+            offset = partial.stat().st_size if partial.is_file() else 0
+            if offset > expected_size:
                 partial.unlink()
+                offset = 0
+            if offset == expected_size:
+                actual_sha = _sha256_file(partial)
+                if actual_sha == expected_sha:
+                    os.replace(partial, destination)
+                    return {
+                        "path": str(destination),
+                        "sha256": actual_sha,
+                        "header_sha256": expected_sha,
+                        "size_bytes": expected_size,
+                        "request_id": "",
+                        "attempts": attempt - 1,
+                        "resumed_from_bytes": expected_size,
+                        "cache_hit": True,
+                    }
+                partial.unlink()
+                offset = 0
+
+            digest = hashlib.sha256()
+            if offset:
+                with partial.open("rb") as existing:
+                    for chunk in iter(lambda: existing.read(1024 * 1024), b""):
+                        digest.update(chunk)
+            headers = self._headers(request_id=request_id)
+            if offset:
+                headers["Range"] = f"bytes={offset}-"
+            try:
+                response = self.session.get(
+                    self._url(raw_url),
+                    headers=headers,
+                    timeout=(self.connect_timeout, self.download_timeout),
+                    verify=self.verify,
+                    stream=True,
+                )
+                if response.status_code not in {200, 206}:
+                    if response.status_code in RETRYABLE_HTTP_STATUSES:
+                        raise _IncompleteArtifactDownload(_response_error_text(response, "download artifact"))
+                    _raise_response(response, "download artifact")
+                response_header_sha = str(response.headers.get("X-Artifact-SHA256") or "").lower()
+                if response_header_sha != expected_sha:
+                    if partial.exists():
+                        partial.unlink()
+                    raise GpuControlError(
+                        f"artifact response header sha256 mismatch: expected {expected_sha}, got {response_header_sha or 'missing'}"
+                    )
+
+                resumed_from = offset if offset and response.status_code == 206 else 0
+                if resumed_from:
+                    content_range = str(response.headers.get("Content-Range") or "")
+                    match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", content_range)
+                    if not match or int(match.group(1)) != offset or int(match.group(3)) != expected_size:
+                        partial.unlink(missing_ok=True)
+                        raise GpuControlError(f"invalid Content-Range for resumed artifact download: {content_range or 'missing'}")
+                    mode = "ab"
+                else:
+                    offset = 0
+                    digest = hashlib.sha256()
+                    mode = "wb"
+
+                with partial.open(mode) as handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+                        handle.write(chunk)
+                        digest.update(chunk)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                actual_size = partial.stat().st_size
+                if actual_size < expected_size:
+                    raise _IncompleteArtifactDownload(
+                        f"result archive download ended early: expected {expected_size}, got {actual_size}"
+                    )
+                if actual_size > expected_size:
+                    partial.unlink(missing_ok=True)
+                    raise GpuControlError(
+                        f"result archive size mismatch: expected {expected_size}, got {actual_size}"
+                    )
+                actual_sha = digest.hexdigest()
+                if actual_sha != expected_sha:
+                    partial.unlink(missing_ok=True)
+                    raise GpuControlError(f"result archive sha256 mismatch: expected {expected_sha}, got {actual_sha}")
+                os.replace(partial, destination)
+                return {
+                    "path": str(destination),
+                    "sha256": actual_sha,
+                    "header_sha256": response_header_sha,
+                    "size_bytes": destination.stat().st_size,
+                    "request_id": response.headers.get("X-Request-ID") or "",
+                    "attempts": attempt,
+                    "resumed_from_bytes": resumed_from,
+                    "cache_hit": False,
+                }
+            except (requests.Timeout, requests.ConnectionError, _IncompleteArtifactDownload) as exc:
+                last_error = exc
+            finally:
+                if response is not None:
+                    response.close()
+            if attempt < self.retries:
+                time.sleep(min(2 ** (attempt - 1), 8))
+        raise GpuControlError(f"download artifact failed after {self.retries} attempts: {last_error}")
 
     def _headers(self, *, idempotency_key: str | None = None, request_id: str | None = None) -> dict[str, str]:
         resolved_request_id = request_id or f"assetclaw-{uuid.uuid4().hex}"
@@ -445,6 +528,8 @@ def verify_and_publish_result(
     preserve_existing: bool = False,
     expected_batch_id: str = "",
     expected_external_batch_id: str = "",
+    allow_partial: bool = False,
+    partial_status: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Verify every mapping/hash/image, then atomically publish one task tree."""
 
@@ -486,16 +571,41 @@ def verify_and_publish_result(
                 raise GpuControlError("result manifest batch_id mismatch")
             if expected_external_batch_id and str(result_manifest.get("external_batch_id") or "") != expected_external_batch_id:
                 raise GpuControlError("result manifest external_batch_id mismatch")
-            if set(result_manifest) != {"schema_version", "batch_id", "external_batch_id", "total", "items"}:
-                raise GpuControlError("result manifest fields do not match GPU Control V2")
+            required_manifest_fields = {"schema_version", "batch_id", "external_batch_id", "total", "items"}
+            workflow_identity_fields = {
+                "workflow_key",
+                "workflow_version",
+                "pipeline_commit",
+                "pipeline_sha256",
+                "output_node",
+            }
+            manifest_fields = set(result_manifest)
+            missing_manifest_fields = required_manifest_fields - manifest_fields
+            unknown_manifest_fields = manifest_fields - required_manifest_fields - workflow_identity_fields
+            if missing_manifest_fields:
+                raise GpuControlError(
+                    f"result manifest is missing required fields: {sorted(missing_manifest_fields)}"
+                )
+            if unknown_manifest_fields:
+                raise GpuControlError(
+                    f"result manifest contains unsupported fields: {sorted(unknown_manifest_fields)}"
+                )
+            if manifest_fields & workflow_identity_fields:
+                validate_workflow_identity(result_manifest)
             result_items = list(result_manifest.get("items") or [])
             if int(result_manifest.get("total") or len(result_items)) != len(expected_frames):
                 raise GpuControlError("result manifest total does not match the submitted frame count")
-            if len(result_items) != len(expected_frames):
+            if not allow_partial and len(result_items) != len(expected_frames):
                 raise GpuControlError("result manifest item count does not match the submitted frame count")
+            if allow_partial and not 0 < len(result_items) < len(expected_frames):
+                raise GpuControlError("partial result manifest must contain a non-empty proper subset of frames")
 
             expected_archive_entries: set[str] = {"manifest.json"}
-            if [int(item.get("ordinal", -1)) for item in result_items] != list(range(len(expected_frames))):
+            result_ordinals = [int(item.get("ordinal", -1)) for item in result_items]
+            if allow_partial:
+                if result_ordinals != sorted(set(result_ordinals)):
+                    raise GpuControlError("partial result manifest ordinals must be unique and sorted")
+            elif result_ordinals != list(range(len(expected_frames))):
                 raise GpuControlError("result manifest ordinal order is not exactly 0..N-1")
             for item in result_items:
                 if set(item) != {
@@ -573,6 +683,15 @@ def verify_and_publish_result(
                 missing = sorted(expected_archive_entries - actual_entries)[:5]
                 raise GpuControlError(f"result zip file set mismatch; extra={extra}, missing={missing}")
 
+        if allow_partial:
+            if not partial_status:
+                raise GpuControlError("partial result publication requires the PARTIAL_SUCCESS status response")
+            validate_partial_failed_items(
+                partial_status,
+                expected_batch,
+                {int(item["ordinal"]) for item in published},
+            )
+
         output_resolved = output_root.resolve()
         _assert_child(output_resolved, parent)
         if output_root.exists():
@@ -616,6 +735,126 @@ def result_artifact(batch_status: dict[str, Any]) -> dict[str, Any]:
     return artifact
 
 
+def validate_partial_failed_items(
+    batch_status: dict[str, Any],
+    expected_batch: dict[str, Any],
+    successful_ordinals: set[int],
+) -> list[dict[str, Any]]:
+    """Validate the 1.5.10 PARTIAL_SUCCESS partition before publishing it.
+
+    A partial archive proves the successful subset.  The status response must
+    independently and exactly identify the complementary failed subset.  This
+    prevents a malformed response from silently dropping, duplicating, or
+    associating a failed frame with another input.
+    """
+
+    if str(batch_status.get("status") or "").upper() != "PARTIAL_SUCCESS":
+        raise GpuControlError("partial failed_items are only valid for PARTIAL_SUCCESS")
+    expected_frames = list(expected_batch.get("frames") or [])
+    expected_by_ordinal = {int(item["ordinal"]): item for item in expected_frames}
+    expected_ordinals = set(expected_by_ordinal)
+    if not successful_ordinals or not successful_ordinals < expected_ordinals:
+        raise GpuControlError("PARTIAL_SUCCESS must contain a non-empty proper successful subset")
+
+    counts = dict(batch_status.get("counts") or {})
+    missing_ordinals = expected_ordinals - successful_ordinals
+    required_counts = {
+        "total": len(expected_frames),
+        "succeeded": len(successful_ordinals),
+        "failed": len(missing_ordinals),
+        "pending": 0,
+        "queued": 0,
+        "running": 0,
+        "cancelled": 0,
+    }
+    for name, expected_value in required_counts.items():
+        try:
+            actual_value = int(counts.get(name))
+        except (TypeError, ValueError):
+            raise GpuControlError(f"PARTIAL_SUCCESS counts.{name} is missing or invalid") from None
+        if actual_value != expected_value:
+            raise GpuControlError(
+                f"PARTIAL_SUCCESS counts.{name} mismatch: expected {expected_value}, got {actual_value}"
+            )
+
+    raw_failed = batch_status.get("failed_items")
+    if not isinstance(raw_failed, list) or len(raw_failed) != len(missing_ordinals):
+        raise GpuControlError("PARTIAL_SUCCESS failed_items count does not match the missing frame count")
+    validated: list[dict[str, Any]] = []
+    observed_ordinals: set[int] = set()
+    for raw_item in raw_failed:
+        if not isinstance(raw_item, dict):
+            raise GpuControlError("PARTIAL_SUCCESS failed_items must contain objects")
+        required = {
+            "ordinal",
+            "input_relative_path",
+            "input_sha256",
+            "code",
+            "message",
+            "node_id",
+            "attempts",
+            "attempted_node_ids",
+        }
+        missing_fields = required - set(raw_item)
+        if missing_fields:
+            raise GpuControlError(
+                f"PARTIAL_SUCCESS failed item is missing fields: {sorted(missing_fields)}"
+            )
+        try:
+            ordinal = int(raw_item.get("ordinal"))
+        except (TypeError, ValueError):
+            raise GpuControlError("PARTIAL_SUCCESS failed item ordinal is invalid") from None
+        if ordinal in observed_ordinals:
+            raise GpuControlError(f"PARTIAL_SUCCESS contains duplicate failed ordinal: {ordinal}")
+        if ordinal not in missing_ordinals:
+            raise GpuControlError(f"PARTIAL_SUCCESS failed ordinal is not in the missing subset: {ordinal}")
+        expected = expected_by_ordinal[ordinal]
+        relative_path = _normalize_relative_path(str(raw_item.get("input_relative_path") or ""))
+        if relative_path != expected["relative_path"]:
+            raise GpuControlError(f"PARTIAL_SUCCESS failed input mapping mismatch at ordinal {ordinal}")
+        input_sha = str(raw_item.get("input_sha256") or "").lower()
+        if input_sha != expected["sha256"]:
+            raise GpuControlError(f"PARTIAL_SUCCESS failed input sha256 mismatch at ordinal {ordinal}")
+        try:
+            attempts = int(raw_item.get("attempts"))
+        except (TypeError, ValueError):
+            raise GpuControlError(f"PARTIAL_SUCCESS attempts is invalid at ordinal {ordinal}") from None
+        attempted_node_ids = raw_item.get("attempted_node_ids")
+        if not 1 <= attempts <= 3:
+            raise GpuControlError(f"PARTIAL_SUCCESS attempts must be 1-3 at ordinal {ordinal}")
+        if (
+            not isinstance(attempted_node_ids, list)
+            or len(attempted_node_ids) != attempts
+            or len(set(map(str, attempted_node_ids))) != len(attempted_node_ids)
+            or any(not str(node_id).strip() for node_id in attempted_node_ids)
+        ):
+            raise GpuControlError(f"PARTIAL_SUCCESS attempted_node_ids mismatch at ordinal {ordinal}")
+        node_id = str(raw_item.get("node_id") or "").strip()
+        if not node_id or node_id != str(attempted_node_ids[-1]):
+            raise GpuControlError(f"PARTIAL_SUCCESS node_id does not match the final attempt at ordinal {ordinal}")
+        code = str(raw_item.get("code") or "").strip()
+        message = str(raw_item.get("message") or "").strip()
+        if not code or not message:
+            raise GpuControlError(f"PARTIAL_SUCCESS error detail is empty at ordinal {ordinal}")
+        observed_ordinals.add(ordinal)
+        validated.append(
+            {
+                **raw_item,
+                "ordinal": ordinal,
+                "input_relative_path": relative_path,
+                "input_sha256": input_sha,
+                "node_id": node_id,
+                "attempts": attempts,
+                "attempted_node_ids": [str(item) for item in attempted_node_ids],
+                "code": code,
+                "message": message,
+            }
+        )
+    if observed_ordinals != missing_ordinals:
+        raise GpuControlError("PARTIAL_SUCCESS successful and failed ordinals do not partition the input batch")
+    return sorted(validated, key=lambda item: int(item["ordinal"]))
+
+
 def compact_remote_state(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "batch_id": payload.get("batch_id") or "",
@@ -626,14 +865,24 @@ def compact_remote_state(payload: dict[str, Any]) -> dict[str, Any]:
         "node_distribution": dict(payload.get("node_distribution") or {}),
         "error": payload.get("error"),
         "artifacts": list(payload.get("artifacts") or []),
+        "failed_items": list(payload.get("failed_items") or []),
         "workflow_key": payload.get("workflow_key") or "",
         "workflow_version": payload.get("workflow_version") or "",
         "pipeline_commit": payload.get("pipeline_commit") or payload.get("imageclip_commit") or "",
         "pipeline_sha256": payload.get("pipeline_sha256") or "",
+        "output_node": payload.get("output_node") or "",
         "created_at": payload.get("created_at") or "",
+        "validated_at": payload.get("validated_at") or "",
+        "queued_at": payload.get("queued_at") or "",
         "started_at": payload.get("started_at") or "",
+        "last_progress_at": payload.get("last_progress_at") or "",
+        "execution_finished_at": payload.get("execution_finished_at") or "",
+        "assembling_at": payload.get("assembling_at") or payload.get("assembling_started_at") or "",
+        "assembling_started_at": payload.get("assembling_at") or payload.get("assembling_started_at") or "",
+        "artifact_ready_at": payload.get("artifact_ready_at") or "",
         "finished_at": payload.get("finished_at") or "",
         "updated_at": payload.get("updated_at") or payload.get("finished_at") or "",
+        "performance": dict(payload.get("performance") or {}),
         "response_meta": dict(payload.get("_response_meta") or {}),
     }
 
@@ -652,14 +901,24 @@ def merge_remote_state(current: dict[str, Any], payload: dict[str, Any]) -> dict
         "node_distribution": ("node_distribution",),
         "error": ("error",),
         "artifacts": ("artifacts",),
+        "failed_items": ("failed_items",),
         "workflow_key": ("workflow_key",),
         "workflow_version": ("workflow_version",),
         "pipeline_commit": ("pipeline_commit", "imageclip_commit"),
         "pipeline_sha256": ("pipeline_sha256",),
+        "output_node": ("output_node",),
         "created_at": ("created_at",),
+        "validated_at": ("validated_at",),
+        "queued_at": ("queued_at",),
         "started_at": ("started_at",),
+        "last_progress_at": ("last_progress_at",),
+        "execution_finished_at": ("execution_finished_at",),
+        "assembling_at": ("assembling_at", "assembling_started_at"),
+        "assembling_started_at": ("assembling_at", "assembling_started_at"),
+        "artifact_ready_at": ("artifact_ready_at",),
         "finished_at": ("finished_at",),
         "updated_at": ("updated_at", "finished_at"),
+        "performance": ("performance",),
         "response_meta": ("_response_meta",),
     }
     for field, source_keys in optional_sources.items():
@@ -669,6 +928,47 @@ def merge_remote_state(current: dict[str, Any], payload: dict[str, Any]) -> dict
     observation["progress"] = max(previous_progress, min(100.0, max(0.0, observed_progress)))
     merged.update(observation)
     return merged
+
+
+def validate_workflow_identity(payload: dict[str, Any]) -> dict[str, Any]:
+    """Fail closed on an observed workflow mismatch without requiring undeployed fields.
+
+    GPU Control currently returns key/version more consistently than commit/SHA. Missing
+    identity remains visible as partial evidence, while any value the server does return
+    must match the jointly approved 2026-07-30 baseline.
+    """
+
+    observed = {
+        "workflow_key": str(payload.get("workflow_key") or ""),
+        "workflow_version": str(payload.get("workflow_version") or ""),
+        "pipeline_commit": str(payload.get("pipeline_commit") or payload.get("imageclip_commit") or ""),
+        "pipeline_sha256": str(payload.get("pipeline_sha256") or "").lower(),
+        "output_node": str(payload.get("output_node") or ""),
+    }
+    approved = {
+        "workflow_key": APPROVED_WORKFLOW_KEY,
+        "workflow_version": APPROVED_WORKFLOW_VERSION,
+        "pipeline_commit": APPROVED_PIPELINE_COMMIT,
+        "pipeline_sha256": APPROVED_PIPELINE_SHA256,
+        "output_node": APPROVED_OUTPUT_NODE,
+    }
+    mismatches = {
+        key: {"expected": approved[key], "actual": actual}
+        for key, actual in observed.items()
+        if actual and actual != approved[key]
+    }
+    if mismatches:
+        detail = ", ".join(f"{key}={item['actual']}" for key, item in mismatches.items())
+        raise GpuControlError(f"GPU Control workflow identity mismatch: {detail}")
+    present = sorted(key for key, value in observed.items() if value)
+    missing = sorted(key for key, value in observed.items() if not value)
+    return {
+        "status": "VERIFIED" if not missing else ("PARTIAL_MATCH" if present else "UNVERIFIED_MISSING"),
+        "approved": approved,
+        "observed": observed,
+        "present_fields": present,
+        "missing_fields": missing,
+    }
 
 
 def _validated_archive_members(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:

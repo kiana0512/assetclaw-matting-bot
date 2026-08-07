@@ -115,12 +115,13 @@ def test_animation_flow_cherry_route_presets() -> None:
     assert temporal["use_smooth"] is True
 
 
-def test_animation_flow_locks_configured_comfyui_workflow(monkeypatch) -> None:
+def test_animation_flow_locks_configured_comfyui_workflow(monkeypatch, tmp_path) -> None:
     workflow = Path.cwd() / "storage/debug/current_animation_workflow.json"
     workflow.parent.mkdir(parents=True, exist_ok=True)
     workflow.write_text('{"1":{"class_type":"LoadImage","inputs":{"image":""}}}', encoding="utf-8")
 
     monkeypatch.setattr(settings, "comfyui_workflow_path", workflow)
+    monkeypatch.setattr(animation_flow_skills, "RUN_DIR", tmp_path)
     monkeypatch.setattr(animation_flow_skills, "_start_worker", lambda _run_id: None)
 
     date_root = str(settings.animation_root / "2026-06-11")
@@ -151,6 +152,40 @@ def test_animation_flow_recovery_closes_orphaned_running_record(monkeypatch, tmp
     assert result["closed"] == ["AFLOW_ORPHANED"]
     assert saved["status"] == "FAILED"
     assert "已自动清除僵死运行状态" in saved["error"]
+    assert saved["stage_timings"]["feishu_download"]["status"] == "failed"
+    assert saved["stage_timings"]["feishu_download"]["finished_at"]
+    assert saved["stage_timings"]["feishu_download"]["duration_seconds"] is not None
+
+
+def test_animation_flow_stage_timing_is_monotonic_and_saved_atomically(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(animation_flow_skills, "RUN_DIR", tmp_path)
+    started_at = animation_flow_skills._now()
+    run = {
+        "id": "AFLOW_TIMING",
+        "status": "RUNNING",
+        "current_stage": "feishu_download",
+        "stages": [],
+        "stage_timings": {
+            "feishu_download": {
+                "started_at": started_at,
+                "finished_at": "",
+                "duration_seconds": None,
+                "attempts": 1,
+                "status": "running",
+            }
+        },
+    }
+
+    animation_flow_skills._mark(run, "RUNNING", "feishu_download")
+    animation_flow_skills._mark(run, "RUNNING", "frame_extract")
+    saved = animation_flow_skills._load("AFLOW_TIMING")
+
+    assert saved["stage_timings"]["feishu_download"]["attempts"] == 1
+    assert saved["stage_timings"]["feishu_download"]["finished_at"]
+    assert saved["stage_timings"]["feishu_download"]["duration_seconds"] is not None
+    assert saved["stage_timings"]["frame_extract"]["attempts"] == 1
+    assert saved["last_transition_at"]
+    assert not (tmp_path / "AFLOW_TIMING.json.tmp").exists()
 
 
 def test_unity_import_preview_reads_unity_ready_and_refuses_when_mcp_off() -> None:

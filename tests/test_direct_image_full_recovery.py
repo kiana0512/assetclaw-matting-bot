@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import zipfile
+import json
 from pathlib import Path
 
 from PIL import Image
 
 from assetclaw_matting.config import settings
-from assetclaw_matting.skills import direct_image_skills
+from assetclaw_matting.skills import comfyui_skills, direct_image_skills, direct_video_skills
+from assetclaw_matting.services import character_resolution
 
 
 def _png(path: Path, size: tuple[int, int] = (64, 64)) -> Path:
@@ -97,6 +99,240 @@ def test_full_pipeline_retry_is_bounded_and_audited(monkeypatch, tmp_path: Path)
     assert [entry["error"] for entry in recovery["attempts"]] == ["first", "second"]
 
 
+def test_local_gpu_oom_switches_only_this_run_to_gpu_control(monkeypatch, tmp_path: Path) -> None:
+    source = _png(tmp_path / "imports" / "Gary.png")
+    target = _png(
+        tmp_path / "runs" / "IMG_RECOVERY" / "original_images" / "image_01" / "Gary.png"
+    )
+    run = _run(tmp_path, source, target)
+    run["children"] = {
+        "comfyui_run_id": "COMFY_LOCAL_OOM",
+        "comfyui": {
+            "backend": "local",
+            "status": "FAILED",
+            "last_error": "torch.OutOfMemoryError: Allocation on device / ran out of memory",
+        },
+    }
+    monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", tmp_path / "runs")
+    saved: list[dict] = []
+    monkeypatch.setattr(
+        direct_image_skills,
+        "_save",
+        lambda value, **_kwargs: saved.append(dict(value)) or True,
+    )
+
+    switched = direct_image_skills._prepare_local_oom_gpu_fallback(
+        run,
+        RuntimeError("CUDA out of memory"),
+    )
+
+    assert switched is True
+    assert run["matting_backend"] == "gpu_control"
+    assert run["stage"] == "local_oom_gpu_fallback_queued"
+    assert run["local_oom_gpu_fallback"]["from_backend"] == "local"
+    assert run["local_oom_gpu_fallback"]["to_backend"] == "gpu_control"
+    assert run.get("full_pipeline_retry_count", 0) == 0
+    assert saved[-1]["status"] == "QUEUED"
+
+
+def test_gpu_oom_fallback_does_not_change_other_failure_routing() -> None:
+    base = {
+        "status": "RUNNING",
+        "stage": "matting",
+        "children": {"comfyui": {"backend": "local"}},
+    }
+    assert direct_image_skills._is_local_gpu_oom(base, RuntimeError("invalid workflow")) is False
+    assert direct_image_skills._is_local_gpu_oom(
+        {**base, "children": {"comfyui": {"backend": "gpu_control"}}},
+        RuntimeError("CUDA out of memory"),
+    ) is False
+    assert direct_image_skills._is_local_gpu_oom(
+        {**base, "stage": "postprocess"},
+        RuntimeError("CUDA out of memory"),
+    ) is False
+
+    structured = {
+        **base,
+        "children": {
+            "comfyui": {
+                "backend": "local",
+                "last_error": "ComfyUI 输出校验失败...",
+                "last_error_kind": "GPU_OOM",
+                "last_error_detail": {"kind": "GPU_OOM", "exception_type": "torch.OutOfMemoryError"},
+            }
+        },
+    }
+    assert direct_image_skills._is_local_gpu_oom(structured, RuntimeError("truncated")) is True
+
+
+def test_local_gpu_oom_fallback_runs_at_most_once(monkeypatch, tmp_path: Path) -> None:
+    source = _png(tmp_path / "imports" / "frame.png")
+    target = _png(tmp_path / "runs" / "IMG_RECOVERY" / "original_images" / "image_01" / "frame.png")
+    run = _run(tmp_path, source, target)
+    run["children"] = {"comfyui": {"backend": "local"}}
+    run["local_oom_gpu_fallback"] = {"attempted": True}
+
+    assert direct_image_skills._prepare_local_oom_gpu_fallback(
+        run,
+        RuntimeError("torch.OutOfMemoryError: CUDA out of memory"),
+    ) is False
+
+
+def test_unknown_image_character_is_delivered_as_matte_only(monkeypatch) -> None:
+    run = {"id": "IMG_UNKNOWN", "images": [{"item_id": "image:1"}], "log": []}
+    calls: list[tuple[str, bool, bool]] = []
+    monkeypatch.setattr(
+        character_resolution,
+        "bind_run_items",
+        lambda *_args, **_kwargs: {"ready": False, "missing": ["image:1"], "missing_profiles": []},
+    )
+    monkeypatch.setattr(direct_image_skills, "_save", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        direct_image_skills,
+        "deliver_matte_only",
+        lambda run_id, resend=True, _allow_active=False, **_kwargs: (
+            calls.append((run_id, resend, _allow_active)) or {"ok": True}
+        ),
+    )
+
+    assert direct_image_skills._prepare_character_gate(run) is False
+    assert calls == [("IMG_UNKNOWN", True, True)]
+    assert run.get("status") != "WAITING_CHARACTER"
+
+
+def test_unknown_video_character_is_delivered_as_matte_only(monkeypatch) -> None:
+    run = {"id": "VID_UNKNOWN", "videos": [{"item_id": "video:1"}], "log": []}
+    calls: list[tuple[str, bool, bool]] = []
+    monkeypatch.setattr(
+        character_resolution,
+        "bind_run_items",
+        lambda *_args, **_kwargs: {"ready": False, "missing": [], "missing_profiles": ["video:1"]},
+    )
+    monkeypatch.setattr(direct_video_skills, "_save", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        direct_video_skills,
+        "deliver_matte_only",
+        lambda run_id, resend=True, _allow_active=False, **_kwargs: (
+            calls.append((run_id, resend, _allow_active)) or {"ok": True}
+        ),
+    )
+
+    assert direct_video_skills._prepare_character_gate(run) is False
+    assert calls == [("VID_UNKNOWN", True, True)]
+    assert run.get("status") != "WAITING_CHARACTER"
+
+
+def test_video_partial_gpu_result_retries_only_missing_frames(monkeypatch, tmp_path: Path) -> None:
+    run_id = "VID_PARTIAL"
+    run_dir = tmp_path / "runs" / run_id
+    frame_dir = run_dir / "frames" / "video_01"
+    matte_dir = run_dir / "matte" / "video_01"
+    for index in range(3):
+        _png(frame_dir / f"{index:04d}.png")
+    _png(matte_dir / "0000.png")
+    _png(matte_dir / "0002.png")
+    run = {
+        "id": run_id,
+        "status": "RUNNING",
+        "stage": "matting",
+        "workflow_path": "workflow.json",
+        "notify_interval_seconds": 60,
+        "matting_generation": 0,
+        "matting_backend": "",
+        "children": {},
+        "integrity": {},
+        "log": [],
+        "videos": [{"index": 1, "frame_dir": str(frame_dir), "matte_dir": str(matte_dir)}],
+    }
+    starts: list[dict] = []
+
+    def run_start(**kwargs):
+        starts.append(kwargs)
+        if len(starts) == 2:
+            _png(matte_dir / "0001.png")
+        return {"run_id": f"COMFY_{len(starts)}"}
+
+    def run_status(child_id, include_gpu=False):
+        if child_id == "COMFY_1":
+            return {
+                "status": "DONE_WITH_ERRORS",
+                "completed": 2,
+                "failed": 1,
+                "error_items": [{"frame": "0001.png", "error": "COMFY_TIMEOUT"}],
+            }
+        return {"status": "DONE", "completed": 1, "failed": 0}
+
+    monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(direct_video_skills, "_save", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(direct_video_skills, "_is_canceled", lambda _run: False)
+    monkeypatch.setattr(direct_video_skills, "validate_matte_sequence", lambda *_args, **_kwargs: {"count": 3})
+    monkeypatch.setattr(comfyui_skills, "run_start", run_start)
+    monkeypatch.setattr(comfyui_skills, "run_status", run_status)
+
+    direct_video_skills._run_comfyui_unlocked(run)
+
+    assert len(starts) == 2
+    assert starts[0]["skip_existing"] is False
+    assert starts[1]["skip_existing"] is True
+    assert starts[1]["backend"] == "gpu_control"
+    assert run["partial_matting_repairs"][0]["completed_preserved"] == 2
+    assert run["partial_matting_repairs"][0]["failed"] == 1
+    assert run["integrity"]["matte"]["video_01"]["count"] == 3
+
+
+def test_image_partial_gpu_result_retries_only_missing_images(monkeypatch, tmp_path: Path) -> None:
+    run_id = "IMG_PARTIAL"
+    run_dir = tmp_path / "runs" / run_id
+    for index in range(3):
+        _png(run_dir / "original_images" / f"{index:04d}.png")
+    _png(run_dir / "matte" / "0000.png")
+    _png(run_dir / "matte" / "0002.png")
+    run = {
+        "id": run_id,
+        "status": "RUNNING",
+        "stage": "matting",
+        "workflow_path": "workflow.json",
+        "notify_interval_seconds": 60,
+        "matting_generation": 0,
+        "matting_backend": "",
+        "children": {},
+        "log": [],
+        "images": [{"index": index} for index in range(3)],
+    }
+    starts: list[dict] = []
+
+    def run_start(**kwargs):
+        starts.append(kwargs)
+        if len(starts) == 2:
+            _png(run_dir / "matte" / "0001.png")
+        return {"run_id": f"COMFY_IMG_{len(starts)}"}
+
+    def run_status(child_id, include_gpu=False):
+        if child_id == "COMFY_IMG_1":
+            return {
+                "status": "DONE_WITH_ERRORS",
+                "completed": 2,
+                "failed": 1,
+                "error_items": [{"ordinal": 1, "frame": "0001.png", "error_kind": "COMFY_TIMEOUT"}],
+            }
+        return {"status": "DONE", "completed": 1, "failed": 0}
+
+    monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(direct_image_skills, "_save", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(direct_image_skills, "_is_canceled", lambda _run: False)
+    monkeypatch.setattr(comfyui_skills, "run_start", run_start)
+    monkeypatch.setattr(comfyui_skills, "run_status", run_status)
+
+    direct_image_skills._run_comfyui(run)
+
+    assert len(starts) == 2
+    assert starts[0]["skip_existing"] is False
+    assert starts[1]["skip_existing"] is True
+    assert starts[1]["backend"] == "gpu_control"
+    assert run["partial_matting_repairs"][0]["completed_preserved"] == 2
+    assert run["partial_matting_repairs"][0]["failed"] == 1
+
+
 def test_character_timeout_and_cancel_are_never_auto_retried() -> None:
     timeout = {
         "status": "FAILED",
@@ -146,6 +382,85 @@ def test_recoverable_failed_classifier_is_specific_and_exhaustion_safe() -> None
     assert direct_image_skills._should_auto_retry_failed_run(retryable) is True
     assert direct_image_skills._should_auto_retry_failed_run(unrelated) is False
     assert direct_image_skills._should_auto_retry_failed_run(exhausted) is False
+
+
+def test_verified_gpu_result_resumes_parent_even_after_retry_budget_is_exhausted(monkeypatch, tmp_path: Path) -> None:
+    run_id = "IMG_MANIFEST_RECOVERY"
+    child_id = "COMFY_MANIFEST_RECOVERY"
+    run_dir = tmp_path / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    run = {
+        "id": run_id,
+        "status": "FAILED",
+        "stage": "recovery_exhausted",
+        "error": "result manifest fields do not match GPU Control V2",
+        "children": {"comfyui_run_id": child_id},
+        "full_pipeline_recovery": {"attempt_count": direct_image_skills.MAX_FULL_PIPELINE_RETRIES},
+        "log": [],
+        "worker_pid": 0,
+    }
+    (run_dir / "status.json").write_text(json.dumps(run), encoding="utf-8")
+    saved: list[dict] = []
+    started: list[str] = []
+    monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(direct_image_skills, "_comfyui_child_status", lambda _run_id: {"status": "DONE"})
+    monkeypatch.setattr(
+        direct_image_skills,
+        "_save",
+        lambda value, **_kwargs: saved.append(dict(value)) or True,
+    )
+    monkeypatch.setattr(
+        direct_image_skills,
+        "_start_recovery_worker",
+        lambda recovered_id: started.append(recovered_id) or True,
+    )
+
+    result = direct_image_skills.recover_incomplete_runs()
+
+    assert result["closed"] == [run_id]
+    assert started == [run_id]
+    assert saved[-1]["status"] == "QUEUED"
+    assert saved[-1]["recovery_from_stage"] == "matting"
+    assert saved[-1]["error"] == ""
+
+
+def test_video_manifest_recovery_reopens_role_gate_and_refreshes_child_snapshot(monkeypatch, tmp_path: Path) -> None:
+    run_id = "VID_MANIFEST_RECOVERY"
+    child_id = "COMFY_VIDEO_RECOVERY"
+    run_dir = tmp_path / "video-runs" / run_id
+    run_dir.mkdir(parents=True)
+    run = {
+        "id": run_id,
+        "status": "FAILED",
+        "stage": "matting",
+        "error": "result manifest fields do not match GPU Control V2",
+        "children": {"comfyui_run_id": child_id, "comfyui": {"status": "FAILED"}},
+        "log": [],
+        "worker_pid": 0,
+    }
+    (run_dir / "status.json").write_text(json.dumps(run), encoding="utf-8")
+    saved: list[dict] = []
+    started: list[str] = []
+    reopened: list[tuple[str, str]] = []
+    child = {"status": "DONE", "completed": 121, "total": 121, "last_error": ""}
+    monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", tmp_path / "video-runs")
+    monkeypatch.setattr(direct_video_skills, "_comfyui_child_status", lambda _run_id: child)
+    monkeypatch.setattr(direct_video_skills, "_save", lambda value, **_kwargs: saved.append(dict(value)) or True)
+    monkeypatch.setattr(direct_video_skills, "_start_worker", lambda recovered_id, recover=False: started.append(recovered_id) or True)
+    monkeypatch.setattr(
+        character_resolution,
+        "reopen_failed_run_resolutions",
+        lambda kind, recovered_id: reopened.append((kind, recovered_id)) or 1,
+    )
+
+    result = direct_video_skills.recover_incomplete_runs()
+
+    assert result["recovered"] == [run_id]
+    assert started == [run_id]
+    assert reopened == [("direct_video", run_id)]
+    assert saved[-1]["status"] == "QUEUED"
+    assert saved[-1]["children"]["comfyui"] == child
+    assert saved[-1]["error"] == ""
 
 
 def test_worker_retries_before_any_terminal_failure_notification(monkeypatch) -> None:

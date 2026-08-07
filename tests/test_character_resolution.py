@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -13,8 +14,11 @@ from assetclaw_matting.services.character_resolution import (
     _parse_assignments,
     all_run_units_frozen,
     bind_run_items,
+    fail_run_resolutions,
+    reopen_failed_run_resolutions,
     get_run_resolutions,
     initialize_run_resolutions,
+    reconcile_pending_evidence,
     try_resolve_reply,
 )
 from assetclaw_matting.services import character_resolution
@@ -127,6 +131,174 @@ def test_multiple_pending_units_require_tokens_and_allow_reverse_order(monkeypat
     assert all_run_units_frozen("direct_video", "VID_PENDING") is True
     rows = get_run_resolutions("direct_video", "VID_PENDING")
     assert [row["character_id"] for row in rows] == ["huggy", "tasha"]
+
+
+def test_bare_answer_binds_latest_active_question_not_older_run(monkeypatch, tmp_path: Path) -> None:
+    _setup(monkeypatch, tmp_path)
+    for run_id in ("IMG_OLDER", "IMG_LATEST"):
+        initialize_run_resolutions(
+            run_kind="direct_image",
+            run_id=run_id,
+            run_dir=tmp_path / "runs" / run_id,
+            conversation_id="feishu:chat:user",
+            chat_id="chat",
+            user_id="user",
+            units=[{
+                "unit_id": f"{run_id}:image:01",
+                "item_index": 1,
+                "source_name": "0001.png",
+                "evidence": ["0001.png"],
+            }],
+        )
+
+    result = try_resolve_reply(
+        conversation_id="feishu:chat:user",
+        user_id="user",
+        message_id="om_latest",
+        text="tasha",
+    )
+
+    assert result["ok"] is True
+    assert get_run_resolutions("direct_image", "IMG_LATEST")[0]["character_id"] == "tasha"
+    assert get_run_resolutions("direct_image", "IMG_OLDER")[0]["status"] == "PENDING"
+
+
+def test_failed_run_question_never_pollutes_new_bare_reply(monkeypatch, tmp_path: Path) -> None:
+    _setup(monkeypatch, tmp_path)
+    for run_id in ("IMG_FAILED", "IMG_ACTIVE"):
+        initialize_run_resolutions(
+            run_kind="direct_image",
+            run_id=run_id,
+            run_dir=tmp_path / "runs" / run_id,
+            conversation_id="feishu:chat:user",
+            chat_id="chat",
+            user_id="user",
+            units=[{
+                "unit_id": f"{run_id}:image:01",
+                "item_index": 1,
+                "source_name": "0001.png",
+                "evidence": ["0001.png"],
+            }],
+        )
+    fail_run_resolutions("direct_image", "IMG_FAILED")
+
+    result = try_resolve_reply(
+        conversation_id="feishu:chat:user",
+        user_id="user",
+        message_id="om_active",
+        text="huggy",
+    )
+
+    assert result["ok"] is True
+    assert get_run_resolutions("direct_image", "IMG_ACTIVE")[0]["character_id"] == "huggy"
+    assert get_run_resolutions("direct_image", "IMG_FAILED")[0]["status"] == "FAILED"
+
+
+def test_recoverable_failure_reopens_original_character_question(monkeypatch, tmp_path: Path) -> None:
+    _setup(monkeypatch, tmp_path)
+    initialize_run_resolutions(
+        run_kind="direct_video",
+        run_id="VID_RECOVER",
+        run_dir=tmp_path / "runs" / "VID_RECOVER",
+        conversation_id="feishu:chat:user",
+        chat_id="chat",
+        user_id="user",
+        units=[{
+            "unit_id": "VID_RECOVER:video:01",
+            "item_index": 1,
+            "source_name": "unknown.mp4",
+            "evidence": ["unknown.mp4"],
+        }],
+    )
+    token = get_run_resolutions("direct_video", "VID_RECOVER")[0]["question_token"]
+    fail_run_resolutions("direct_video", "VID_RECOVER")
+
+    assert reopen_failed_run_resolutions("direct_video", "VID_RECOVER") == 1
+    result = try_resolve_reply(
+        conversation_id="feishu:chat:user",
+        user_id="user",
+        message_id="om_recovered",
+        text=f"{token}=tasha",
+    )
+
+    assert result["ok"] is True, result
+    resolution = get_run_resolutions("direct_video", "VID_RECOVER")[0]
+    assert resolution["character_id"] == "tasha"
+    assert resolution["status"] == "FROZEN"
+
+
+def test_legacy_terminal_status_file_is_pruned_before_reply(monkeypatch, tmp_path: Path) -> None:
+    _setup(monkeypatch, tmp_path)
+    failed_dir = tmp_path / "runs" / "IMG_LEGACY_FAILED"
+    active_dir = tmp_path / "runs" / "IMG_ACTIVE"
+    for run_id, run_dir in (("IMG_LEGACY_FAILED", failed_dir), ("IMG_ACTIVE", active_dir)):
+        initialize_run_resolutions(
+            run_kind="direct_image",
+            run_id=run_id,
+            run_dir=run_dir,
+            conversation_id="feishu:chat:user",
+            chat_id="chat",
+            user_id="user",
+            units=[{
+                "unit_id": f"{run_id}:image:01",
+                "item_index": 1,
+                "source_name": "0001.png",
+                "evidence": ["0001.png"],
+            }],
+        )
+    failed_dir.mkdir(parents=True, exist_ok=True)
+    (failed_dir / "status.json").write_text(
+        json.dumps({"id": "IMG_LEGACY_FAILED", "status": "FAILED"}),
+        encoding="utf-8",
+    )
+
+    result = try_resolve_reply(
+        conversation_id="feishu:chat:user",
+        user_id="user",
+        message_id="om_active",
+        text="huggy",
+    )
+
+    assert result["ok"] is True
+    assert get_run_resolutions("direct_image", "IMG_LEGACY_FAILED")[0]["status"] == "FAILED"
+
+
+def test_pending_legacy_evidence_is_reconciled_without_user_reply(monkeypatch, tmp_path: Path) -> None:
+    _setup(monkeypatch, tmp_path)
+    run_id = "IMG_LEGACY_EVIDENCE"
+    initialize_run_resolutions(
+        run_kind="direct_image",
+        run_id=run_id,
+        run_dir=tmp_path / "runs" / run_id,
+        conversation_id="feishu:chat:user",
+        chat_id="chat",
+        user_id="user",
+        units=[{
+            "unit_id": f"{run_id}:image:01",
+            "item_index": 1,
+            "source_name": "0001.png",
+            "evidence": ["0001.png"],
+        }],
+    )
+    row = get_run_resolutions("direct_image", run_id)[0]
+    evidence = json.loads(row["evidence_json"])
+    evidence["inputs"] = ["tasha微笑关键帧.zip", "0001.png"]
+    from assetclaw_matting.db.sqlite import get_connection
+
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE character_resolutions SET evidence_json = ? WHERE unit_id = ?",
+            (json.dumps(evidence, ensure_ascii=False), row["unit_id"]),
+        )
+
+    result = reconcile_pending_evidence("direct_image", run_id)
+
+    assert result["ok"] is True
+    assert result["repaired"] == [row["unit_id"]]
+    repaired = get_run_resolutions("direct_image", run_id)[0]
+    assert repaired["status"] == "FROZEN"
+    assert repaired["character_id"] == "tasha"
+    assert repaired["resolution_method"] == "filename_reconciled"
 
 
 def test_another_user_cannot_consume_pending_token(monkeypatch, tmp_path: Path) -> None:

@@ -24,6 +24,7 @@ from assetclaw_matting.skills.security import validate_path
 RUNS_ROOT = Path(settings.storage_dir) / "direct_image_runs"
 FINISHED = {"DONE", "FAILED", "CANCELED", "DONE_WITH_ERRORS"}
 MAX_FULL_PIPELINE_RETRIES = 2
+MAX_PARTIAL_MATTING_REPAIRS = 2
 MAX_SOURCE_RECOVERY_CANDIDATES = 32
 MAX_SOURCE_RECOVERY_ZIP_MEMBER_BYTES = 128 * 1024 * 1024
 _WORKERS: set[str] = set()
@@ -209,10 +210,12 @@ def recover_incomplete_runs() -> dict[str, Any]:
             from assetclaw_matting.services.character_resolution import (
                 all_run_units_frozen,
                 mark_run_waiting,
+                reconcile_pending_evidence,
                 reconcile_resolved_units,
             )
 
             mark_run_waiting("direct_image", run_id, immediate_if_uninitialized=True)
+            reconcile_pending_evidence("direct_image", run_id)
             reconcile_resolved_units("direct_image", run_id)
             if all_run_units_frozen("direct_image", run_id):
                 resume_after_character_resolution(run_id)
@@ -220,6 +223,25 @@ def recover_incomplete_runs() -> dict[str, Any]:
             else:
                 waiting_character.append(run_id)
             continue
+        if current_status == "FAILED":
+            run_id = str(run.get("id") or status_path.parent.name)
+            current_child_id = str((run.get("children") or {}).get("comfyui_run_id") or "")
+            current_child = _comfyui_child_status(current_child_id)
+            recovered_manifest_result = (
+                "result manifest fields do not match" in str(run.get("error") or "").lower()
+                and str(current_child.get("status") or "").upper() == "DONE"
+            )
+            if recovered_manifest_result:
+                run["recovery_from_stage"] = "matting"
+                run["status"] = "QUEUED"
+                run["stage"] = "recovery_queued"
+                run["worker_pid"] = 0
+                run["error"] = ""
+                _append_log(run, "GPU 结果已重新验收通过，从后处理继续，不重复提交 GPU 批次。")
+                if _save(run, expected_statuses={"FAILED"}):
+                    _start_recovery_worker(run_id)
+                    closed.append(run_id)
+                continue
         if current_status == "FAILED" and _should_auto_retry_failed_run(run):
             run_id = str(run.get("id") or status_path.parent.name)
             run["recovery_from_stage"] = "full_pipeline"
@@ -266,6 +288,12 @@ def cancel(run_id: str | None = None, **_: Any) -> dict[str, Any]:
     cancel_run_resolutions("direct_image", str(run["id"]))
     run["status"] = "CANCELED"
     run["stage"] = "canceled"
+    run["character_question"] = ""
+    run.setdefault("character_resolution", {})["pending"] = 0
+    run["character_question"] = ""
+    run.setdefault("character_resolution", {})["pending"] = 0
+    run["character_question"] = ""
+    run.setdefault("character_resolution", {})["pending"] = 0
     run.setdefault("children", {})["cancel_results"] = cancel_results
     run["updated_at"] = _now()
     _append_log(run, "用户请求取消任务。")
@@ -366,7 +394,11 @@ def _worker_once(run_id: str) -> None:
         character_lines = _character_completion_lines(run.get("images") or [])
         suffix = f"，{plan}" if plan else ""
         if bool(run.get("package_as_sequence")) or len(run.get("images") or []) > 1:
-            _notify(run, f"序列帧完成：{run['id']}，共 {len(run.get('images') or [])} 帧，已按顺序发回 1 个 ZIP{suffix}。{character_lines}")
+            _notify(
+                run,
+                f"序列帧完成：{run['id']}，共 {len(run.get('images') or [])} 帧。"
+                f"已按顺序返回透明抠图、后处理结果 2 个 ZIP{suffix}。{character_lines}",
+            )
         else:
             _notify(run, f"图片完成：{run['id']}，已发回抠图、后处理、三联对比 3 份结果{suffix}。{character_lines}")
     except Exception as exc:
@@ -378,9 +410,10 @@ def _worker_once(run_id: str) -> None:
             run["status"] = "FAILED"
             run["error"] = str(exc)
             run["updated_at"] = _now()
+            _close_failed_character_resolution(run)
             _append_log(run, f"任务失败：{exc}")
             _save(run)
-            _notify(run, f"图片处理任务失败：{run_id}\n{exc}")
+            _notify(run, _user_failure_notice(run_id, exc))
     finally:
         latest = _load(run_id)
         if latest and int(latest.get("worker_pid") or 0) == os.getpid():
@@ -407,14 +440,18 @@ def _worker(run_id: str) -> None:
                     return
                 if _finish_after_confirmed_delivery(run):
                     return
+                if _prepare_local_oom_gpu_fallback(run, exc):
+                    _WORKERS.add(run_id)
+                    continue
                 if not _prepare_full_pipeline_retry(run, exc):
                     run["status"] = "FAILED"
                     run["stage"] = "recovery_exhausted"
                     run["error"] = str(exc)
                     run["updated_at"] = _now()
+                    _close_failed_character_resolution(run)
                     _append_log(run, f"自动完整流程恢复已达到上限，任务失败：{exc}")
                     _save(run)
-                    _notify(run, f"图片任务自动恢复多次仍未成功：{run_id}\n{exc}")
+                    _notify(run, _user_failure_notice(run_id, exc, retries_exhausted=True))
                     return
                 _WORKERS.add(run_id)
     finally:
@@ -423,6 +460,101 @@ def _worker(run_id: str) -> None:
         if hasattr(_RUN_CONTEXT, "failed_run"):
             delattr(_RUN_CONTEXT, "failed_run")
         _WORKERS.discard(run_id)
+
+
+_GPU_OOM_MARKERS = (
+    "torch.outofmemoryerror",
+    "cuda out of memory",
+    "cuda error: out of memory",
+    "cudnn_status_alloc_failed",
+    "cublas_status_alloc_failed",
+    "allocation on device",
+    "ran out of memory",
+)
+
+
+def _is_local_gpu_oom(run: dict[str, Any], error: Exception | str) -> bool:
+    """Return true only for a local ComfyUI GPU-memory failure during matting."""
+
+    if str(run.get("stage") or "").strip().lower() != "matting":
+        return False
+    children = run.get("children") if isinstance(run.get("children"), dict) else {}
+    child = children.get("comfyui") if isinstance(children.get("comfyui"), dict) else {}
+    selected_backend = str(
+        child.get("backend") or run.get("matting_backend") or "local"
+    ).strip().lower()
+    if selected_backend not in {"local", "comfyui"}:
+        return False
+    if str(child.get("last_error_kind") or "").strip().upper() == "GPU_OOM":
+        return True
+    detail_payload = child.get("last_error_detail") if isinstance(child.get("last_error_detail"), dict) else {}
+    if str(detail_payload.get("kind") or "").strip().upper() == "GPU_OOM":
+        return True
+    detail = " ".join(
+        str(value or "")
+        for value in (
+            error,
+            child.get("last_error"),
+            child.get("error"),
+            detail_payload.get("exception_type"),
+            detail_payload.get("message"),
+        )
+    ).casefold()
+    return any(marker in detail for marker in _GPU_OOM_MARKERS)
+
+
+def _prepare_local_oom_gpu_fallback(run: dict[str, Any], error: Exception | str) -> bool:
+    """Move one local OOM task to GPU Control without changing normal routing."""
+
+    if not _is_local_gpu_oom(run, error):
+        return False
+    fallback = run.setdefault("local_oom_gpu_fallback", {})
+    if bool(fallback.get("attempted")):
+        return False
+
+    fallback.update(
+        {
+            "attempted": True,
+            "triggered_at": _now(),
+            "from_backend": "local",
+            "to_backend": "gpu_control",
+            "trigger_stage": str(run.get("stage") or ""),
+            "error": str(error),
+        }
+    )
+    try:
+        fallback["source_recovery"] = _ensure_original_images(run)
+        _reset_outputs_for_full_retry(run)
+    except Exception as recovery_error:
+        fallback["preparation_error"] = str(recovery_error)
+        _append_log(run, f"本机显存不足，但切换 GPU 集群前的原图恢复失败：{recovery_error}")
+        _save(run)
+        return False
+
+    previous_children = run.get("children") if isinstance(run.get("children"), dict) else {}
+    fallback["previous_comfyui_run_id"] = str(previous_children.get("comfyui_run_id") or "")
+    run["children"] = {}
+    run["matting_backend"] = "gpu_control"
+    run["status"] = "QUEUED"
+    run["stage"] = "local_oom_gpu_fallback_queued"
+    run["error"] = ""
+    run["worker_pid"] = os.getpid()
+    for item in run.get("images") or []:
+        for key in (
+            "matte_result_path",
+            "postprocessed_result_path",
+            "comparison_path",
+            "result_path",
+            "cherry_sequence_group",
+            "color_correction_run_id",
+        ):
+            item[key] = ""
+        item["color_correction_status"] = "READY" if item.get("color_reference_path") else ""
+        item["position_alignment_status"] = "READY" if item.get("position_alignment_enabled") else ""
+        item["reference_postprocess_status"] = "READY" if item.get("color_reference_path") else ""
+    _append_log(run, "检测到本机 4070 Ti 显存不足；本任务自动切换至 GPU 集群重新抠图。")
+    _save(run)
+    return True
 
 
 def _prepare_full_pipeline_retry(run: dict[str, Any], error: Exception) -> bool:
@@ -693,7 +825,7 @@ def _merge_runtime_delivery_state(
 ) -> dict[str, Any]:
     if not persisted:
         return runtime
-    for key in ("drive_file", "sequence_zip_path", "sent_files"):
+    for key in ("drive_file", "sequence_zip_path", "sent_files", "delivery", "delivery_artifacts"):
         if runtime.get(key):
             persisted[key] = runtime[key]
     return persisted
@@ -702,11 +834,23 @@ def _merge_runtime_delivery_state(
 def _finish_after_confirmed_delivery(run: dict[str, Any]) -> bool:
     if str(run.get("stage") or "").lower() not in {"send", "done"}:
         return False
-    receipt = run.get("drive_file") if isinstance(run.get("drive_file"), dict) else {}
     package = Path(str(run.get("sequence_zip_path") or ""))
-    if not package.is_file() or not any(receipt.get(key) for key in ("message_id", "file_token", "url")):
-        return False
-    run["sent_files"] = [str(package)]
+    artifacts = [item for item in run.get("delivery_artifacts") or [] if isinstance(item, dict)]
+    if artifacts:
+        confirmed = all(
+            str(item.get("status") or "").upper() == "DELIVERED"
+            and bool(str(item.get("message_id") or ""))
+            and Path(str(item.get("path") or "")).is_file()
+            for item in artifacts
+        )
+        if not package.is_file() or not confirmed:
+            return False
+        run["sent_files"] = [str(item["path"]) for item in artifacts]
+    else:
+        receipt = run.get("drive_file") if isinstance(run.get("drive_file"), dict) else {}
+        if not package.is_file() or not any(receipt.get(key) for key in ("message_id", "file_token", "url")):
+            return False
+        run["sent_files"] = [str(package)]
     run["status"] = "DONE"
     run["stage"] = "done"
     run["error"] = ""
@@ -769,34 +913,61 @@ def _run_comfyui(run: dict[str, Any]) -> None:
     from assetclaw_matting.skills.comfyui_skills import run_start, run_status
 
     run_dir = _run_dir(run)
-    matting_generation = int(run.get("matting_generation") or 0) + 1
-    run["matting_generation"] = matting_generation
-    _save(run)
-    result = run_start(
-        workflow_path=run.get("workflow_path") or None,
-        input_dir=str(run_dir / "original_images"),
-        output_dir=str(run_dir / "matte"),
-        recursive=True,
-        preserve_structure=True,
-        skip_existing=False,
-        notify_interval_seconds=run["notify_interval_seconds"],
-        external_batch_id=f"assetclaw:{run['id']}:matting:g{matting_generation}",
-    )
-    child_id = result["run_id"]
-    run.setdefault("children", {})["comfyui_run_id"] = child_id
-    _append_log(run, f"ComfyUI 抠图任务已启动：{child_id}")
-    _save(run)
+    repair_attempt = 0
     while True:
-        if _is_canceled(run):
-            return
-        payload = run_status(child_id, include_gpu=False)
-        run["children"]["comfyui"] = payload
+        matting_generation = int(run.get("matting_generation") or 0) + 1
+        run["matting_generation"] = matting_generation
         _save(run)
-        if payload.get("status") in {"DONE", "FAILED", "CANCELED", "DONE_WITH_ERRORS"}:
-            if payload.get("status") != "DONE":
-                raise RuntimeError(_format_child_failure("ComfyUI", child_id, payload))
-            return
-        time.sleep(5)
+        result = run_start(
+            workflow_path=run.get("workflow_path") or None,
+            input_dir=str(run_dir / "original_images"),
+            output_dir=str(run_dir / "matte"),
+            recursive=True,
+            preserve_structure=True,
+            skip_existing=repair_attempt > 0,
+            notify_interval_seconds=run["notify_interval_seconds"],
+            external_batch_id=f"assetclaw:{run['id']}:matting:g{matting_generation}",
+            backend="gpu_control" if repair_attempt > 0 else (str(run.get("matting_backend") or "") or None),
+        )
+        child_id = result["run_id"]
+        children = run.setdefault("children", {})
+        children["comfyui_run_id"] = child_id
+        children.setdefault("comfyui_run_ids", []).append(child_id)
+        _append_log(run, f"{'GPU 失败图片补算' if repair_attempt else 'ComfyUI 抠图任务'}已启动：{child_id}")
+        _save(run)
+        while True:
+            if _is_canceled(run):
+                return
+            payload = run_status(child_id, include_gpu=False)
+            children["comfyui"] = payload
+            children.setdefault("comfyui_runs", {})[child_id] = payload
+            _save(run)
+            child_status = str(payload.get("status") or "").upper()
+            if child_status not in {"DONE", "FAILED", "CANCELED", "DONE_WITH_ERRORS"}:
+                time.sleep(5)
+                continue
+            if child_status == "DONE":
+                return
+            partial = child_status == "DONE_WITH_ERRORS" and int(payload.get("completed") or 0) > 0
+            if partial and repair_attempt < MAX_PARTIAL_MATTING_REPAIRS:
+                repair_attempt += 1
+                audit = {
+                    "attempt": repair_attempt,
+                    "source_child_run_id": child_id,
+                    "completed_preserved": int(payload.get("completed") or 0),
+                    "failed": int(payload.get("failed") or 0),
+                    "triggered_at": _now(),
+                    "error_items": list(payload.get("error_items") or []),
+                }
+                run.setdefault("partial_matting_repairs", []).append(audit)
+                _append_log(
+                    run,
+                    f"GPU 批次部分成功：已保留 {audit['completed_preserved']} 张；"
+                    f"仅补算 {audit['failed']} 张失败图片（第 {repair_attempt}/{MAX_PARTIAL_MATTING_REPAIRS} 次）。",
+                )
+                _save(run)
+                break
+            raise RuntimeError(_format_child_failure("ComfyUI", child_id, payload))
 
 
 def _run_cherry(run: dict[str, Any]) -> None:
@@ -959,11 +1130,18 @@ def _prepare_character_gate(run: dict[str, Any]) -> bool:
         _append_log(run, "角色参考图已逐项冻结；Cherry 将在流程末尾依次执行校色和位置矫正。")
         _save(run)
         return True
-    if result.get("missing_profiles"):
-        raise RuntimeError(
-            "无法确定以下任务的 Cherry 输出规格，已停止后处理："
-            + "、".join(result.get("missing_profiles") or [])
+    unavailable = list(result.get("missing_profiles") or []) + list(result.get("missing") or [])
+    if unavailable:
+        _append_log(
+            run,
+            "角色库无对应校色/矫正资料；按交付规则跳过后处理并直接返回透明抠图结果："
+            + "、".join(dict.fromkeys(unavailable)),
         )
+        _save(run)
+        outcome = deliver_matte_only(str(run["id"]), resend=True, _allow_active=True)
+        if not outcome.get("ok"):
+            raise RuntimeError(str(outcome.get("error") or "透明抠图结果直接交付失败"))
+        return False
     run["status"] = "WAITING_CHARACTER"
     run["stage"] = "waiting_character"
     run["recovery_from_stage"] = "postprocess"
@@ -977,6 +1155,139 @@ def _prepare_character_gate(run: dict[str, Any]) -> bool:
     return False
 
 
+def deliver_matte_only(
+    run_id: str,
+    resend: bool = True,
+    _allow_active: bool = False,
+    **_: Any,
+) -> dict[str, Any]:
+    """Deliver verified matte output and explicitly record skipped postprocessing."""
+
+    run = _load(run_id)
+    if not run:
+        return {"ok": False, "run_id": run_id, "error": "direct image run not found"}
+    if not _allow_active and str(run.get("status") or "").upper() in {"RUNNING", "QUEUED", "PENDING"}:
+        return {"ok": False, "run_id": run_id, "error": "task is still running; matte-only delivery refused"}
+    try:
+        items = list(run.get("images") or [])
+        matte_files: list[tuple[dict[str, Any], Path]] = []
+        for item in items:
+            matte = _latest_image(Path(str(item.get("matte_dir") or "")))
+            if not matte or not matte.is_file():
+                raise RuntimeError(f"matte result is missing for {item.get('source_name') or item.get('name')}")
+            with Image.open(matte) as image:
+                if image.format != "PNG" or "A" not in image.getbands():
+                    raise RuntimeError(f"matte result is not a transparent PNG: {matte}")
+            item["matte_result_path"] = str(matte)
+            item["result_path"] = str(matte)
+            item["postprocessed_result_path"] = ""
+            item["comparison_path"] = ""
+            item["color_correction_status"] = "SKIPPED"
+            item["position_alignment_status"] = "SKIPPED"
+            item["reference_postprocess_status"] = "SKIPPED"
+            matte_files.append((item, matte))
+
+        run["status"] = "RUNNING"
+        run["stage"] = "matte_only_delivery"
+        run["result_mode"] = "matte_only"
+        run["postprocess_skipped"] = {
+            "value": True,
+            "reason": "character reference unavailable",
+            "recorded_at": _now(),
+        }
+        run["character_question"] = ""
+        run.setdefault("character_resolution", {})["pending"] = 0
+        run["error"] = ""
+        _save(run)
+
+        receipts: list[dict[str, str]] = []
+        sent_files: list[str] = []
+        if resend and run.get("chat_id"):
+            from assetclaw_matting.feishu.client import feishu_client
+
+            chat_id = str(run["chat_id"])
+            if bool(run.get("package_as_sequence")) or len(matte_files) > 1:
+                package = _make_matte_only_zip(run, matte_files)
+                receipt = feishu_client.send_file_to_chat(chat_id, package, package.name) or {}
+                receipts.append(receipt)
+                sent_files.append(str(package))
+                run["sequence_zip_path"] = str(package)
+                run["delivery_artifacts"] = [{
+                    "kind": "matte",
+                    "label": "透明抠图",
+                    "path": str(package),
+                    "file_name": package.name,
+                    "size_bytes": package.stat().st_size,
+                    "sha256": _sha256_file(package),
+                    "status": "DELIVERED" if receipt.get("message_id") else "FAILED",
+                    "message_id": str(receipt.get("message_id") or ""),
+                    "file_token": str(receipt.get("file_token") or ""),
+                    "url": str(receipt.get("url") or ""),
+                    "delivery_method": str(receipt.get("delivery_method") or ""),
+                }]
+            else:
+                item, matte = matte_files[0]
+                base = Path(str(item.get("source_name") or item.get("name") or matte.name)).stem
+                receipt = feishu_client.send_file_to_chat(chat_id, matte, f"{base}_matte.png") or {}
+                receipts.append(receipt)
+                sent_files.append(str(matte))
+            if not all(str(receipt.get("message_id") or "") for receipt in receipts):
+                raise RuntimeError("Feishu matte-only delivery returned no message receipt")
+            run["delivery"] = {
+                "status": "DELIVERED",
+                "chat_id": chat_id,
+                "artifact_count": len(sent_files),
+                "delivered_count": len(sent_files),
+                "delivered_at": _now(),
+                "postprocess_applied": False,
+            }
+            _notify(
+                run,
+                f"抠图结果已交付：{run['id']}。\n"
+                "序列帧无需抽帧，已返回透明抠图 ZIP。\n"
+                "未生成后处理结果：角色库中暂无对应角色的校色与位置矫正资料。",
+            )
+
+        from assetclaw_matting.services.character_resolution import cancel_run_resolutions
+
+        cancel_run_resolutions("direct_image", str(run["id"]))
+        run["matte_only_delivery_receipts"] = receipts
+        run["sent_files"] = sent_files
+        run["status"] = "DONE"
+        run["stage"] = "done_matte_only"
+        run["error"] = ""
+        run["updated_at"] = _now()
+        _append_log(run, "透明抠图结果已交付；角色校色与位置矫正未执行。")
+        _save(run)
+        return {"ok": True, "run_id": run_id, **_public(run)}
+    except Exception as exc:
+        run = _load(run_id) or run
+        run["status"] = "FAILED"
+        run["stage"] = "matte_only_delivery_failed"
+        run["error"] = str(exc)
+        run["updated_at"] = _now()
+        _append_log(run, f"透明抠图结果直接交付失败：{exc}")
+        _save(run)
+        return {"ok": False, "run_id": run_id, "error": str(exc), **_public(run)}
+
+
+def _make_matte_only_zip(
+    run: dict[str, Any],
+    matte_files: list[tuple[dict[str, Any], Path]],
+) -> Path:
+    name = _safe_name(Path(str(run.get("run_label") or run["id"])).stem) or str(run["id"])
+    package = _run_dir(run) / f"{name}_matte_only.zip"
+    with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        for index, (item, matte) in enumerate(matte_files, start=1):
+            source = Path(str(item.get("source_name") or item.get("name") or matte.name))
+            arcname = f"{index:04d}_{_safe_name(source.stem) or 'frame'}_matte.png"
+            bundle.write(matte, arcname=arcname)
+    with zipfile.ZipFile(package, "r") as bundle:
+        if bundle.testzip() is not None or len(bundle.infolist()) != len(matte_files):
+            raise RuntimeError(f"matte-only ZIP verification failed: {package}")
+    return package
+
+
 def _send_results(run: dict[str, Any]) -> list[str]:
     chat_id = str(run.get("chat_id") or "")
     if not chat_id:
@@ -987,13 +1298,11 @@ def _send_results(run: dict[str, Any]) -> list[str]:
     prepared = _prepare_result_files(run)
     if bool(run.get("package_as_sequence")) or len(items) > 1:
         zip_path = _make_sequence_zip(run)
-        drive_file = feishu_client.send_file_to_chat(chat_id, zip_path, zip_path.name) or {}
-        if drive_file:
-            run["drive_file"] = drive_file
         run["sequence_zip_path"] = str(zip_path)
-        _append_log(run, f"序列帧结果已打包发送：{zip_path.name}，共 {len(items)} 帧")
+        sent = _send_sequence_delivery_artifacts(run, chat_id=chat_id, include_postprocess=True)
+        _append_log(run, f"序列帧结果已分阶段发送：透明抠图、后处理结果，共 {len(items)} 帧")
         _save(run)
-        return [str(zip_path)]
+        return sent
 
     sent: list[str] = []
     for item, (matte, processed, comparison) in zip(items, prepared):
@@ -1044,18 +1353,15 @@ def package_and_send(run_id: str | None = None, package_name: str = "", **_: Any
         return {"ok": False, "error": "direct image run not found"}
     if not run.get("chat_id"):
         return {"ok": False, "error": "run has no Feishu chat_id"}
-    from assetclaw_matting.feishu.client import feishu_client
-
     _prepare_result_files(run)
     zip_path = _make_sequence_zip(run, package_name=package_name)
-    drive_file = feishu_client.send_file_to_chat(str(run["chat_id"]), zip_path, zip_path.name) or {}
     run["sequence_zip_path"] = str(zip_path)
-    if drive_file:
-        run["drive_file"] = drive_file
+    sent_files = _send_sequence_delivery_artifacts(run, chat_id=str(run["chat_id"]), include_postprocess=True)
+    run["sent_files"] = sent_files
     run["status"] = "DONE"
     run["stage"] = "done"
     run["error"] = ""
-    _append_log(run, f"序列帧压缩包已补发：{zip_path.name}，共 {len(run.get('images') or [])} 帧")
+    _append_log(run, f"序列帧结果已分阶段补发：透明抠图、后处理结果，共 {len(run.get('images') or [])} 帧")
     _save(run)
     return {
         "ok": True,
@@ -1063,7 +1369,8 @@ def package_and_send(run_id: str | None = None, package_name: str = "", **_: Any
         "zip_path": str(zip_path),
         "zip_name": zip_path.name,
         "frame_count": len(run.get("images") or []),
-        "drive_file": drive_file,
+        "sent_files": sent_files,
+        "delivery_artifacts": run.get("delivery_artifacts") or [],
     }
 
 
@@ -1103,6 +1410,166 @@ def _make_sequence_zip(run: dict[str, Any], package_name: str = "") -> Path:
             )
         archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
     return zip_path
+
+
+def _make_sequence_stage_zip(run: dict[str, Any], *, kind: str, label: str, suffix: str) -> Path:
+    items = sorted(run.get("images") or [], key=lambda item: int(item.get("index") or 0))
+    if not items:
+        raise RuntimeError("sequence run contains no images")
+    field = "matte_result_path" if kind == "matte" else "postprocessed_result_path"
+    files: list[tuple[int, dict[str, Any], Path]] = []
+    for position, item in enumerate(items):
+        path = Path(str(item.get(field) or ""))
+        if not path.is_file():
+            raise RuntimeError(f"sequence {label} file is missing: {path}")
+        files.append((position, item, path))
+    run_label = str(run.get("run_label") or run.get("id") or "sequence")
+    stem = Path(_safe_name(run_label)).stem or str(run.get("id") or "sequence")
+    package = _run_dir(run) / f"{stem}_{suffix}.zip"
+    if package.is_file():
+        with zipfile.ZipFile(package, "r") as archive:
+            if archive.testzip() is not None or len(archive.infolist()) != len(files) + 1:
+                raise RuntimeError(f"sequence {label} ZIP verification failed: {package}")
+        return package
+    partial = package.with_suffix(".zip.part")
+    manifest = {
+        "schema_version": "1.0",
+        "run_id": run.get("id"),
+        "artifact_kind": kind,
+        "label": label,
+        "frame_count": len(files),
+        "ordered": True,
+        "postprocess_applied": kind == "postprocessed",
+        "files": [],
+    }
+    try:
+        with zipfile.ZipFile(partial, "w", compression=zipfile.ZIP_STORED) as archive:
+            for position, item, path in files:
+                entry = f"{kind}/{position:04d}{path.suffix.lower() or '.png'}"
+                archive.write(path, entry)
+                manifest["files"].append({
+                    "index": position,
+                    "source_name": item.get("source_name") or item.get("name") or "",
+                    "entry": entry,
+                })
+            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        with zipfile.ZipFile(partial, "r") as archive:
+            if archive.testzip() is not None or len(archive.infolist()) != len(files) + 1:
+                raise RuntimeError(f"sequence {label} ZIP verification failed: {partial}")
+        os.replace(partial, package)
+    finally:
+        partial.unlink(missing_ok=True)
+    return package
+
+
+def _send_sequence_delivery_artifacts(
+    run: dict[str, Any],
+    *,
+    chat_id: str,
+    include_postprocess: bool,
+    attempts: int = 5,
+) -> list[str]:
+    from assetclaw_matting.feishu.client import feishu_client
+
+    specs = [{
+        "kind": "matte",
+        "label": "透明抠图",
+        "path": str(_make_sequence_stage_zip(run, kind="matte", label="透明抠图", suffix="01_matte")),
+    }]
+    if include_postprocess:
+        specs.append({
+            "kind": "postprocessed",
+            "label": "后处理结果",
+            "path": str(_make_sequence_stage_zip(
+                run,
+                kind="postprocessed",
+                label="后处理结果",
+                suffix="02_postprocessed",
+            )),
+        })
+    previous = {
+        str(item.get("kind") or ""): item
+        for item in run.get("delivery_artifacts") or []
+        if isinstance(item, dict)
+    }
+    artifacts: list[dict[str, Any]] = []
+    for spec in specs:
+        path = Path(spec["path"])
+        prior = previous.get(spec["kind"], {})
+        sha256 = _sha256_file(path)
+        same_file = (
+            str(prior.get("path") or "") == str(path)
+            and int(prior.get("size_bytes") or 0) == path.stat().st_size
+            and str(prior.get("sha256") or "") == sha256
+        )
+        artifacts.append({
+            **spec,
+            "file_name": path.name,
+            "size_bytes": path.stat().st_size,
+            "sha256": sha256,
+            "status": str(prior.get("status") or "PENDING") if same_file else "PENDING",
+            "message_id": str(prior.get("message_id") or "") if same_file else "",
+            "file_token": str(prior.get("file_token") or "") if same_file else "",
+            "url": str(prior.get("url") or "") if same_file else "",
+            "delivery_method": str(prior.get("delivery_method") or "") if same_file else "",
+            "attempts": int(prior.get("attempts") or 0) if same_file else 0,
+            "last_error": str(prior.get("last_error") or "") if same_file else "",
+        })
+    run["delivery_artifacts"] = artifacts
+    _save(run)
+    for artifact in artifacts:
+        if artifact.get("status") == "DELIVERED" and artifact.get("message_id"):
+            continue
+        errors: list[str] = []
+        for attempt in range(1, max(1, attempts) + 1):
+            artifact.update(status="UPLOADING", attempts=attempt, last_error="")
+            _save(run)
+            try:
+                path = Path(str(artifact["path"]))
+                receipt = feishu_client.send_file_to_chat(chat_id, path, str(artifact["file_name"])) or {}
+                message_id = str(receipt.get("message_id") or "")
+                if not message_id:
+                    raise RuntimeError(f"Feishu delivery returned no message receipt for {path.name}")
+                artifact.update({
+                    "status": "DELIVERED",
+                    "message_id": message_id,
+                    "file_token": str(receipt.get("file_token") or ""),
+                    "url": str(receipt.get("url") or ""),
+                    "delivery_method": str(receipt.get("delivery_method") or ""),
+                    "delivered_at": _now(),
+                    "last_error": "",
+                })
+                if receipt.get("file_token") or receipt.get("url"):
+                    run["drive_file"] = receipt
+                _append_log(run, f"已交付{artifact['label']}：{path.name}，message_id={message_id}")
+                _save(run)
+                break
+            except Exception as exc:
+                errors.append(str(exc))
+                artifact["status"] = "RETRYING" if attempt < attempts else "FAILED"
+                artifact["last_error"] = str(exc)
+                _append_log(run, f"{artifact['label']}发送第 {attempt}/{attempts} 次失败：{exc}")
+                _save(run)
+                if attempt < attempts:
+                    time.sleep(min(5 * attempt, 15))
+        if artifact.get("status") != "DELIVERED":
+            raise RuntimeError(
+                f"{artifact['label']} delivery failed after {attempts} attempts: "
+                f"{errors[-1] if errors else 'unknown error'}"
+            )
+    sent = [str(item["path"]) for item in artifacts if item.get("status") == "DELIVERED"]
+    run["sent_files"] = sent
+    run["delivery"] = {
+        "status": "DELIVERED",
+        "chat_id": chat_id,
+        "artifact_count": len(artifacts),
+        "delivered_count": len(sent),
+        "complete_bundle_path": str(run.get("sequence_zip_path") or ""),
+        "postprocess_applied": include_postprocess,
+        "delivered_at": _now(),
+    }
+    _save(run)
+    return sent
 
 
 def _create_comparison_image(original_path: Path, matte_path: Path, processed_path: Path, output_path: Path) -> Path:
@@ -1238,6 +1705,24 @@ def _format_child_failure(kind: str, run_id: str, payload: dict[str, Any]) -> st
     return "；".join(detail)
 
 
+def _user_failure_notice(run_id: str, error: Exception | str, *, retries_exhausted: bool = False) -> str:
+    detail = str(error or "")
+    if "result manifest fields do not match" in detail.lower():
+        reason = "抠图计算已经完成，但集群返回结果的协议校验未通过，因此没有交付错误文件。"
+    else:
+        reason = "任务未能完成，详细技术原因已经记录在后台日志。"
+    retry = "系统已停止自动重试，避免重复消耗 GPU。" if retries_exhausted else "系统不会交付不完整结果。"
+    return f"图片任务未完成：{run_id}\n{reason}\n{retry}"
+
+
+def _close_failed_character_resolution(run: dict[str, Any]) -> None:
+    from assetclaw_matting.services.character_resolution import fail_run_resolutions
+
+    fail_run_resolutions("direct_image", str(run.get("id") or ""))
+    run["character_question"] = ""
+    run.setdefault("character_resolution", {})["pending"] = 0
+
+
 def _cancel_child_runs(run: dict[str, Any]) -> list[dict[str, Any]]:
     children = run.get("children") if isinstance(run.get("children"), dict) else {}
     results: list[dict[str, Any]] = []
@@ -1362,7 +1847,7 @@ def _resume_worker(run_id: str) -> None:
             latest["updated_at"] = _now()
             _append_log(latest, f"图片任务持久化恢复失败：{exc}")
             _save(latest)
-            _notify(latest, f"图片任务自动恢复多次未成功：{run_id}\n{exc}")
+            _notify(latest, _user_failure_notice(run_id, exc, retries_exhausted=True))
     finally:
         latest = _load(run_id)
         if latest and int(latest.get("worker_pid") or 0) == os.getpid():
@@ -1412,6 +1897,17 @@ def _resume_existing_comfyui_child(run: dict[str, Any]) -> None:
             time.sleep(5)
     _append_log(run, f"已重新挂接持久化抠图子任务：{child_id}")
     _save(run)
+
+
+def _comfyui_child_status(run_id: str) -> dict[str, Any]:
+    if not run_id:
+        return {}
+    try:
+        from assetclaw_matting.skills.comfyui_skills import run_status
+
+        return run_status(run_id, include_gpu=False)
+    except Exception:
+        return {}
 
 
 def _process_alive(pid: int) -> bool:
@@ -1481,6 +1977,10 @@ def _append_log(run: dict[str, Any], message: str) -> None:
 
 
 def _public(run: dict[str, Any]) -> dict[str, Any]:
+    terminal = str(run.get("status") or "").upper() in FINISHED
+    character_resolution = dict(run.get("character_resolution") or {})
+    if terminal:
+        character_resolution["pending"] = 0
     return {
         "status": run.get("status"),
         "stage": run.get("stage"),
@@ -1493,8 +1993,12 @@ def _public(run: dict[str, Any]) -> dict[str, Any]:
         "sent_files": run.get("sent_files") or [],
         "sequence_zip_path": run.get("sequence_zip_path") or "",
         "drive_file": run.get("drive_file") or {},
-        "character_question": run.get("character_question") or "",
-        "character_resolution": run.get("character_resolution") or {},
+        "delivery": run.get("delivery") or {},
+        "delivery_artifacts": run.get("delivery_artifacts") or [],
+        "result_mode": run.get("result_mode") or "full",
+        "postprocess_skipped": run.get("postprocess_skipped") or {},
+        "character_question": "" if terminal else (run.get("character_question") or ""),
+        "character_resolution": character_resolution,
         "pipeline_notice": run.get("pipeline_notice") or "",
         "error": run.get("error") or "",
         "last_log": (run.get("log") or [{}])[-1].get("message", ""),

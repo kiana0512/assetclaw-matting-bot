@@ -1,3 +1,7 @@
+param(
+  [switch]$SkipStartupRecovery
+)
+
 $ErrorActionPreference = "Stop"
 chcp 65001 | Out-Null
 [Console]::InputEncoding = [System.Text.UTF8Encoding]::new()
@@ -14,6 +18,10 @@ Write-Host "Public exposure: none"
 Write-Host ""
 
 $env:PYTHONPATH = "$ProjectRoot\src;$ProjectRoot"
+if ($SkipStartupRecovery) {
+  $env:ASSETCLAW_SKIP_STARTUP_RECOVERY = "1"
+  Write-Host "Startup task recovery: skipped (receiver-only reload)"
+}
 $CondaExe = Join-Path $env:USERPROFILE "miniconda3\Scripts\conda.exe"
 if (-not (Test-Path $CondaExe)) {
   $cmd = Get-Command conda -ErrorAction SilentlyContinue

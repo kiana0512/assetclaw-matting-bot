@@ -72,6 +72,10 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
     if character_result is not None:
         return character_result
 
+    sticker_result = _try_handle_explicit_sticker_request(event, conversation_id, trace_id, dedup_key)
+    if sticker_result is not None:
+        return sticker_result
+
     confirmation_result = _try_handle_confirmation(event, conversation_id, user_key, trace_id, dedup_key)
     if confirmation_result is not None:
         return confirmation_result
@@ -268,6 +272,88 @@ def _try_handle_character_resolution(
         affected_runs=result.get("affected_runs") or [],
     )
     return FeishuProcessResult(ok=bool(result.get("ok")), trace_id=trace_id, reply_text=text_out)
+
+
+def _try_handle_explicit_sticker_request(
+    event: FeishuMessageEvent,
+    conversation_id: str,
+    trace_id: str,
+    dedup_key: str,
+) -> FeishuProcessResult | None:
+    """Send a requested library sticker before generic confirmation routing.
+
+    The legacy video-confirmation matcher treats phrases such as ``我需要表情包``
+    as consent to start a pending video.  An explicit sticker request is a
+    separate, side-effect-free intent and must never consume that confirmation.
+    """
+
+    if event.attachments or not _is_explicit_sticker_request(event.text):
+        return None
+
+    from assetclaw_matting.db.repos import update_event_dedup_status
+    from assetclaw_matting.services.sticker_service import send_sticker_to_chat
+
+    try:
+        result = send_sticker_to_chat(
+            event.chat_id,
+            message_text=event.text,
+            force=True,
+        )
+    except Exception:
+        log.exception("explicit sticker delivery failed trace_id=%s", trace_id)
+        text_out = "表情包暂时发送失败，请稍后再试。"
+        _try_reply(event.message_id, event.chat_id, text_out)
+        _log_direct_brain_message(conversation_id, event, text_out)
+        update_event_dedup_status(dedup_key, "failed")
+        return FeishuProcessResult(ok=False, trace_id=trace_id, reply_text=text_out)
+
+    if result.get("sent"):
+        text_out = ""
+        audit_text = f"已从表情包库随机发送：{Path(str(result.get('source_path') or result.get('path') or '')).name}"
+    else:
+        text_out = "表情包库目前没有可用的 PNG 或 GIF。"
+        audit_text = text_out
+        _try_reply(event.message_id, event.chat_id, text_out)
+    _log_direct_brain_message(conversation_id, event, audit_text)
+    update_event_dedup_status(dedup_key, "success")
+    trace(
+        "feishu.sticker_requested",
+        trace_id=trace_id,
+        conversation_id=conversation_id,
+        chat_id=event.chat_id,
+        sent=bool(result.get("sent")),
+        source_path=str(result.get("source_path") or ""),
+    )
+    return FeishuProcessResult(ok=True, trace_id=trace_id, reply_text=text_out)
+
+
+def _is_explicit_sticker_request(text: str) -> bool:
+    value = str(text or "").strip()
+    lowered = value.lower()
+    if not value or ("表情包" not in value and "sticker" not in lowered):
+        return False
+    if any(marker in value for marker in ("表情包状态", "表情包池", "表情包配置", "有哪些表情包")):
+        return False
+    compact = re.sub(r"[\s，。！？!?、：:~～]+", "", lowered)
+    if compact in {"表情包", "sticker", "来个表情包", "来一个表情包", "随机表情包"}:
+        return True
+    request_markers = (
+        "发个表情包",
+        "发一个表情包",
+        "给我个表情包",
+        "给我一个表情包",
+        "需要表情包",
+        "要个表情包",
+        "要一个表情包",
+        "想要表情包",
+        "整一个表情包",
+        "整个表情包",
+        "随机发",
+        "random sticker",
+        "send sticker",
+        "send a sticker",
+    )
+    return any(marker in compact for marker in request_markers)
 
 
 def _try_handle_confirmation(

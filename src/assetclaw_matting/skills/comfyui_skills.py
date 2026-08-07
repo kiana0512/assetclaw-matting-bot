@@ -9,11 +9,12 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from assetclaw_matting.comfyui.output_resolver import inspect_local_png, resolve_best_output
 from assetclaw_matting.comfyui.workflow_patch import find_primary_save_image_node_id, inspect_workflow, patch_load_image, patch_node_input, prepare_api_prompt_for_run
+from assetclaw_matting.ops_trace import trace as ops_trace
 from assetclaw_matting.skills import matting_pipeline_skills
 from assetclaw_matting.skills.media_skills import IMAGE_EXTS
 from assetclaw_matting.skills.security import validate_path
@@ -21,6 +22,32 @@ from assetclaw_matting.skills.security import validate_path
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _mark_gpu_stage(remote_state: dict[str, Any], name: str, *, overwrite: bool = False) -> str:
+    stages = dict(remote_state.get("client_stages") or {})
+    timestamp = _now()
+    if overwrite or not stages.get(name):
+        stages[name] = timestamp
+    remote_state["client_stages"] = stages
+    return str(stages[name])
+
+
+def _trace_gpu_stage(run_id: str, remote_state: dict[str, Any], stage: str, **fields: Any) -> None:
+    try:
+        ops_trace(
+            "gpu_control_stage",
+            run_id=run_id,
+            trace_id=remote_state.get("trace_id") or "",
+            external_batch_id=remote_state.get("external_batch_id") or "",
+            remote_batch_id=remote_state.get("batch_id") or "",
+            stage=stage,
+            **fields,
+        )
+    except Exception:
+        # Observability must never stop submission, reconciliation, or an
+        # explicit operator cancellation.
+        return
 
 
 def _run_id() -> str:
@@ -176,6 +203,7 @@ def run_start(
         "archived": False,
         "pipeline_notice": pipeline_notice,
         "external_batch_id": external_batch_id or f"assetclaw:{run_id}:matting:g1",
+        "trace_id": f"assetclaw-{run_id.lower()}",
         "cluster_parameters": dict(cluster_parameters or {}),
     }
 
@@ -273,6 +301,11 @@ def run_status(run_id: str | None = None, include_gpu: bool = True) -> dict[str,
         completed = sum(1 for item in prompt_map if not item.get("error") and Path(str(item.get("dst_path") or "")).exists())
         failed = sum(1 for item in prompt_map if item.get("error"))
     error_items = [item for item in prompt_map if item.get("error")]
+    last_error_detail = (
+        dict(error_items[-1].get("error_detail") or {})
+        if error_items and isinstance(error_items[-1].get("error_detail"), dict)
+        else {}
+    )
     remote_error = remote_state.get("client_error") or remote_state.get("error") or remote_state.get("poll_error") or ""
     total = int(row["total"] or len(files))
     running = max(0, total - completed - failed)
@@ -304,9 +337,17 @@ def run_status(run_id: str | None = None, include_gpu: bool = True) -> dict[str,
         "backend_selection_reason": options.get("backend_selection_reason") or "",
         "backend_handshake": options.get("backend_handshake") or {},
         "external_batch_id": options.get("external_batch_id") or "",
+        "trace_id": remote_state.get("trace_id") or options.get("trace_id") or "",
         "remote_batch_id": remote_state.get("batch_id") or "",
         "remote_status": remote_state.get("status") or "",
         "node_distribution": remote_state.get("node_distribution") or {},
+        "workflow_identity": remote_state.get("identity_validation") or {},
+        "remote_performance": remote_state.get("performance") or {},
+        "client_stages": remote_state.get("client_stages") or {},
+        "idle_gap_seconds": remote_state.get("idle_gap_seconds"),
+        "poll_errors_total": int(remote_state.get("poll_errors_total") or 0),
+        "watchdog_action": remote_state.get("watchdog_action") or "",
+        "cancel_intent": remote_state.get("cancel_intent") or {},
         "fake_mode": settings.comfyui_fake_mode,
         "workflow_path": row["workflow_path"],
         "input_dir": row["input_dir"],
@@ -327,6 +368,8 @@ def run_status(run_id: str | None = None, include_gpu: bool = True) -> dict[str,
         "last_completed": _last_completed_name(prompt_map),
         "last_completed_detail": _path_detail(_last_completed_rel_path(prompt_map)),
         "last_error": str(remote_error) if backend == "gpu_control" and remote_error else _last_error_summary(error_items),
+        "last_error_kind": str(last_error_detail.get("kind") or ""),
+        "last_error_detail": last_error_detail,
         "error_items": _error_item_summaries(error_items[:5]),
         "updated_at": row["updated_at"],
     }
@@ -443,14 +486,32 @@ def run_cancel(run_id: str | None = None, interrupt_current: bool = True, notify
     if backend == "gpu_control":
         remote_state = dict(options.get("gpu_control") or {})
         remote_batch_id = str(remote_state.get("batch_id") or "")
+        cancel_key = f"{options.get('external_batch_id') or row['id']}:cancel"
+        cancel_request_id = f"{row['id'].lower()}-cancel-01"
+        cancel_intent = dict(remote_state.get("cancel_intent") or {})
+        if not cancel_intent:
+            cancel_intent = {
+                "actor": "assetclaw_operator",
+                "source": "assetclaw.comfyui.run_cancel",
+                "reason": "explicit_user_request",
+                "request_id": cancel_request_id,
+                "idempotency_key": cancel_key,
+                "requested_at": _now(),
+            }
+        remote_state["cancel_intent"] = cancel_intent
+        options["gpu_control"] = remote_state
+        # Persist intent before the network call so a crash cannot produce an
+        # unaudited remote CANCELLED state.
+        _save_run_progress(row["id"], prompt_ids, options)
+        _trace_gpu_stage(row["id"], remote_state, "cancel_intent_persisted", request_id=cancel_request_id)
         if remote_batch_id:
             try:
                 from assetclaw_matting.services.gpu_control_batch import GpuControlBatchClient, merge_remote_state
 
                 response = GpuControlBatchClient().cancel_batch(
                     remote_batch_id,
-                    idempotency_key=f"{options.get('external_batch_id') or row['id']}:cancel",
-                    request_id=f"{row['id'].lower()}-cancel-01",
+                    idempotency_key=cancel_key,
+                    request_id=cancel_request_id,
                 )
                 latest = _get_run(row["id"])
                 latest_options = json.loads(latest["options_json"] or "{}") if latest else options
@@ -458,6 +519,10 @@ def run_cancel(run_id: str | None = None, interrupt_current: bool = True, notify
                 latest_remote = merge_remote_state(latest_remote, response)
                 latest_remote["cancel_requested_at"] = _now()
                 latest_remote["cancel_response_meta"] = dict(response.get("_response_meta") or {})
+                latest_intent = dict(latest_remote.get("cancel_intent") or cancel_intent)
+                latest_intent["accepted_at"] = _now()
+                latest_intent["remote_status"] = str(response.get("status") or "")
+                latest_remote["cancel_intent"] = latest_intent
                 latest_options["gpu_control"] = latest_remote
                 _save_run_progress(row["id"], prompt_ids, latest_options)
                 status = "CANCELING"
@@ -699,6 +764,80 @@ def _start_run_worker(run_id: str) -> None:
     thread.start()
 
 
+def recover_gpu_control_manifest_failures(limit: int = 50) -> dict[str, Any]:
+    """Re-verify current parents whose completed GPU artifact hit the old manifest gate.
+
+    The remote batch is immutable and already terminal. Recovery keeps its batch_id,
+    reuses the SHA-verified local archive when present, and never creates a new batch.
+    A conditional status update makes overlapping startup scans safe.
+    """
+
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.db.sqlite import get_connection
+
+    signature = "result manifest fields do not match GPU Control V2"
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, status, output_dir, options_json
+            FROM comfyui_runs
+            WHERE status = 'FAILED' AND options_json LIKE ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (f"%{signature}%", max(1, min(int(limit), 200))),
+        ).fetchall()
+
+    recovered: list[str] = []
+    failed: list[dict[str, str]] = []
+    skipped: list[str] = []
+    for row in rows:
+        run_id = str(row["id"])
+        try:
+            options = json.loads(row["options_json"] or "{}")
+            remote = dict(options.get("gpu_control") or {})
+            if str(remote.get("status") or "").upper() != "SUCCEEDED":
+                skipped.append(run_id)
+                continue
+            result_zip = Path(settings.storage_dir) / "gpu_control_batches" / run_id / "result.zip"
+            if not result_zip.is_file():
+                skipped.append(run_id)
+                continue
+
+            parent_status_path = Path(str(row["output_dir"] or "")).parent / "status.json"
+            if not parent_status_path.is_file():
+                skipped.append(run_id)
+                continue
+            parent = json.loads(parent_status_path.read_text(encoding="utf-8"))
+            current_child = str((parent.get("children") or {}).get("comfyui_run_id") or "")
+            parent_status = str(parent.get("status") or "").upper()
+            if current_child != run_id or parent_status in {"DONE", "DONE_WITH_ERRORS", "CANCELED"}:
+                skipped.append(run_id)
+                continue
+
+            with get_connection() as conn:
+                claimed = conn.execute(
+                    "UPDATE comfyui_runs SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+                    ("QUEUED", _now(), run_id, "FAILED"),
+                ).rowcount
+            if claimed != 1:
+                skipped.append(run_id)
+                continue
+
+            _run_gpu_control_worker(run_id)
+            latest = _get_run(run_id)
+            if latest and str(latest["status"] or "").upper() == "DONE":
+                recovered.append(run_id)
+            else:
+                latest_options = json.loads(latest["options_json"] or "{}") if latest else {}
+                latest_error = str((latest_options.get("gpu_control") or {}).get("client_error") or "revalidation failed")
+                failed.append({"run_id": run_id, "error": latest_error})
+        except Exception as exc:
+            failed.append({"run_id": run_id, "error": str(exc)})
+
+    return {"ok": not failed, "recovered": recovered, "failed": failed, "skipped": skipped}
+
+
 def _run_gpu_control_worker(run_id: str) -> None:
     from assetclaw_matting.config import settings
     from assetclaw_matting.services.gpu_control_batch import (
@@ -709,6 +848,8 @@ def _run_gpu_control_worker(run_id: str) -> None:
         compact_remote_state,
         merge_remote_state,
         result_artifact,
+        validate_partial_failed_items,
+        validate_workflow_identity,
         verify_and_publish_result,
     )
 
@@ -722,6 +863,13 @@ def _run_gpu_control_worker(run_id: str) -> None:
         dst = Path(row["output_dir"])
         prompt_ids = json.loads(row["prompt_ids_json"] or "[]")
         workspace = Path(settings.storage_dir) / "gpu_control_batches" / run_id
+        remote_state = dict(options.get("gpu_control") or {})
+        remote_state.setdefault("trace_id", str(options.get("trace_id") or f"assetclaw-{run_id.lower()}"))
+        _mark_gpu_stage(remote_state, "prepare_started_at")
+        prepare_started = time.perf_counter()
+        options["gpu_control"] = remote_state
+        _save_gpu_control_progress(run_id, prompt_ids, options, remote_state)
+        _trace_gpu_stage(run_id, remote_state, "prepare_started")
         prepared = build_input_batch(
             run_id,
             src,
@@ -731,7 +879,8 @@ def _run_gpu_control_worker(run_id: str) -> None:
             external_batch_id=str(options.get("external_batch_id") or "") or None,
             parameters=dict(options.get("cluster_parameters") or {}),
         )
-        remote_state = dict(options.get("gpu_control") or {})
+        _mark_gpu_stage(remote_state, "prepare_finished_at")
+        remote_state["client_prepare_ms"] = round((time.perf_counter() - prepare_started) * 1000, 3)
         remote_state.update(
             {
                 "external_batch_id": prepared["external_batch_id"],
@@ -743,7 +892,8 @@ def _run_gpu_control_worker(run_id: str) -> None:
             }
         )
         options["gpu_control"] = remote_state
-        _save_run_progress(run_id, prompt_ids, options)
+        _save_gpu_control_progress(run_id, prompt_ids, options, remote_state)
+        _trace_gpu_stage(run_id, remote_state, "prepare_finished", duration_ms=remote_state["client_prepare_ms"])
         client = GpuControlBatchClient()
         batch_id = str(remote_state.get("batch_id") or "")
         if not batch_id:
@@ -751,6 +901,9 @@ def _run_gpu_control_worker(run_id: str) -> None:
             latest = _get_run(run_id)
             if not latest or latest["status"] == "CANCELED":
                 return
+            _mark_gpu_stage(remote_state, "create_started_at")
+            create_started = time.perf_counter()
+            _trace_gpu_stage(run_id, remote_state, "create_started", request_id=f"{run_id.lower()}-create-01")
             created = client.create_batch(
                 Path(prepared["archive_path"]),
                 prepared["manifest"],
@@ -760,58 +913,93 @@ def _run_gpu_control_worker(run_id: str) -> None:
             returned_external_id = str(created.get("external_batch_id") or "")
             if returned_external_id and returned_external_id != prepared["external_batch_id"]:
                 raise GpuControlError("GPU Control returned a mismatched external_batch_id")
+            identity_validation = validate_workflow_identity(created)
             remote_state = merge_remote_state(remote_state, created)
+            remote_state["identity_validation"] = identity_validation
+            _mark_gpu_stage(remote_state, "create_finished_at")
+            remote_state["client_create_ms"] = round((time.perf_counter() - create_started) * 1000, 3)
             remote_state["create_response_meta"] = dict(created.get("_response_meta") or {})
             batch_id = str(remote_state.get("batch_id") or "")
             if not batch_id:
                 raise GpuControlError("GPU Control create response has no batch_id")
             options["gpu_control"] = remote_state
-            _save_run_progress(run_id, prompt_ids, options)
+            _save_gpu_control_progress(run_id, prompt_ids, options, remote_state)
+            _trace_gpu_stage(run_id, remote_state, "create_finished", duration_ms=remote_state["client_create_ms"])
             latest = _get_run(run_id)
             if not latest or latest["status"] == "CANCELED":
-                try:
-                    client.cancel_batch(
-                        batch_id,
-                        idempotency_key=f"{prepared['idempotency_key']}:cancel",
-                        request_id=f"{run_id.lower()}-cancel-after-create-01",
-                    )
-                except Exception:
-                    pass
+                latest_options = json.loads(latest["options_json"] or "{}") if latest else options
+                latest_remote = dict(latest_options.get("gpu_control") or remote_state)
+                cancel_intent = dict(latest_remote.get("cancel_intent") or {})
+                if cancel_intent:
+                    try:
+                        cancelled = client.cancel_batch(
+                            batch_id,
+                            idempotency_key=str(cancel_intent.get("idempotency_key") or f"{prepared['idempotency_key']}:cancel"),
+                            request_id=str(cancel_intent.get("request_id") or f"{run_id.lower()}-cancel-after-create-01"),
+                        )
+                        latest_remote = merge_remote_state(latest_remote, cancelled)
+                        cancel_intent["accepted_at"] = _now()
+                        cancel_intent["remote_status"] = str(cancelled.get("status") or "")
+                        latest_remote["cancel_intent"] = cancel_intent
+                        latest_options["gpu_control"] = latest_remote
+                        _save_run_progress(run_id, prompt_ids, latest_options)
+                    except Exception as exc:
+                        latest_remote["cancel_submit_error"] = str(exc)
+                        latest_options["gpu_control"] = latest_remote
+                        _save_run_progress(run_id, prompt_ids, latest_options)
                 return
 
         started = time.monotonic()
+        last_remote_change = started
+        previous_signature = (
+            str(remote_state.get("status") or ""),
+            float(remote_state.get("progress") or 0),
+            json.dumps(remote_state.get("counts") or {}, sort_keys=True),
+        )
         consecutive_poll_errors = 0
+        watchdog_reported = bool(remote_state.get("watchdog_exceeded_at"))
+        _mark_gpu_stage(remote_state, "polling_started_at")
+        _save_gpu_control_progress(run_id, prompt_ids, options, remote_state)
         while True:
             latest = _get_run(run_id)
             if not latest or latest["status"] == "CANCELED":
                 return
-            if time.monotonic() - started > int(settings.gpu_control_execution_timeout_seconds or 86400):
-                try:
-                    cancelled = client.cancel_batch(
-                        batch_id,
-                        idempotency_key=f"{prepared['idempotency_key']}:cancel",
-                        request_id=f"{run_id.lower()}-timeout-cancel-01",
-                    )
-                    remote_state["timeout_cancel_response"] = dict(cancelled)
-                    options["gpu_control"] = remote_state
-                    _save_run_progress(run_id, prompt_ids, options)
-                except Exception:
-                    pass
-                raise GpuControlError("GPU Control batch exceeded the configured execution timeout")
+            elapsed_seconds = time.monotonic() - started
+            watchdog_seconds = int(settings.gpu_control_execution_timeout_seconds or 86400)
+            if elapsed_seconds > watchdog_seconds and not watchdog_reported:
+                watchdog_reported = True
+                remote_state["watchdog_exceeded_at"] = _now()
+                remote_state["watchdog_elapsed_seconds"] = round(elapsed_seconds, 3)
+                remote_state["watchdog_action"] = "OBSERVE_AND_RECONCILE_WITHOUT_CANCEL"
+                _save_gpu_control_progress(run_id, prompt_ids, options, remote_state)
+                _trace_gpu_stage(
+                    run_id,
+                    remote_state,
+                    "watchdog_exceeded_without_cancel",
+                    elapsed_seconds=round(elapsed_seconds, 3),
+                )
+                _notify(
+                    run_id,
+                    "GPU Control 批次超过本地观察阈值；远端仍是权威状态，"
+                    "动画管家会继续使用原 batch_id 查询，不会自动取消或改走本机。",
+                )
             poll_sequence = int(remote_state.get("poll_sequence") or 0) + 1
             remote_state["poll_sequence"] = poll_sequence
+            poll_request_id = f"{run_id.lower()}-poll-{poll_sequence:06d}"
             try:
                 payload = client.get_batch(
                     batch_id,
-                    request_id=f"{run_id.lower()}-poll-{poll_sequence:06d}",
+                    request_id=poll_request_id,
                 )
                 consecutive_poll_errors = 0
             except Exception as exc:
                 consecutive_poll_errors += 1
                 remote_state["poll_error"] = str(exc)
                 remote_state["poll_error_count"] = consecutive_poll_errors
-                options["gpu_control"] = remote_state
-                _save_run_progress(run_id, prompt_ids, options)
+                remote_state["poll_errors_total"] = int(remote_state.get("poll_errors_total") or 0) + 1
+                remote_state["last_poll_error_at"] = _now()
+                remote_state["last_poll_request_id"] = poll_request_id
+                _save_gpu_control_progress(run_id, prompt_ids, options, remote_state)
                 poll_error_limit = max(3, int(settings.gpu_control_poll_error_limit or 20))
                 if consecutive_poll_errors == poll_error_limit:
                     _notify(
@@ -829,24 +1017,131 @@ def _run_gpu_control_worker(run_id: str) -> None:
                 raise GpuControlError("GPU Control status returned a mismatched batch_id")
             if returned_external_id and returned_external_id != prepared["external_batch_id"]:
                 raise GpuControlError("GPU Control status returned a mismatched external_batch_id")
+            identity_validation = validate_workflow_identity(payload)
             remote_state = merge_remote_state(remote_state, payload)
+            remote_state["identity_validation"] = identity_validation
+            observed_at = _now()
+            remote_state["last_poll_succeeded_at"] = observed_at
+            remote_state["last_poll_request_id"] = poll_request_id
             remote_state.pop("poll_error", None)
             remote_state.pop("poll_error_count", None)
-            options["gpu_control"] = remote_state
-            _save_run_progress(run_id, prompt_ids, options)
+            current_signature = (
+                str(remote_state.get("status") or ""),
+                float(remote_state.get("progress") or 0),
+                json.dumps(remote_state.get("counts") or {}, sort_keys=True),
+            )
+            if current_signature != previous_signature:
+                previous_signature = current_signature
+                last_remote_change = time.monotonic()
+                remote_state["last_remote_change_at"] = observed_at
+            remote_state["idle_gap_seconds"] = round(time.monotonic() - last_remote_change, 3)
+            _save_gpu_control_progress(run_id, prompt_ids, options, remote_state)
             remote_status = str(remote_state.get("status") or "").upper()
             if remote_status not in TERMINAL_BATCH_STATUSES:
                 time.sleep(max(1, int(settings.gpu_control_poll_interval_seconds or 3)))
                 continue
+            _mark_gpu_stage(remote_state, "remote_terminal_observed_at")
+            remote_state["remote_terminal_request_id"] = poll_request_id
+            _save_gpu_control_progress(run_id, prompt_ids, options, remote_state)
+            _trace_gpu_stage(run_id, remote_state, "remote_terminal", remote_status=remote_status)
             if remote_status == "CANCELLED":
+                if not remote_state.get("cancel_intent"):
+                    remote_state["illegal_remote_cancelled"] = {
+                        "detected_at": _now(),
+                        "request_id": poll_request_id,
+                        "reason": "remote_cancelled_without_local_cancel_intent",
+                    }
+                    _save_gpu_control_progress(run_id, prompt_ids, options, remote_state)
+                    raise GpuControlError("GPU Control returned CANCELLED without a persisted local cancel intent")
                 _set_run_status(run_id, "CANCELED")
+                return
+            counts = dict(remote_state.get("counts") or {})
+            partial_artifacts = [
+                item
+                for item in remote_state.get("artifacts") or []
+                if str(item.get("kind") or "") == "result_archive"
+            ]
+            if (
+                remote_status == "PARTIAL_SUCCESS"
+                and int(counts.get("succeeded") or 0) > 0
+                and int(counts.get("failed") or 0) > 0
+                and partial_artifacts
+            ):
+                artifact = result_artifact(remote_state)
+                result_zip = workspace / "partial-result.zip"
+                download = client.download_artifact(
+                    artifact,
+                    result_zip,
+                    request_id=f"{run_id.lower()}-partial-download-01",
+                )
+                published = verify_and_publish_result(
+                    result_zip,
+                    str(artifact.get("sha256") or download["sha256"]),
+                    prepared,
+                    dst,
+                    run_id,
+                    strict_frame_identity=bool(options.get("strict_frame_identity")),
+                    preserve_existing=True,
+                    expected_batch_id=batch_id,
+                    expected_external_batch_id=prepared["external_batch_id"],
+                    allow_partial=True,
+                    partial_status=remote_state,
+                )
+                completed_at = _now()
+                published_ordinals = {int(item["ordinal"]) for item in published}
+                remote_failed = validate_partial_failed_items(remote_state, prepared, published_ordinals)
+                failed_items = []
+                remote_failed_by_ordinal = {
+                    int(item.get("ordinal")): item
+                    for item in remote_failed
+                    if isinstance(item, dict) and item.get("ordinal") is not None
+                }
+                for expected in prepared.get("frames") or []:
+                    ordinal = int(expected["ordinal"])
+                    if ordinal in published_ordinals:
+                        continue
+                    detail = remote_failed_by_ordinal.get(ordinal, {})
+                    failed_items.append(
+                        {
+                            "ordinal": ordinal,
+                            "src_path": expected["source_path"],
+                            "rel_path": expected["output_relative_path"],
+                            "dst_path": str(dst / Path(*PurePosixPath(expected["output_relative_path"]).parts)),
+                            "error": str(detail.get("message") or detail.get("error") or remote_state.get("error") or "GPU frame failed"),
+                            "error_kind": str(detail.get("code") or "REMOTE_FRAME_FAILED"),
+                            "node_id": str(detail.get("node_id") or ""),
+                            "attempts": int(detail.get("attempts") or 0),
+                            "attempted_node_ids": list(detail.get("attempted_node_ids") or []),
+                            "failed_at": completed_at,
+                        }
+                    )
+                options["prompt_map"] = [
+                    *[{**item, "completed_at": completed_at} for item in published],
+                    *failed_items,
+                ]
+                remote_state["partial_result"] = {
+                    "published": len(published),
+                    "failed": len(failed_items),
+                    "archive_path": str(result_zip),
+                    "archive_sha256": download["sha256"],
+                    "published_at": completed_at,
+                }
+                options["gpu_control"] = remote_state
+                _save_gpu_control_progress(run_id, prompt_ids, options, remote_state)
+                _set_run_status(run_id, "DONE_WITH_ERRORS")
+                _trace_gpu_stage(
+                    run_id,
+                    remote_state,
+                    "partial_result_published",
+                    published=len(published),
+                    failed=len(failed_items),
+                )
                 return
             if remote_status != "SUCCEEDED":
                 raise GpuControlError(
                     f"GPU Control batch ended as {remote_status}: {remote_state.get('error') or 'no error detail'}"
                 )
 
-            counts = dict(remote_state.get("counts") or {})
             if int(counts.get("total") or -1) != len(files) or int(counts.get("succeeded") or -1) != len(files):
                 raise GpuControlError(f"GPU Control SUCCEEDED counts do not match the submitted total: {counts}")
             for count_name in ("pending", "queued", "running", "failed", "cancelled"):
@@ -854,14 +1149,22 @@ def _run_gpu_control_worker(run_id: str) -> None:
                     raise GpuControlError(f"GPU Control SUCCEEDED response contains unfinished frames: {counts}")
             artifact = result_artifact(payload)
             result_zip = workspace / "result.zip"
+            _mark_gpu_stage(remote_state, "download_started_at")
+            download_started = time.perf_counter()
+            _save_gpu_control_progress(run_id, prompt_ids, options, remote_state)
+            _trace_gpu_stage(run_id, remote_state, "download_started", request_id=f"{run_id.lower()}-download-01")
             download = client.download_artifact(
                 artifact,
                 result_zip,
                 request_id=f"{run_id.lower()}-download-01",
             )
+            _mark_gpu_stage(remote_state, "download_finished_at")
+            remote_state["client_download_ms"] = round((time.perf_counter() - download_started) * 1000, 3)
             latest = _get_run(run_id)
             if not latest or latest["status"] == "CANCELED":
                 return
+            _mark_gpu_stage(remote_state, "publish_started_at")
+            publish_started = time.perf_counter()
             published = verify_and_publish_result(
                 result_zip,
                 str(artifact.get("sha256") or download["sha256"]),
@@ -874,14 +1177,28 @@ def _run_gpu_control_worker(run_id: str) -> None:
                 expected_external_batch_id=prepared["external_batch_id"],
             )
             completed_at = _now()
+            _mark_gpu_stage(remote_state, "publish_finished_at")
+            remote_state["client_publish_ms"] = round((time.perf_counter() - publish_started) * 1000, 3)
             options["prompt_map"] = [{**item, "completed_at": completed_at} for item in published]
             remote_state["result_archive_path"] = str(result_zip)
             remote_state["result_archive_sha256"] = download["sha256"]
             remote_state["result_download"] = download
             remote_state["published_at"] = completed_at
+            remote_state.pop("client_error", None)
+            remote_state.pop("failed_at", None)
+            _mark_gpu_stage(remote_state, "completed_at")
             options["gpu_control"] = remote_state
-            _save_run_progress(run_id, prompt_ids, options)
+            _save_gpu_control_progress(run_id, prompt_ids, options, remote_state)
             _set_run_status(run_id, "DONE")
+            _trace_gpu_stage(
+                run_id,
+                remote_state,
+                "completed",
+                download_ms=remote_state["client_download_ms"],
+                publish_ms=remote_state["client_publish_ms"],
+                download_attempts=download.get("attempts"),
+                resumed_from_bytes=download.get("resumed_from_bytes"),
+            )
             return
     except Exception as exc:
         row = _get_run(run_id)
@@ -891,8 +1208,14 @@ def _run_gpu_control_worker(run_id: str) -> None:
             remote_state["client_error"] = str(exc)
             remote_state["failed_at"] = _now()
             options["gpu_control"] = remote_state
-            _save_run_progress(run_id, json.loads(row["prompt_ids_json"] or "[]"), options)
+            _save_gpu_control_progress(
+                run_id,
+                json.loads(row["prompt_ids_json"] or "[]"),
+                options,
+                remote_state,
+            )
             _set_run_status(run_id, "FAILED")
+            _trace_gpu_stage(run_id, remote_state, "failed", error=str(exc))
             _notify(run_id, f"GPU Control 抠图批任务失败：{exc}")
     finally:
         _WORKER_RUNS.discard(run_id)
@@ -945,7 +1268,7 @@ def _wait_for_gpu_control_admission(
     remote_state["admission_poll_sequence"] = sequence
     remote_state["admission"] = admission
     options["gpu_control"] = remote_state
-    _save_run_progress(run_id, prompt_ids, options)
+    _save_gpu_control_progress(run_id, prompt_ids, options, remote_state)
 
 
 def _run_worker(run_id: str) -> None:
@@ -1063,12 +1386,15 @@ def _run_worker(run_id: str) -> None:
                 options["prompt_map"] = prompt_map
                 _save_run_progress(run_id, prompt_ids, options)
             except Exception as exc:
+                error_detail = _execution_failure_detail(exc)
                 prompt_map = _replace_prompt_result(prompt_map, str(image_path), {
                     "prompt_id": prompt_id,
                     "src_path": str(image_path),
                     "rel_path": _relative_output_key(src, image_path, bool(options.get("preserve_structure", True))),
                     "dst_path": str(target),
                     "error": str(exc),
+                    "error_kind": str(error_detail.get("kind") or ""),
+                    "error_detail": error_detail,
                     "failed_at": _now(),
                 })
                 options["prompt_map"] = prompt_map
@@ -1392,11 +1718,58 @@ def _last_error_summary(error_items: list[dict[str, Any]]) -> str:
     return f"{frame}: {error}" if frame else error
 
 
-def _error_item_summaries(error_items: list[dict[str, Any]]) -> list[dict[str, str]]:
+_LOCAL_GPU_OOM_MARKERS = (
+    "torch.outofmemoryerror",
+    "cuda out of memory",
+    "cuda error: out of memory",
+    "cudnn_status_alloc_failed",
+    "cublas_status_alloc_failed",
+    "allocation on device",
+    "ran out of memory",
+)
+
+
+def _execution_failure_detail(exc: BaseException) -> dict[str, str]:
+    """Preserve a compact, structured failure classification before UI truncation."""
+
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    text = "\n".join(f"{type(item).__name__}: {item}" for item in chain)
+    folded = text.casefold()
+    kind = "GPU_OOM" if any(marker in folded for marker in _LOCAL_GPU_OOM_MARKERS) else "EXECUTION_ERROR"
+    exception_type = ""
+    match = re.search(r"exception_type['\"]?\s*[:=]\s*['\"]([^'\"]+)", text, flags=re.IGNORECASE)
+    if match:
+        exception_type = match.group(1).strip()
+    elif chain:
+        exception_type = type(chain[-1]).__name__
+    node_id = ""
+    match = re.search(r"node_id['\"]?\s*[:=]\s*['\"]([^'\"]+)", text, flags=re.IGNORECASE)
+    if match:
+        node_id = match.group(1).strip()
+    return {
+        "kind": kind,
+        "exception_type": exception_type,
+        "node_id": node_id,
+        "message": _compact_error(text, limit=1200),
+    }
+
+
+def _error_item_summaries(error_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
             "frame": Path(str(item.get("src_path") or item.get("rel_path") or "")).name,
             "error": _compact_error(str(item.get("error") or "")),
+            "ordinal": item.get("ordinal"),
+            "error_kind": str(item.get("error_kind") or ""),
+            "node_id": str(item.get("node_id") or ""),
+            "attempts": int(item.get("attempts") or 0),
+            "attempted_node_ids": list(item.get("attempted_node_ids") or []),
         }
         for item in error_items
     ]
@@ -1455,6 +1828,39 @@ def _save_run_progress(run_id: str, prompt_ids: list[str], options: dict[str, An
             "UPDATE comfyui_runs SET prompt_ids_json = ?, options_json = ?, updated_at = ? WHERE id = ?",
             (json.dumps(prompt_ids, ensure_ascii=False), json.dumps(options, ensure_ascii=False), _now(), run_id),
         )
+
+
+def _save_gpu_control_progress(
+    run_id: str,
+    prompt_ids: list[str],
+    options: dict[str, Any],
+    remote_state: dict[str, Any],
+) -> None:
+    """Persist worker progress without erasing a concurrent operator cancel intent."""
+
+    latest = _get_run(run_id)
+    try:
+        latest_options_json = latest["options_json"] if latest else None
+    except (KeyError, IndexError, TypeError):
+        latest_options_json = None
+    if latest_options_json is not None:
+        latest_options = json.loads(latest_options_json or "{}")
+        latest_remote = dict(latest_options.get("gpu_control") or {})
+        merged_remote = dict(latest_remote)
+        merged_remote.update(remote_state)
+        for protected_key in ("cancel_intent", "cancel_requested_at", "cancel_response_meta"):
+            if latest_remote.get(protected_key):
+                merged_remote[protected_key] = latest_remote[protected_key]
+        merged_options = dict(latest_options)
+        merged_options["prompt_map"] = list(options.get("prompt_map") or latest_options.get("prompt_map") or [])
+        merged_options["gpu_control"] = merged_remote
+        options.clear()
+        options.update(merged_options)
+        remote_state.clear()
+        remote_state.update(merged_remote)
+    else:
+        options["gpu_control"] = remote_state
+    _save_run_progress(run_id, prompt_ids, options)
 
 
 def _looks_stalled(row: Any, stale_seconds: int = 60) -> bool:

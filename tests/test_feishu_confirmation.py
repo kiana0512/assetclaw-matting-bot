@@ -142,9 +142,10 @@ def test_duplicate_direct_video_confirmations_start_once(monkeypatch) -> None:
     assert "当前没有等待你确认的操作。" in replies
 
 
-def test_direct_video_intent_followup_confirms_pending_upload(monkeypatch) -> None:
+def test_explicit_sticker_request_does_not_confirm_pending_video_upload(monkeypatch, tmp_path: Path) -> None:
     replies: list[str] = []
     calls: list[tuple[str, dict]] = []
+    sent: list[tuple[str, Path]] = []
     args = {
         "video_paths": [r".\storage\feishu_inbox\2-3.mp4"],
         "source_names": ["2-3.mp4"],
@@ -152,6 +153,13 @@ def test_direct_video_intent_followup_confirms_pending_upload(monkeypatch) -> No
     }
     monkeypatch.setattr("assetclaw_matting.feishu.processor._try_reply", lambda _mid, _cid, text: replies.append(text))
     monkeypatch.setattr("assetclaw_matting.feishu.processor._try_send_chat", lambda _cid, text: replies.append(text))
+    monkeypatch.setattr(settings, "bot_sticker_dir", tmp_path)
+    monkeypatch.setattr(settings, "bot_sticker_extensions", ".png")
+    (tmp_path / "random.png").write_bytes(b"png")
+    monkeypatch.setattr(
+        "assetclaw_matting.feishu.client.feishu_client.send_image_to_chat",
+        lambda chat_id, path: sent.append((chat_id, path)),
+    )
     monkeypatch.setattr(
         "assetclaw_matting.skills.registry.call_skill",
         lambda skill, arguments, requested_by="brain": calls.append((skill, arguments))
@@ -162,8 +170,9 @@ def test_direct_video_intent_followup_confirms_pending_upload(monkeypatch) -> No
     result = process_feishu_message(_event("我需要表情包", f"evt_video_intent_{uuid.uuid4().hex}"))
 
     assert result.ok is True
-    assert calls == [("direct_video.start", args)]
-    assert "收到，开始处理。" in replies
+    assert calls == []
+    assert sent == [("chat_confirm", tmp_path / "random.png")]
+    assert "收到，开始处理。" not in replies
 
 
 def test_cancel_named_comfy_run_is_not_treated_as_confirmation_cancel(monkeypatch) -> None:

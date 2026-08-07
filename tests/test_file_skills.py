@@ -6,16 +6,21 @@ from assetclaw_matting.skills.file_skills import file_copy, file_exists, file_li
 
 
 def test_list_allowed() -> None:
-    result = file_list_allowed("E:\\assetclaw-matting-bot", max_items=10)
+    result = file_list_allowed(str(Path.cwd()), max_items=10)
     assert result["ok"] is True
     assert isinstance(result["items"], list)
 
 
-def test_list_allowed_filters_denied_root_entries() -> None:
-    result = file_list_allowed("E:\\", max_items=100)
+def test_list_allowed_filters_denied_root_entries(tmp_path: Path) -> None:
+    (tmp_path / "$RECYCLE.BIN").mkdir()
+    (tmp_path / "System Volume Information").mkdir()
+    (tmp_path / "visible").mkdir()
+
+    result = file_list_allowed(str(tmp_path), max_items=100)
     names = {item["name"] for item in result["items"]}
     assert "$RECYCLE.BIN" not in names
     assert "System Volume Information" not in names
+    assert "visible" in names
 
 
 def test_copy_file() -> None:

@@ -29,6 +29,7 @@ STAGES = [
     ("p4_shelve", "7 P4 reconcile/changelist/shelve/report"),
 ]
 _WORKERS: set[str] = set()
+_RUN_FILE_LOCK = threading.Lock()
 
 
 def run_preview(
@@ -111,6 +112,7 @@ def run_start(
         "current_stage": "feishu_download",
         "created_at": _now(),
         "updated_at": _now(),
+        "trace_id": f"assetclaw-{run_id.lower()}",
         "date_root": preview["date_root"],
         "unity_ready": preview["unity_ready"],
         "unity_project": preview["unity_project"],
@@ -127,6 +129,16 @@ def run_start(
         "p4": preview["p4"],
         "chat_id": (ctx.get("chat_id") or "") if ctx.get("channel") == "feishu" else "",
         "stages": _stage_payload("feishu_download"),
+        "stage_timings": {
+            "feishu_download": {
+                "started_at": _now(),
+                "finished_at": "",
+                "duration_seconds": None,
+                "attempts": 1,
+                "status": "running",
+            }
+        },
+        "last_transition_at": _now(),
         "children": {},
         "error": "",
         "worker_pid": os.getpid(),
@@ -193,6 +205,7 @@ def recover_incomplete_runs() -> dict[str, Any]:
         if local_worker or remote_worker:
             still_running.append(run_id)
             continue
+        _mark_stage_terminal(run, str(run.get("current_stage") or "unknown"), "failed")
         run["status"] = "FAILED"
         run["worker_pid"] = 0
         run["error"] = "检测到动画流程执行进程已退出，已自动清除僵死运行状态。"
@@ -844,6 +857,9 @@ def _public(run: dict[str, Any]) -> dict[str, Any]:
         "unity_import_mode": run.get("unity_import_mode") or "import",
         "priority_characters": run.get("priority_characters") or [],
         "stages": run.get("stages") or [],
+        "stage_timings": run.get("stage_timings") or {},
+        "trace_id": run.get("trace_id") or "",
+        "last_transition_at": run.get("last_transition_at") or "",
         "children": run.get("children") or {},
         "error": run.get("error") or "",
         "p4": run.get("p4") or {},
@@ -867,17 +883,48 @@ def _load(run_id: str | None = None) -> dict[str, Any] | None:
 def _save(run: dict[str, Any]) -> None:
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     run["updated_at"] = _now()
-    _path(run["id"]).write_text(json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8")
+    target = _path(run["id"])
+    partial = target.with_suffix(target.suffix + ".tmp")
+    payload = json.dumps(run, ensure_ascii=False, indent=2)
+    with _RUN_FILE_LOCK:
+        partial.write_text(payload, encoding="utf-8")
+        os.replace(partial, target)
 
 
 def _mark(run: dict[str, Any], status: str, stage: str) -> None:
+    now = _now()
+    previous_stage = str(run.get("current_stage") or "")
+    timings = dict(run.get("stage_timings") or {})
+    if previous_stage and previous_stage != stage:
+        previous = dict(timings.get(previous_stage) or {})
+        if previous.get("started_at") and not previous.get("finished_at"):
+            previous["finished_at"] = now
+            previous["duration_seconds"] = _iso_duration_seconds(str(previous["started_at"]), now)
+        previous["status"] = "done"
+        timings[previous_stage] = previous
+    current = dict(timings.get(stage) or {})
+    if not current.get("started_at"):
+        current["started_at"] = now
+        current["attempts"] = int(current.get("attempts") or 0) + 1
+    if status == "DONE":
+        if current.get("started_at") and not current.get("finished_at"):
+            current["finished_at"] = now
+            current["duration_seconds"] = _iso_duration_seconds(str(current["started_at"]), now)
+        current["status"] = "done"
+    else:
+        current["status"] = "running"
+    timings[stage] = current
     run["status"] = status
     run["current_stage"] = stage
+    run["stage_timings"] = timings
+    if previous_stage != stage or status == "DONE":
+        run["last_transition_at"] = now
     run["stages"] = [{"key": key, "label": label, "status": "done"} for key, label in STAGES] if status == "DONE" else _stage_payload(stage)
     _save(run)
 
 
 def _block(run: dict[str, Any], message: str, stage: str) -> None:
+    _mark_stage_terminal(run, stage, "blocked")
     run["status"] = "BLOCKED"
     run["current_stage"] = stage
     run["error"] = message
@@ -887,10 +934,35 @@ def _block(run: dict[str, Any], message: str, stage: str) -> None:
 
 
 def _fail(run: dict[str, Any], message: str) -> None:
+    _mark_stage_terminal(run, str(run.get("current_stage") or "unknown"), "failed")
     run["status"] = "FAILED"
     run["error"] = message
     _save(run)
     _notify(run, f"动画自动化流程失败：{message}")
+
+
+def _mark_stage_terminal(run: dict[str, Any], stage: str, status: str) -> None:
+    now = _now()
+    timings = dict(run.get("stage_timings") or {})
+    current = dict(timings.get(stage) or {})
+    current.setdefault("started_at", now)
+    current.setdefault("attempts", 1)
+    if not current.get("finished_at"):
+        current["finished_at"] = now
+        current["duration_seconds"] = _iso_duration_seconds(str(current["started_at"]), now)
+    current["status"] = status
+    timings[stage] = current
+    run["stage_timings"] = timings
+    run["last_transition_at"] = now
+
+
+def _iso_duration_seconds(started_at: str, finished_at: str) -> float | None:
+    try:
+        started = datetime.fromisoformat(started_at)
+        finished = datetime.fromisoformat(finished_at)
+    except (TypeError, ValueError):
+        return None
+    return round(max(0.0, (finished - started).total_seconds()), 3)
 
 
 def _start_worker(run_id: str) -> None:

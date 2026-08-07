@@ -571,28 +571,50 @@ def normalize_text(value: object) -> str:
 
 
 def normalize_name_tokens(value: object) -> tuple[str, ...]:
-    """Normalize a path/name into Unicode alphanumeric boundary tokens."""
+    """Normalize a path/name into boundary-safe Unicode tokens.
+
+    ASCII character ids are commonly joined directly to a Chinese action name
+    in production filenames (for example ``danny微笑关键帧.zip``).  A script
+    transition is a real human-visible boundary even when no punctuation is
+    present, so keep it distinct without enabling arbitrary substring matches.
+    """
 
     normalized = normalize_text(value)
     tokens: list[str] = []
     current: list[str] = []
-    current_is_number: bool | None = None
+    current_kind = ""
     for character in normalized:
         if not character.isalnum():
             if current:
                 tokens.append("".join(current))
                 current = []
-            current_is_number = None
+            current_kind = ""
             continue
-        is_number = character.isnumeric()
-        if current and is_number != current_is_number:
+        kind = _name_token_kind(character)
+        if current and kind != current_kind:
             tokens.append("".join(current))
             current = []
         current.append(character)
-        current_is_number = is_number
+        current_kind = kind
     if current:
         tokens.append("".join(current))
     return tuple(tokens)
+
+
+def _name_token_kind(character: str) -> str:
+    if character.isnumeric():
+        return "number"
+    if character.isascii():
+        return "ascii"
+    codepoint = ord(character)
+    if (
+        0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x20000 <= codepoint <= 0x3134F
+    ):
+        return "cjk"
+    return "unicode"
 
 
 def canonical_character_id(value: object) -> str:

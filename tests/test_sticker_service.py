@@ -56,6 +56,10 @@ def test_sticker_registry_router_and_formatter(monkeypatch, tmp_path: Path) -> N
     assert response.tool_calls
     assert response.tool_calls[0].skill == "sticker.info"
 
+    random_response = brain.handle_message(BrainMessage(text="表情包"))
+    assert random_response.tool_calls
+    assert random_response.tool_calls[0].skill == "sticker.send_random"
+
 
 def test_sticker_send_random_uses_feishu_context(monkeypatch, tmp_path: Path) -> None:
     path = tmp_path / "a.png"

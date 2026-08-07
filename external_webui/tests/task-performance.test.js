@@ -53,6 +53,19 @@ test("parses Feishu epoch milliseconds and ISO timestamps", () => {
   assert.equal(parseTimestamp("2026-07-29T18:09:04"), Date.parse("2026-07-29T18:09:04+08:00"));
 });
 
+test("missing timestamps never become an epoch-sized duration", () => {
+  const result = buildTaskPerformance({
+    module: "FRAME",
+    id: "FRAME_OLD",
+    status: "FAILED",
+    timeValue: 0,
+    raw: { status: "FAILED" },
+  }, Date.parse("2026-08-04T06:30:00Z"));
+
+  assert.equal(result.startMs, null);
+  assert.equal(result.totalMs, null);
+});
+
 test("builds a non-overlapping direct video critical path", () => {
   const result = buildTaskPerformance(videoTask(), Date.parse("2026-07-28T11:00:00Z"));
   assert.equal(result.totalMs, 62 * 60 * 1000 + 19 * 1000);

@@ -1428,7 +1428,7 @@ def test_direct_image_send_results_returns_matte_processed_and_comparison(monkey
     assert run["images"][0]["result_path"] == str(result_image)
 
 
-def test_direct_image_sequence_sends_one_ordered_zip(monkeypatch, tmp_path: Path) -> None:
+def test_direct_image_sequence_sends_matte_and_postprocess_stage_zips(monkeypatch, tmp_path: Path) -> None:
     import zipfile
 
     from assetclaw_matting.feishu.client import feishu_client
@@ -1439,7 +1439,7 @@ def test_direct_image_sequence_sends_one_ordered_zip(monkeypatch, tmp_path: Path
     monkeypatch.setattr(
         feishu_client,
         "send_file_to_chat",
-        lambda _chat_id, path, file_name: sent_files.append(file_name) or {"ok": True},
+        lambda _chat_id, path, file_name: sent_files.append(file_name) or {"message_id": f"om_{len(sent_files)}"},
     )
     monkeypatch.setattr(
         feishu_client,
@@ -1474,14 +1474,115 @@ def test_direct_image_sequence_sends_one_ordered_zip(monkeypatch, tmp_path: Path
 
     sent = direct_image_skills._send_results(run)
 
-    assert len(sent) == 1
-    assert sent_files == ["关键帧_animation_processed.zip"]
+    assert len(sent) == 2
+    assert sent_files == ["关键帧_01_matte.zip", "关键帧_02_postprocessed.zip"]
     with zipfile.ZipFile(sent[0]) as archive:
-        names = set(archive.namelist())
+        matte_names = set(archive.namelist())
+    with zipfile.ZipFile(sent[1]) as archive:
+        processed_names = set(archive.namelist())
+    assert matte_names == {"matte/0000.png", "matte/0001.png", "manifest.json"}
+    assert processed_names == {"postprocessed/0000.png", "postprocessed/0001.png", "manifest.json"}
+    complete_bundle = Path(run["sequence_zip_path"])
+    assert complete_bundle.name == "关键帧_animation_processed.zip"
+    with zipfile.ZipFile(complete_bundle) as archive:
+        complete_names = set(archive.namelist())
     for index in range(2):
         for section in ("frames", "matte", "smooth", "comparison"):
-            assert f"{section}/{index:04d}.png" in names
-    assert "manifest.json" in names
+            assert f"{section}/{index:04d}.png" in complete_names
+    assert run["delivery"]["artifact_count"] == 2
+    assert [item["status"] for item in run["delivery_artifacts"]] == ["DELIVERED", "DELIVERED"]
+
+
+def test_direct_video_delivery_sends_three_stage_zips_and_only_retries_missing(monkeypatch, tmp_path: Path) -> None:
+    import zipfile
+
+    from assetclaw_matting.feishu.client import feishu_client
+    from assetclaw_matting.skills import direct_video_skills
+
+    monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(direct_video_skills, "_save", lambda *_args, **_kwargs: True)
+    run = {
+        "id": "VID_STAGE_DELIVERY",
+        "run_label": "测试视频.mp4",
+        "chat_id": "oc_test",
+        "result_mode": "full",
+        "videos": [{"index": 1, "source_name": "测试视频.mp4"}],
+        "log": [],
+    }
+    run_dir = direct_video_skills._run_dir(run)
+    for folder in ("frames", "matte", "smooth"):
+        target = run_dir / folder / "video_01" / "0001.png"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGBA", (8, 8), (1, 2, 3, 255)).save(target)
+    complete = run_dir / "complete.zip"
+    with zipfile.ZipFile(complete, "w") as archive:
+        archive.writestr("manifest.json", "{}")
+
+    sent_names: list[str] = []
+    monkeypatch.setattr(
+        feishu_client,
+        "send_file_to_chat",
+        lambda _chat_id, _path, file_name: sent_names.append(file_name) or {"message_id": f"om_{len(sent_names)}"},
+    )
+
+    direct_video_skills._send_zip_with_retries(run, complete, attempts=1)
+
+    assert sent_names == [
+        "测试视频_01_extracted_frames.zip",
+        "测试视频_02_matte.zip",
+        "测试视频_03_postprocessed.zip",
+    ]
+    assert run["delivery"]["artifact_count"] == 3
+    for artifact, expected_folder in zip(run["delivery_artifacts"], ("frames", "matte", "smooth")):
+        assert artifact["status"] == "DELIVERED"
+        with zipfile.ZipFile(artifact["path"]) as archive:
+            names = set(archive.namelist())
+        assert "manifest.json" in names
+        assert f"{expected_folder}/video_01/0001.png" in names
+
+    run["delivery_artifacts"][2]["status"] = "FAILED"
+    run["delivery_artifacts"][2]["message_id"] = ""
+    sent_names.clear()
+    direct_video_skills._send_zip_with_retries(run, complete, attempts=1)
+    assert sent_names == ["测试视频_03_postprocessed.zip"]
+
+
+def test_direct_video_matte_only_delivery_sends_frames_and_matte_without_postprocess(monkeypatch, tmp_path: Path) -> None:
+    import zipfile
+
+    from assetclaw_matting.feishu.client import feishu_client
+    from assetclaw_matting.skills import direct_video_skills
+
+    monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(direct_video_skills, "_save", lambda *_args, **_kwargs: True)
+    run = {
+        "id": "VID_MATTE_ONLY_DELIVERY",
+        "run_label": "无角色视频.mp4",
+        "chat_id": "oc_test",
+        "result_mode": "matte_only",
+        "videos": [{"index": 1, "source_name": "无角色视频.mp4"}],
+        "log": [],
+    }
+    run_dir = direct_video_skills._run_dir(run)
+    for folder in ("frames", "matte"):
+        target = run_dir / folder / "video_01" / "0001.png"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGBA", (8, 8), (1, 2, 3, 255)).save(target)
+    complete = run_dir / "matte_only.zip"
+    with zipfile.ZipFile(complete, "w") as archive:
+        archive.writestr("manifest.json", "{}")
+    sent_names: list[str] = []
+    monkeypatch.setattr(
+        feishu_client,
+        "send_file_to_chat",
+        lambda _chat_id, _path, file_name: sent_names.append(file_name) or {"message_id": f"om_{len(sent_names)}"},
+    )
+
+    direct_video_skills._send_zip_with_retries(run, complete, attempts=1)
+
+    assert sent_names == ["无角色视频_01_extracted_frames.zip", "无角色视频_02_matte.zip"]
+    assert [item["kind"] for item in run["delivery_artifacts"]] == ["extracted_frames", "matte"]
+    assert run["delivery"]["artifact_count"] == 2
 
 
 def test_direct_video_zip_contains_required_sections(monkeypatch, tmp_path: Path) -> None:

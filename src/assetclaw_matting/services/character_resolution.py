@@ -239,16 +239,53 @@ def get_run_reference_snapshots(run_kind: str, run_id: str) -> list[dict[str, An
 
 
 def get_pending_for_actor(conversation_id: str, user_id: str) -> list[dict[str, Any]]:
+    _prune_terminal_pending_for_actor(conversation_id, user_id)
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT * FROM character_resolutions
-            WHERE conversation_id = ? AND user_id = ? AND status = 'PENDING'
-            ORDER BY created_at, item_index, unit_id
+            SELECT r.* FROM character_resolutions r
+            JOIN character_resolution_questions q ON q.id = r.question_id
+            WHERE r.conversation_id = ? AND r.user_id = ?
+              AND r.status = 'PENDING' AND q.status = 'PENDING'
+            ORDER BY q.created_at DESC, q.id DESC, r.item_index, r.unit_id
             """,
             (conversation_id, user_id),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def _prune_terminal_pending_for_actor(conversation_id: str, user_id: str) -> None:
+    """Self-heal questions left behind by an older worker or interrupted deploy."""
+
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT r.run_kind, r.run_id, r.run_dir
+            FROM character_resolutions r
+            JOIN character_resolution_questions q ON q.id = r.question_id
+            WHERE r.conversation_id = ? AND r.user_id = ?
+              AND r.status = 'PENDING' AND q.status = 'PENDING'
+            """,
+            (conversation_id, user_id),
+        ).fetchall()
+    for raw in rows:
+        status_path = Path(str(raw["run_dir"] or "")) / "status.json"
+        if not status_path.is_file():
+            continue
+        try:
+            payload = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        status = str(payload.get("status") or "").upper()
+        kind = str(raw["run_kind"] or "")
+        run_id = str(raw["run_id"] or "")
+        if status == "CANCELED":
+            cancel_run_resolutions(kind, run_id)
+        elif status in {"FAILED", "BLOCKED", "DONE_WITH_ERRORS"}:
+            fail_run_resolutions(kind, run_id)
+        elif status == "DONE":
+            # A completed run cannot legitimately retain a blocking question.
+            cancel_run_resolutions(kind, run_id)
 
 
 def format_pending_prompt(items: Iterable[dict[str, Any]]) -> str:
@@ -293,13 +330,24 @@ def try_resolve_reply(
                 "message": "角色编号格式已识别，但映射写法不完整。请按 C-编号=角色名 回复。\n" + format_pending_prompt(pending),
             }
         bare_reference = _exact_answer_reference(registry, str(text or "").strip())
-        if bare_reference and len(pending) == 1:
-            assignments = {str(pending[0]["question_token"]).upper(): bare_reference.canonical_id}
-        elif bare_reference and len(pending) > 1:
+        latest_question_id = str(pending[0].get("question_id") or "") if pending else ""
+        latest_pending = [
+            item for item in pending
+            if str(item.get("question_id") or "") == latest_question_id
+        ]
+        if bare_reference and len(latest_pending) == 1:
+            # A natural one-word reply belongs to the latest active question,
+            # not to stale/older work in the same chat.  Explicit C-token
+            # assignments remain available for resolving any older question.
+            assignments = {
+                str(latest_pending[0]["question_token"]).upper(): bare_reference.canonical_id
+            }
+        elif bare_reference and len(latest_pending) > 1:
             return {
                 "handled": True,
                 "ok": False,
-                "message": "现在有多个任务待确认，请带上每项前面的 C-编号，避免角色错位。\n" + format_pending_prompt(pending),
+                "message": "最新上传中有多个项目待确认，请带上每项前面的 C-编号，避免角色错位。\n"
+                + format_pending_prompt(latest_pending),
             }
         else:
             return {"handled": False}
@@ -545,6 +593,7 @@ def bootstrap_waiting_character_runs() -> dict[str, Any]:
     """Discover WAITING_CHARACTER JSON states created by pre-update workers."""
 
     discovered: list[dict[str, str]] = []
+    resumed: list[dict[str, str]] = []
     errors: list[dict[str, str]] = []
     roots = (
         ("direct_image", Path(settings.storage_dir) / "direct_image_runs", "IMG_*"),
@@ -559,11 +608,17 @@ def bootstrap_waiting_character_runs() -> dict[str, Any]:
                 if str(payload.get("status") or "").upper() != "WAITING_CHARACTER":
                     continue
                 run_id = str(payload.get("id") or status_path.parent.name)
+                reconcile_pending_evidence(run_kind, run_id)
+                if all_run_units_frozen(run_kind, run_id):
+                    result = _resume_waiting_run(run_kind, run_id)
+                    if result.get("ok"):
+                        resumed.append({"run_kind": run_kind, "run_id": run_id})
+                    continue
                 if mark_run_waiting(run_kind, run_id, immediate_if_uninitialized=True):
                     discovered.append({"run_kind": run_kind, "run_id": run_id})
             except Exception as exc:
                 errors.append({"path": str(status_path), "error": str(exc)})
-    return {"ok": not errors, "discovered": discovered, "errors": errors}
+    return {"ok": not errors, "discovered": discovered, "resumed": resumed, "errors": errors}
 
 
 def sweep_character_resolution_questions(
@@ -690,11 +745,105 @@ def cancel_run_resolutions(run_kind: str, run_id: str) -> None:
         conn.execute(
             """
             UPDATE character_resolution_questions
-            SET status = 'CANCELLED', updated_at = ?
+            SET status = 'CANCELLED', next_action_at = NULL,
+                lease_owner = NULL, lease_until = NULL, updated_at = ?
             WHERE run_kind = ? AND run_id = ? AND status IN ('PENDING', 'EXPIRING')
             """,
             (now, run_kind, run_id),
         )
+
+
+def fail_run_resolutions(run_kind: str, run_id: str) -> None:
+    """Close role questions when their owning business run fails terminally."""
+
+    now = _now()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE character_resolutions
+            SET status = 'FAILED', version = version + 1, updated_at = ?
+            WHERE run_kind = ? AND run_id = ? AND status IN ('PENDING', 'RESOLVED')
+            """,
+            (now, run_kind, run_id),
+        )
+        conn.execute(
+            """
+            UPDATE character_resolution_questions
+            SET status = 'FAILED', next_action_at = NULL,
+                lease_owner = NULL, lease_until = NULL, failed_at = COALESCE(failed_at, ?),
+                updated_at = ?
+            WHERE run_kind = ? AND run_id = ? AND status IN ('PENDING', 'EXPIRING')
+            """,
+            (now, now, run_kind, run_id),
+        )
+
+
+def reopen_failed_run_resolutions(run_kind: str, run_id: str) -> int:
+    """Reopen role confirmation after a recoverable technical run failure.
+
+    A pipeline failure may close an otherwise valid role question.  When the
+    pipeline is subsequently recovered from verified persisted output, the
+    user must not be left with a terminal FAILED question that cannot accept
+    the original confirmation token.
+    """
+
+    now = _now()
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE character_resolutions
+            SET status = 'PENDING', version = version + 1, updated_at = ?
+            WHERE run_kind = ? AND run_id = ? AND status = 'FAILED'
+            """,
+            (now, run_kind, run_id),
+        )
+        reopened = int(cursor.rowcount or 0)
+        if reopened:
+            conn.execute(
+                """
+                UPDATE character_resolution_questions
+                SET status = 'PENDING', next_action_at = NULL,
+                    lease_owner = NULL, lease_until = NULL, failed_at = NULL,
+                    updated_at = ?
+                WHERE run_kind = ? AND run_id = ? AND status = 'FAILED'
+                """,
+                (now, run_kind, run_id),
+            )
+    return reopened
+
+
+def reopen_failed_run_resolutions(run_kind: str, run_id: str) -> int:
+    """Reopen role confirmation after a recoverable technical run failure.
+
+    A pipeline failure may close an otherwise valid role question.  When the
+    pipeline is subsequently recovered from verified persisted output, the
+    user must not be left with a terminal FAILED question that cannot accept
+    the original confirmation token.
+    """
+
+    now = _now()
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE character_resolutions
+            SET status = 'PENDING', version = version + 1, updated_at = ?
+            WHERE run_kind = ? AND run_id = ? AND status = 'FAILED'
+            """,
+            (now, run_kind, run_id),
+        )
+        reopened = int(cursor.rowcount or 0)
+        if reopened:
+            conn.execute(
+                """
+                UPDATE character_resolution_questions
+                SET status = 'PENDING', next_action_at = NULL,
+                    lease_owner = NULL, lease_until = NULL, failed_at = NULL,
+                    updated_at = ?
+                WHERE run_kind = ? AND run_id = ? AND status = 'FAILED'
+                """,
+                (now, run_kind, run_id),
+            )
+    return reopened
 
 
 def _freeze_unit(unit_id: str) -> dict[str, Any]:
@@ -769,6 +918,79 @@ def reconcile_resolved_units(run_kind: str = "", run_id: str = "") -> dict[str, 
         except Exception as exc:
             errors.append({"unit_id": unit_id, "error": str(exc)})
     return {"ok": not errors, "repaired": repaired, "errors": errors}
+
+
+def reconcile_pending_evidence(run_kind: str, run_id: str) -> dict[str, Any]:
+    """Re-evaluate persisted filename evidence after matcher improvements.
+
+    Only a unique registry match is frozen.  This rescues work created by an
+    older process without guessing, repeating matting, or asking for a role
+    that is already present in the archive name.
+    """
+
+    catalog = _catalog()
+    repaired: list[str] = []
+    skipped: list[str] = []
+    errors: list[dict[str, str]] = []
+    for row in get_run_resolutions(run_kind, run_id):
+        if str(row.get("status") or "") != "PENDING":
+            continue
+        unit_id = str(row.get("unit_id") or "")
+        try:
+            evidence_payload = json.loads(str(row.get("evidence_json") or "{}"))
+            evidence = _clean_evidence(
+                evidence_payload.get("inputs") or [row.get("source_name") or ""]
+            )
+            resolution = _resolve_evidence(catalog.identity_registry, evidence)
+            reference = resolution.reference
+            if reference is None:
+                skipped.append(unit_id)
+                continue
+            snapshot_row = {**row, "character_id": reference.canonical_id}
+            snapshots = _freeze_available_references(
+                snapshot_row,
+                catalog,
+                reference.canonical_id,
+            )
+            primary = _primary_snapshot(snapshots)
+            evidence_json = _updated_evidence_json(
+                row.get("evidence_json"),
+                reference_profiles_available=list(snapshots),
+            )
+            now = _now()
+            with get_connection() as conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE character_resolutions
+                    SET status = 'FROZEN', character_id = ?,
+                        resolution_method = 'filename_reconciled', confidence = 1.0,
+                        catalog_revision = ?, reference_source_path = ?,
+                        reference_snapshot_path = ?, reference_sha256 = ?, evidence_json = ?,
+                        version = version + 1, resolved_at = ?, updated_at = ?
+                    WHERE unit_id = ? AND status = 'PENDING'
+                    """,
+                    (
+                        reference.canonical_id,
+                        catalog.catalog_revision,
+                        primary["reference_source_path"],
+                        primary["reference_snapshot_path"],
+                        primary["reference_sha256"],
+                        evidence_json,
+                        now,
+                        now,
+                        unit_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    skipped.append(unit_id)
+                    continue
+                for snapshot in snapshots.values():
+                    _upsert_reference_snapshot(conn, unit_id, snapshot, now)
+            repaired.append(unit_id)
+        except Exception as exc:
+            errors.append({"unit_id": unit_id, "error": str(exc)})
+    _close_resolved_questions()
+    return {"ok": not errors, "repaired": repaired, "skipped": skipped, "errors": errors}
 
 
 def _freeze_available_references(
@@ -1271,6 +1493,18 @@ def _fail_waiting_run(run_kind: str, run_id: str, reason: str) -> dict[str, Any]
         from assetclaw_matting.skills.direct_video_skills import fail_character_confirmation_timeout
 
         return fail_character_confirmation_timeout(run_id, reason)
+    return {"ok": False, "error": f"unsupported run kind: {run_kind}"}
+
+
+def _resume_waiting_run(run_kind: str, run_id: str) -> dict[str, Any]:
+    if run_kind == "direct_image":
+        from assetclaw_matting.skills.direct_image_skills import resume_after_character_resolution
+
+        return resume_after_character_resolution(run_id)
+    if run_kind == "direct_video":
+        from assetclaw_matting.skills.direct_video_skills import resume_after_character_resolution
+
+        return resume_after_character_resolution(run_id)
     return {"ok": False, "error": f"unsupported run kind: {run_kind}"}
 
 

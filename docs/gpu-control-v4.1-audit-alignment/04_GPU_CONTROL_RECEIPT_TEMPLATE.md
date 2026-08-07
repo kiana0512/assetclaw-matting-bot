@@ -57,8 +57,8 @@ gpu_control_v4_1_receipt:
 
   workflow_identity:
     key: imageclip-rgba
-    version: 2026.07.27-721f7d6-r1
-    imageclip_commit: 721f7d68635ee36d45f545ce2c82037046147442
+    version: 2026.07.30-691770c-r1
+    imageclip_commit: 691770cd6a59fd7c51391456fe900dc57a313233
     pipeline_sha256: 00e7104762f0a1fdf3a4c20e043bec2b9f088132452d5a5ce4302ba268edac0b
     returned_on_create: true|false
     returned_on_every_parent_get: true|false

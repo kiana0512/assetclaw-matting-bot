@@ -16,7 +16,7 @@ manifest 协议：`1.0`，V4 未改变请求 manifest 字段
 
 生产入口：`https://10.3.34.11`
 
-当前批准工作流：`imageclip-rgba / 2026.07.27-721f7d6-r1`
+当前批准工作流：`imageclip-rgba / 2026.07.30-691770c-r1`
 
 本文是动画管家完整阅读统一调度中心 V4 交接文档后给出的差异审计、双方边界、待实施项和联合验收回执。本文不代表双方已经冻结生产协议，也不代表动画管家已在活动任务期间修改或重载后端。统一调度中心读取后，应按第 17 节逐项回复；真实联调与证据未完成前，双方状态必须保持 `JOINT ACCEPTANCE PENDING`。
 
@@ -325,8 +325,8 @@ GPU Control 在最终回执中必须提供自动测试证据：首次上传制�
 
 ```text
 workflow_key:     imageclip-rgba
-workflow_version: 2026.07.27-721f7d6-r1
-imageclip_commit: 721f7d68635ee36d45f545ce2c82037046147442
+workflow_version: 2026.07.30-691770c-r1
+imageclip_commit: 691770cd6a59fd7c51391456fe900dc57a313233
 pipeline_sha256:  00e7104762f0a1fdf3a4c20e043bec2b9f088132452d5a5ce4302ba268edac0b
 only output node: SaveImage #25
 ```
@@ -502,8 +502,8 @@ gpu_control_v4_receipt:
 
   workflow:
     key: imageclip-rgba
-    version: 2026.07.27-721f7d6-r1
-    imageclip_commit: 721f7d68635ee36d45f545ce2c82037046147442
+    version: 2026.07.30-691770c-r1
+    imageclip_commit: 691770cd6a59fd7c51391456fe900dc57a313233
     pipeline_sha256: 00e7104762f0a1fdf3a4c20e043bec2b9f088132452d5a5ce4302ba268edac0b
     parent_status_returns_all_identity_fields: true|false
 

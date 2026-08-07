@@ -14,7 +14,10 @@ const STAGE_LABELS = {
   feishu_download: "飞书下载",
   frame_extract: "抽帧",
   matting: "ComfyUI 抠图",
+  local_oom_gpu_fallback_queued: "GPU 集群接管中",
+  waiting_character: "等待角色确认",
   cherry_smooth: "Cherry 平滑",
+  done_matte_only: "抠图结果已交付",
   unity_ready: "unity_ready",
   unity_import: "Unity 导入",
   p4_shelve: "P4 Shelve",
@@ -882,8 +885,22 @@ function statusClass(status) {
   if (["DONE", "DONE_WITH_ERRORS", "CONFIRMED"].includes(normalized)) return "ok";
   if (["FAILED", "BLOCKED"].includes(normalized)) return "bad";
   if (["CANCELED"].includes(normalized)) return "muted";
-  if (["RUNNING", "QUEUED", "PAUSED", "READY_P4", "LATE_RESULT"].includes(normalized)) return "live";
+  if (["RUNNING", "QUEUED", "PAUSED", "WAITING_CHARACTER", "READY_P4", "LATE_RESULT"].includes(normalized)) return "live";
   return "idle";
+}
+
+function statusLabel(status) {
+  const normalized = String(status || "").toUpperCase();
+  return {
+    WAITING_CHARACTER: "等待角色",
+    DONE_WITH_ERRORS: "完成但有错误",
+    CANCELED: "已取消",
+    RUNNING: "处理中",
+    QUEUED: "排队中",
+    PAUSED: "已暂停",
+    FAILED: "失败",
+    DONE: "完成",
+  }[normalized] || normalized || "未知";
 }
 
 function isActiveStatus(status) {
@@ -1004,6 +1021,12 @@ function directStageProgress(run, isImage) {
     : (run.videos || []).reduce((sum, item) => sum + Number(item.frame_count || 0), 0);
   const comfyTotal = Number(comfy.total || expected || 0);
   const comfyDone = Math.min(comfyTotal, Number(comfy.completed || 0));
+  const repairAudits = Array.isArray(run.partial_matting_repairs) ? run.partial_matting_repairs : [];
+  const repairingFailedFrames = repairAudits.length > 0 && isActiveStatus(run.status);
+  const preservedBeforeCurrentRepair = repairAudits.reduce(
+    (sum, item) => sum + Number(item?.completed_preserved || 0),
+    0,
+  );
   const cherryRunTotal = cherryRuns.reduce((sum, item) => sum + Number(item?.total || 0), 0);
   const cherryRunDone = cherryRuns.reduce((sum, item) => sum + Number(item?.completed || (String(item?.status || "").toUpperCase() === "DONE" ? item?.total || 1 : 0)), 0);
   const cherryTotal = cherryRunTotal || expected || cherryRuns.length || Number(children.cherry?.total || 0);
@@ -1011,8 +1034,44 @@ function directStageProgress(run, isImage) {
     ? Math.min(cherryTotal, cherryRunDone)
     : Math.min(cherryTotal, Number(children.cherry?.completed || 0));
   const cherryCurrent = cherryRuns.find((item) => isActiveStatus(item?.status)) || children.cherry || {};
+  const runStatus = String(run.status || "").toUpperCase();
   const doneStatus = String(run.status || "").toUpperCase() === "DONE";
-  if (doneStatus) return { label: "全部完成", progress: 100, overall: 100, count: `${expected}/${expected}`, raw: run };
+  const matteOnly = String(run.result_mode || "").toLowerCase() === "matte_only"
+    || stage === "done_matte_only"
+    || Boolean(run.postprocess_skipped);
+  if (doneStatus && matteOnly) {
+    return {
+      label: "抠图结果已交付",
+      progress: 100,
+      overall: 100,
+      count: `${expected}/${expected}`,
+      position: "未执行角色校色与位置矫正",
+      raw: run,
+    };
+  }
+  if (doneStatus) {
+    return {
+      label: "完整流程已交付",
+      progress: 100,
+      overall: 100,
+      count: `${expected}/${expected}`,
+      position: "已完成抠图、角色校色与位置矫正",
+      raw: run,
+    };
+  }
+  if (runStatus === "WAITING_CHARACTER" || stage === "waiting_character") {
+    const pending = Number(run.character_resolution?.pending || 0);
+    const mattingProgress = comfyTotal > 0 ? Math.round((comfyDone / comfyTotal) * 100) : 100;
+    const overall = isImage ? Math.round(mattingProgress * 0.5) : 20 + Math.round(mattingProgress * 0.4);
+    return {
+      label: "等待角色确认",
+      progress: 0,
+      overall: Math.min(60, overall),
+      count: pending > 0 ? `${pending} 项待确认` : "等待回复",
+      position: "抠图已完成，确认角色后继续后处理",
+      raw: run,
+    };
+  }
   if (stage.includes("send") || stage.includes("pack") || stage.includes("zip") || stage.includes("delivery")) {
     return { label: "打包与发送", progress: 50, overall: 98, count: "处理中", raw: run };
   }
@@ -1021,15 +1080,46 @@ function directStageProgress(run, isImage) {
     const overall = isImage ? 50 + Math.round(progress * 0.46) : 60 + Math.round(progress * 0.36);
     return { label: "Cherry 后处理", progress, overall: Math.min(96, overall), count: `${cherryDone}/${cherryTotal || "-"}`, position: taskPosition("CHERRY", cherryCurrent), raw: cherryCurrent };
   }
+  if (stage === "local_oom_gpu_fallback_queued" && !children.comfyui_run_id) {
+    return {
+      label: "GPU 集群接管中",
+      progress: 0,
+      overall: 0,
+      count: "等待集群接单",
+      position: "本机显存不足，已自动切换 GPU 集群",
+      raw: run,
+    };
+  }
   if (stage.includes("mat") || stage.includes("comfy") || comfyTotal) {
-    const progress = comfyTotal > 0 ? Math.round((comfyDone / comfyTotal) * 100) : progressFrom(comfy);
+    const effectiveDone = repairingFailedFrames
+      ? Math.min(expected, preservedBeforeCurrentRepair + comfyDone)
+      : comfyDone;
+    const effectiveTotal = repairingFailedFrames ? expected : comfyTotal;
+    const progress = effectiveTotal > 0 ? Math.round((effectiveDone / effectiveTotal) * 100) : progressFrom(comfy);
     const overall = isImage ? Math.round(progress * 0.5) : 20 + Math.round(progress * 0.4);
-    const remote = String(comfy.backend || "").toLowerCase() === "gpu_control";
+    const remote = String(comfy.backend || run.matting_backend || "").toLowerCase() === "gpu_control";
     const nodes = Object.entries(comfy.node_distribution || {})
       .filter(([, count]) => Number(count) > 0)
       .map(([name, count]) => `${name}:${count}`)
       .join(" · ");
     const remotePosition = [comfy.remote_status, comfy.remote_batch_id, nodes].filter(Boolean).join(" · ");
+    const latestRepair = repairAudits[repairAudits.length - 1] || {};
+    const failedDetails = (latestRepair.error_items || []).slice(0, 3).map((item) => {
+      const ordinal = item?.ordinal === null || item?.ordinal === undefined ? item?.frame : `ordinal ${item.ordinal}`;
+      const reason = item?.error_kind || item?.error || "失败";
+      const attempts = Number(item?.attempts || 0) > 0 ? `，已跨节点尝试 ${item.attempts} 次` : "";
+      return `${ordinal}: ${reason}${attempts}`;
+    }).join("；");
+    if (repairingFailedFrames) {
+      return {
+        label: "GPU 失败帧补算",
+        progress,
+        overall: Math.min(60, overall),
+        count: `${effectiveDone}/${expected || "-"}`,
+        position: failedDetails || `已保留 ${preservedBeforeCurrentRepair} 帧，仅补算缺失帧`,
+        raw: comfy,
+      };
+    }
     return {
       label: remote ? "GPU Control 抠图" : "ComfyUI 抠图",
       progress,
@@ -1049,6 +1139,7 @@ function parentChildIds(raw) {
     children.pipeline_run_id,
     children.frame_run_id,
     children.comfyui_run_id,
+    ...(children.comfyui_run_ids || []),
     children.cherry_run_id,
     ...(children.cherry_run_ids || []),
   ].filter(Boolean);
@@ -1431,7 +1522,7 @@ function toast(message, type = "ok") {
               <span>{{ task.label }} · {{ task.id }}</span>
               <small>启动 {{ task.time || "-" }} · {{ task.count || "-" }}</small>
             </div>
-            <span :class="['status-pill', statusClass(task.status)]">{{ task.status }}</span>
+            <span :class="['status-pill', statusClass(task.status)]" :title="task.status">{{ statusLabel(task.status) }}</span>
             <span class="stage-name">{{ task.stageLabel || task.last || formatStage(task.stage) }}</span>
             <div class="performance-cell">
               <span><em>总耗时</em><b>{{ formatDurationMs(task.performance.totalMs) }}</b></span>

@@ -117,10 +117,13 @@ def select_matting_backend(
         if handshake and not handshake.get("accepting_batches"):
             reason += "; scheduler advisory is saturated; submitting to the server queue"
         return result("gpu_control", reason, handshake)
+    if _active_local_run_count() > 0:
+        reason = "local 4070Ti already has an active matting run"
+        if handshake and not handshake.get("accepting_batches"):
+            reason += "; scheduler advisory is saturated; submitting to the server queue"
+        return result("gpu_control", reason, handshake)
     if handshake and not handshake.get("accepting_batches"):
         return result("local", f"GPU Control handshake unavailable: {handshake.get('reason') or 'not accepting'}", handshake)
-    if _active_local_run_count() > 0:
-        return result("gpu_control", "local 4070Ti already has an active matting run", handshake)
     return result("local", "local 4070Ti is idle and the batch is below the remote threshold", handshake)
 
 

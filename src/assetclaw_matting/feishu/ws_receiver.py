@@ -24,6 +24,15 @@ _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="feishu_ws_proc
 _instance_lock: BinaryIO | None = None
 
 
+def _skip_startup_recovery() -> bool:
+    return str(os.environ.get("ASSETCLAW_SKIP_STARTUP_RECOVERY") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _acquire_instance_lock(path: Path) -> BinaryIO | None:
     """Acquire a non-blocking process-lifetime lock for the WS receiver."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,28 +148,39 @@ def main() -> None:
     character_monitor_started = start_background_monitor()
     log.info("character confirmation monitor in-process=%s", character_monitor_started)
 
-    from assetclaw_matting.skills.animation_flow_skills import recover_incomplete_runs as recover_animation_flows
-    from assetclaw_matting.skills.direct_image_skills import recover_incomplete_runs as recover_direct_images
-    from assetclaw_matting.skills.direct_video_skills import recover_incomplete_runs
+    if _skip_startup_recovery():
+        log.info("startup task recovery explicitly skipped for receiver-only reload")
+    else:
+        from assetclaw_matting.skills.animation_flow_skills import recover_incomplete_runs as recover_animation_flows
+        from assetclaw_matting.skills.comfyui_skills import recover_gpu_control_manifest_failures
+        from assetclaw_matting.skills.direct_image_skills import recover_incomplete_runs as recover_direct_images
+        from assetclaw_matting.skills.direct_video_skills import recover_incomplete_runs
 
-    recovery = recover_incomplete_runs()
-    log.info(
-        "direct video recovery scan recovered=%s still_running=%s",
-        recovery.get("recovered"),
-        recovery.get("still_running"),
-    )
-    flow_recovery = recover_animation_flows()
-    log.info(
-        "animation flow recovery scan closed=%s still_running=%s",
-        flow_recovery.get("closed"),
-        flow_recovery.get("still_running"),
-    )
-    image_recovery = recover_direct_images()
-    log.info(
-        "direct image recovery scan closed=%s still_running=%s",
-        image_recovery.get("closed"),
-        image_recovery.get("still_running"),
-    )
+        recovery = recover_incomplete_runs()
+        log.info(
+            "direct video recovery scan recovered=%s still_running=%s",
+            recovery.get("recovered"),
+            recovery.get("still_running"),
+        )
+        flow_recovery = recover_animation_flows()
+        log.info(
+            "animation flow recovery scan closed=%s still_running=%s",
+            flow_recovery.get("closed"),
+            flow_recovery.get("still_running"),
+        )
+        manifest_recovery = recover_gpu_control_manifest_failures()
+        log.info(
+            "GPU manifest compatibility recovery recovered=%s failed=%s skipped=%s",
+            manifest_recovery.get("recovered"),
+            manifest_recovery.get("failed"),
+            manifest_recovery.get("skipped"),
+        )
+        image_recovery = recover_direct_images()
+        log.info(
+            "direct image recovery scan closed=%s still_running=%s",
+            image_recovery.get("closed"),
+            image_recovery.get("still_running"),
+        )
 
     log.info("Feishu WS receiver initializing")
     log.info("event_mode=%s cloudflare=disabled public_exposure=none", settings.feishu_event_mode)

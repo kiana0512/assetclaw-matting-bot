@@ -22,11 +22,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     init_db(settings.data_db_path)
     create_tables()
     from assetclaw_matting.skills.animation_flow_skills import recover_incomplete_runs as recover_animation_flows
+    from assetclaw_matting.skills.comfyui_skills import recover_gpu_control_manifest_failures
     from assetclaw_matting.skills.direct_image_skills import recover_incomplete_runs as recover_direct_images
 
     flow_recovery = recover_animation_flows()
     if flow_recovery.get("closed"):
         log.warning("closed stale animation flows: %s", flow_recovery["closed"])
+    manifest_recovery = recover_gpu_control_manifest_failures()
+    if manifest_recovery.get("recovered") or manifest_recovery.get("failed"):
+        log.warning("GPU manifest compatibility recovery: %s", manifest_recovery)
     image_recovery = recover_direct_images()
     if image_recovery.get("closed"):
         log.warning("closed stale direct image runs: %s", image_recovery["closed"])

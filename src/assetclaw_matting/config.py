@@ -202,6 +202,9 @@ class Settings(BaseSettings):
     gpu_control_request_timeout_seconds: int = 30
     gpu_control_upload_timeout_seconds: int = 86400
     gpu_control_download_timeout_seconds: int = 1800
+    # Local observation threshold only. Exceeding it must never cancel or
+    # duplicate a server-owned parent batch; the worker keeps reconciling the
+    # original batch id until a terminal server state or explicit user cancel.
     gpu_control_execution_timeout_seconds: int = 86400
     gpu_control_poll_interval_seconds: int = 3
     gpu_control_request_retries: int = 3

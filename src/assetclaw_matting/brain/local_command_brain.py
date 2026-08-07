@@ -54,9 +54,10 @@ class LocalCommandBrain(BrainProvider):
 
     def _infer_tool_calls(self, text: str) -> list[ToolCall]:
         lowered = text.lower()
+        explicitly_mentions_p4 = "p4" in lowered or "perforce" in lowered
 
         # bot / system queries
-        if any(
+        if not explicitly_mentions_p4 and (any(
             kw in text
             for kw in (
                 "你会做什么",
@@ -79,13 +80,13 @@ class LocalCommandBrain(BrainProvider):
                 "怎么用",
                 "使用说明",
             )
-        ) or lowered in ("help", "帮助", "what can you do"):
+        ) or lowered in ("help", "帮助", "what can you do")):
             return [ToolCall(skill="bot.help", arguments={})]
         if any(kw in text for kw in ("技能列表", "查看技能", "skill list")):
             return [ToolCall(skill="bot.skills", arguments={})]
         if any(kw in text for kw in ("权限说明", "安全边界", "查看权限", "查看安全")):
             return [ToolCall(skill="bot.permissions", arguments={})]
-        if any(kw in text for kw in ("系统状态", "当前状态", "bot status")) or "查看状态" in text:
+        if not explicitly_mentions_p4 and (any(kw in text for kw in ("系统状态", "当前状态", "bot status")) or "查看状态" in text):
             return [ToolCall(skill="bot.status", arguments={})]
         if any(kw in text for kw in ("最近错误", "查看错误", "recent errors", "错误记录")):
             return [ToolCall(skill="bot.errors", arguments={})]
@@ -139,7 +140,21 @@ class LocalCommandBrain(BrainProvider):
             return [ToolCall(skill="direct_image.cancel", arguments={"run_id": run_id})]
         if any(kw in text for kw in ("表情包状态", "情绪回复配置", "表情包池", "sticker status")):
             return [ToolCall(skill="sticker.info", arguments={})]
-        if any(kw in text for kw in ("随机发个表情包", "发个表情包", "来个表情包", "发个 sticker", "发个sticker")):
+        if text.strip().lower() in {"表情包", "sticker"} or any(
+            kw in text
+            for kw in (
+                "随机发个表情包",
+                "发个表情包",
+                "发一个表情包",
+                "来个表情包",
+                "来一个表情包",
+                "给我一个表情包",
+                "给我个表情包",
+                "我需要表情包",
+                "发个 sticker",
+                "发个sticker",
+            )
+        ):
             return [ToolCall(skill="sticker.send_random", arguments={})]
         url_match = re.search(r"https?://[^\s，。]+", text)
         if url_match and any(kw in text for kw in ("网页", "网站", "url", "URL", "链接", "读取", "看一下", "总结", "内容")):
@@ -785,8 +800,37 @@ def _p4_tool_calls_from_text(text: str) -> list[ToolCall]:
         return [ToolCall(skill="p4.status", arguments={})]
     if any(kw in lowered or kw in text for kw in ("check", "检查", "安全检查")):
         return [ToolCall(skill="p4.check", arguments={})]
+    if ("p4" in lowered or "perforce" in lowered) and any(
+        kw in lowered or kw in text
+        for kw in (
+            "创建 workspace",
+            "创建workspace",
+            "创建 p4 workspace",
+            "创建p4 workspace",
+            "初始化 workspace",
+            "初始化workspace",
+            "初始化 p4 workspace",
+            "初始化p4 workspace",
+        )
+    ):
+        return [ToolCall(skill="p4.help", arguments={})]
     if any(kw in lowered or kw in text for kw in ("preview", "预览", "reconcile -n")):
         return [ToolCall(skill="p4.preview", arguments={})]
+    if ("p4" in lowered or "perforce" in lowered) and any(
+        kw in lowered or kw in text
+        for kw in (
+            "inventory",
+            "depot",
+            "workflow",
+            "工作流",
+            "workspace details",
+            "工作区详情",
+        )
+    ):
+        # These belonged to the retired ai_art_comfyui assistant. Keep explicit
+        # P4 requests inside the safe Shelve-only help path instead of allowing
+        # them to fall through to unrelated ComfyUI/workspace tools.
+        return [ToolCall(skill="p4.help", arguments={})]
     registry = WorkspaceRegistry()
     intent = parse_intent(text, registry)
     if intent.need_clarification:

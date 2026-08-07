@@ -1717,8 +1717,17 @@ def _format_direct_video(skill: str, payload: dict[str, Any], max_items: int) ->
         summary += f"，后处理 {cherry.get('completed', 0)}/{cherry.get('total', 0)}"
     if not media_items:
         lines.append(summary)
-    if payload.get("zip_path"):
-        lines.append("zip：已生成")
+    delivery_artifacts = [item for item in payload.get("delivery_artifacts") or [] if isinstance(item, dict)]
+    delivered_labels = [str(item.get("label") or item.get("kind") or "结果") for item in delivery_artifacts if str(item.get("status") or "").upper() == "DELIVERED"]
+    missing_labels = [str(item.get("label") or item.get("kind") or "结果") for item in delivery_artifacts if str(item.get("status") or "").upper() != "DELIVERED"]
+    if delivered_labels:
+        lines.append("已发回结果：" + "、".join(delivered_labels))
+    elif payload.get("zip_path"):
+        lines.append("结果归档：已生成，等待发送")
+    if missing_labels:
+        lines.append("尚未交付：" + "、".join(missing_labels))
+    if str(payload.get("result_mode") or "").lower() == "matte_only":
+        lines.append("后处理：未生成（角色库暂无对应校色/矫正资料）")
     if payload.get("error"):
         lines.append(f"错误：{payload.get('error')}")
     return lines
@@ -1772,10 +1781,19 @@ def _format_direct_image(skill: str, payload: dict[str, Any], max_items: int) ->
         if cherry:
             lines.append(f"整体后处理：{cherry.get('completed', 0)}/{cherry.get('total', 0)}")
     sent = payload.get("sent_files") or []
-    if payload.get("sequence_zip_path"):
-        lines.append("已发回结果：序列帧 ZIP（原图、抠图、后处理、三联对比）")
+    delivery_artifacts = [item for item in payload.get("delivery_artifacts") or [] if isinstance(item, dict)]
+    delivered_labels = [str(item.get("label") or item.get("kind") or "结果") for item in delivery_artifacts if str(item.get("status") or "").upper() == "DELIVERED"]
+    missing_labels = [str(item.get("label") or item.get("kind") or "结果") for item in delivery_artifacts if str(item.get("status") or "").upper() != "DELIVERED"]
+    if delivered_labels:
+        lines.append("已发回结果：" + "、".join(delivered_labels))
+    elif payload.get("sequence_zip_path"):
+        lines.append("结果归档：已生成，等待发送")
     elif sent:
         lines.append(f"已发回结果：{len(sent)} 份（抠图、后处理、三联对比）")
+    if missing_labels:
+        lines.append("尚未交付：" + "、".join(missing_labels))
+    if str(payload.get("result_mode") or "").lower() == "matte_only":
+        lines.append("后处理：未生成（角色库暂无对应校色/矫正资料）")
     if payload.get("error"):
         lines.append(f"错误：{payload.get('error')}")
     return lines

@@ -118,6 +118,16 @@ def test_resolve_applies_nfkc_casefold_and_safe_separators(tmp_path: Path) -> No
     assert result.reason == "unique_boundary_safe_alias_match"
 
 
+@pytest.mark.parametrize("name", ("danny微笑关键帧.zip", "抬眉danny.zip"))
+def test_ascii_character_name_uses_cjk_script_transition_as_boundary(tmp_path: Path, name: str) -> None:
+    registry = CharacterRegistry.discover(_reference_root(tmp_path))
+
+    result = registry.resolve(name)
+
+    assert result.status is CharacterResolutionStatus.MATCHED
+    assert result.canonical_id == "danny"
+
+
 @pytest.mark.parametrize(
     "name",
     (

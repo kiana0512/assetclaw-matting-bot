@@ -1,6 +1,6 @@
 # V4.1 双方行动矩阵
 
-状态：`DRAFT / OWNER CONFIRMATION REQUIRED`
+状态：`IMPLEMENTING / LOCAL DEPLOYED_NOT_ACCEPTED / JOINT ACCEPTANCE PENDING`
 
 本矩阵把 2026-07-30 审计问题映射为动画管家、GPU Control 和联合验收的明确责任。`完成` 只能由代码、版本和测试证据证明。
 
@@ -50,17 +50,21 @@
 
 ## 5. 代码落点（动画管家）
 
-以下是当前已知落点，不代表已经修改：
+以下是 2026-07-30 第一批动画管家实现落点：
 
 | 位置 | 当前行为 | V4.1 改造 |
 |---|---|---|
-| `src/assetclaw_matting/skills/comfyui_skills.py::_run_gpu_control_worker` | execution timeout 调用 cancel；CANCELLED 直接映射 | 告警继续 poll；校验 cancel intent；保存新时间和身份门禁 |
-| `src/assetclaw_matting/skills/comfyui_skills.py::run_cancel` | 保存时间与 response meta | 接收业务取消上下文并持久化完整 intent |
-| `src/assetclaw_matting/services/gpu_control_batch.py::compact_remote_state` | 保存基础时间/身份 | additive 保存 validated/queued/execution_finished/artifact_ready/performance/error code |
+| `src/assetclaw_matting/skills/comfyui_skills.py::_run_gpu_control_worker` | 已删除 timeout cancel；非法 CANCELLED 失败闭锁 | 本地 `DEPLOYED_NOT_ACCEPTED`，待故障注入 |
+| `src/assetclaw_matting/skills/comfyui_skills.py::run_cancel` | 已在远端调用前保存 actor/source/reason/request ID/key | 本地 `DEPLOYED_NOT_ACCEPTED`，待服务端 operation/audit |
+| `src/assetclaw_matting/services/gpu_control_batch.py::compact_remote_state` | 已 additive 保存完整阶段字段和 performance | 本地 `DEPLOYED_NOT_ACCEPTED`，等待服务端返回数据 |
+| `src/assetclaw_matting/services/gpu_control_batch.py::download_artifact` | 已支持完整文件复用与 `.part` Range 续传 | 本地 `DEPLOYED_NOT_ACCEPTED`，待中断下载联合测试 |
+| `src/assetclaw_matting/services/hybrid_matting_router.py` | 4070 Ti 忙时把小任务送入服务端持久队列 | 本地 `DEPLOYED_NOT_ACCEPTED`，待并发吞吐压测 |
 | `src/assetclaw_matting/services/gpu_control_batch.py::verify_and_publish_result` | 十项验证与原子发布 | 发布前增加冻结身份强校验 |
 | `external_webui/src/domain/task-performance.js` | 集群阶段“含排队”；Cherry 使用包络 | 读取真实时间；active/idle 分离 |
 | `external_webui/src/components/PerformanceDashboard.vue` | 最大 handshake queue depth 作为洞察 | 改为任务实际 queue P50/P90、节点拖尾与数据可信度 |
 | 动画流程/飞书/投递 worker | 阶段时间和 ack 不完整 | 统一 task_events 与 trace helper |
+
+当前本地状态：P0-02、P0-03 客户端部分、P0-04、P0-06 观察值强校验、P1-04 客户端阶段、P1-05 idle gap、P3-05 GPU span 已于 2026-07-30 完成 Gateway 最小重载，状态为 `DEPLOYED_NOT_ACCEPTED`。P0-01、P0-05、P1-01/02/06 的其余非 GPU 流程部分仍需下一批实现；所有项目在生产观察和联合原始证据完成前都不是 `ACCEPTED`。
 
 ## 6. GPU Control 回执必须给出的实现落点
 

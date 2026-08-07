@@ -14,6 +14,7 @@ from assetclaw_matting.comfyui.workflow_patch import find_primary_save_image_nod
 from assetclaw_matting.db.schema import create_tables
 from assetclaw_matting.db.sqlite import init_db
 from assetclaw_matting.runtime_context import reset_runtime_context, set_runtime_context
+from assetclaw_matting.skills import comfyui_skills
 from assetclaw_matting.skills.comfyui_skills import (
     run_pause,
     run_preview,
@@ -758,3 +759,18 @@ def test_local_router_resumes_vague_start_and_cancels_named_run() -> None:
     assert cancel[0].skill == "comfyui.run_cancel"
     assert cancel[0].arguments["run_id"] == "COMFY_ABCDEF123456"
     assert vague_start[0].skill == "comfyui.run_resume"
+
+
+def test_local_oom_is_classified_before_error_text_is_truncated() -> None:
+    raw = RuntimeError(
+        "ComfyUI history: {'node_id': '16', 'exception_type': 'torch.OutOfMemoryError', "
+        "'exception_message': 'Allocation on device; ran out of memory'}"
+    )
+    wrapped = RuntimeError("ComfyUI 输出校验失败，已重试 3 次")
+    wrapped.__cause__ = raw
+
+    detail = comfyui_skills._execution_failure_detail(wrapped)
+
+    assert detail["kind"] == "GPU_OOM"
+    assert detail["exception_type"] == "torch.OutOfMemoryError"
+    assert detail["node_id"] == "16"

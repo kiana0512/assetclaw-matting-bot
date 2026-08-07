@@ -10,12 +10,21 @@ import pytest
 from PIL import Image
 
 from assetclaw_matting.services.gpu_control_batch import (
+    APPROVED_OUTPUT_NODE,
+    APPROVED_PIPELINE_COMMIT,
+    APPROVED_PIPELINE_SHA256,
+    APPROVED_WORKFLOW_KEY,
+    APPROVED_WORKFLOW_VERSION,
+    GpuControlBatchClient,
     GpuControlError,
     _normalize_relative_path,
     _normalize_scheduler_capacity,
     build_input_batch,
+    compact_remote_state,
     merge_remote_state,
     result_artifact,
+    validate_partial_failed_items,
+    validate_workflow_identity,
     verify_and_publish_result,
 )
 
@@ -55,7 +64,13 @@ def _rgba_result(path: Path, seed: int) -> None:
     image.save(path)
 
 
-def _result_archive(path: Path, prepared: dict, *, bad_mapping: bool = False) -> tuple[Path, str]:
+def _result_archive(
+    path: Path,
+    prepared: dict,
+    *,
+    bad_mapping: bool = False,
+    manifest_extra: dict | None = None,
+) -> tuple[Path, str]:
     work = path / "result_source"
     work.mkdir()
     items = []
@@ -86,6 +101,7 @@ def _result_archive(path: Path, prepared: dict, *, bad_mapping: bool = False) ->
         "total": len(items),
         "items": items,
     }
+    manifest.update(manifest_extra or {})
     archive_path = path / "result.zip"
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
         archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
@@ -173,6 +189,53 @@ def test_result_is_verified_then_atomically_published(tmp_path: Path) -> None:
     assert (output_root / "shot" / "frame_0001.png").is_file()
 
 
+def test_result_accepts_and_verifies_approved_workflow_identity_fields(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    source = input_root / "frame.png"
+    input_root.mkdir()
+    Image.new("RGB", (16, 16), (255, 40, 20)).save(source)
+    prepared = build_input_batch("COMFY_IDENTITY", input_root, [source], tmp_path / "handoff", preserve_structure=True)
+    archive_path, archive_sha = _result_archive(
+        tmp_path,
+        prepared,
+        manifest_extra={
+            "workflow_key": APPROVED_WORKFLOW_KEY,
+            "workflow_version": APPROVED_WORKFLOW_VERSION,
+            "pipeline_commit": APPROVED_PIPELINE_COMMIT,
+            "pipeline_sha256": APPROVED_PIPELINE_SHA256,
+            "output_node": APPROVED_OUTPUT_NODE,
+        },
+    )
+
+    published = verify_and_publish_result(
+        archive_path,
+        archive_sha,
+        prepared,
+        tmp_path / "matte",
+        "COMFY_IDENTITY",
+    )
+
+    assert len(published) == 1
+
+
+def test_result_rejects_unknown_manifest_extensions(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    source = input_root / "frame.png"
+    input_root.mkdir()
+    Image.new("RGB", (16, 16), (255, 40, 20)).save(source)
+    prepared = build_input_batch("COMFY_UNKNOWN", input_root, [source], tmp_path / "handoff", preserve_structure=True)
+    archive_path, archive_sha = _result_archive(tmp_path, prepared, manifest_extra={"unexpected": "value"})
+
+    with pytest.raises(GpuControlError, match="unsupported fields"):
+        verify_and_publish_result(
+            archive_path,
+            archive_sha,
+            prepared,
+            tmp_path / "matte",
+            "COMFY_UNKNOWN",
+        )
+
+
 def test_invalid_result_does_not_touch_existing_output(tmp_path: Path) -> None:
     input_root = tmp_path / "input"
     source = input_root / "frame.png"
@@ -218,15 +281,15 @@ def test_remote_progress_merge_is_monotonic_and_keeps_v3_identity() -> None:
             "status": "RUNNING",
             "progress": 68.0,
             "workflow_key": "imageclip-rgba",
-            "workflow_version": "2026.07.27-721f7d6-r1",
-            "pipeline_commit": "721f7d68635ee36d45f545ce2c82037046147442",
-            "pipeline_sha256": "0" * 64,
+            "workflow_version": APPROVED_WORKFLOW_VERSION,
+            "pipeline_commit": APPROVED_PIPELINE_COMMIT,
+            "pipeline_sha256": APPROVED_PIPELINE_SHA256,
         },
     )
 
     assert merged["progress"] == 72.5
-    assert merged["workflow_version"] == "2026.07.27-721f7d6-r1"
-    assert merged["pipeline_commit"].startswith("721f7d6")
+    assert merged["workflow_version"] == APPROVED_WORKFLOW_VERSION
+    assert merged["pipeline_commit"] == APPROVED_PIPELINE_COMMIT
 
     cancelled = merge_remote_state(
         merged,
@@ -236,9 +299,121 @@ def test_remote_progress_merge_is_monotonic_and_keeps_v3_identity() -> None:
             "_response_meta": {"http_status": 202, "request_id": "cancel-1"},
         },
     )
-    assert cancelled["workflow_version"] == "2026.07.27-721f7d6-r1"
-    assert cancelled["pipeline_commit"].startswith("721f7d6")
+    assert cancelled["workflow_version"] == APPROVED_WORKFLOW_VERSION
+    assert cancelled["pipeline_commit"] == APPROVED_PIPELINE_COMMIT
     assert cancelled["progress"] == 72.5
+
+
+def test_current_gpu_control_identity_is_approved_and_mismatch_fails_closed() -> None:
+    approved = validate_workflow_identity(
+        {
+            "workflow_key": APPROVED_WORKFLOW_KEY,
+            "workflow_version": APPROVED_WORKFLOW_VERSION,
+            "pipeline_commit": APPROVED_PIPELINE_COMMIT,
+            "pipeline_sha256": APPROVED_PIPELINE_SHA256,
+            "output_node": APPROVED_OUTPUT_NODE,
+        }
+    )
+    assert approved["status"] == "VERIFIED"
+
+    legacy_production = validate_workflow_identity(
+        {
+            "workflow_key": APPROVED_WORKFLOW_KEY,
+            "workflow_version": APPROVED_WORKFLOW_VERSION,
+            "pipeline_commit": APPROVED_PIPELINE_COMMIT,
+            "pipeline_sha256": APPROVED_PIPELINE_SHA256,
+        }
+    )
+    assert legacy_production["status"] == "PARTIAL_MATCH"
+    assert legacy_production["missing_fields"] == ["output_node"]
+
+    with pytest.raises(GpuControlError, match="identity mismatch"):
+        validate_workflow_identity(
+            {
+                "workflow_key": APPROVED_WORKFLOW_KEY,
+                "workflow_version": "unexpected-version",
+            }
+        )
+
+    with pytest.raises(GpuControlError, match="identity mismatch"):
+        validate_workflow_identity(
+            {
+                "workflow_key": APPROVED_WORKFLOW_KEY,
+                "workflow_version": APPROVED_WORKFLOW_VERSION,
+                "pipeline_commit": APPROVED_PIPELINE_COMMIT,
+                "pipeline_sha256": APPROVED_PIPELINE_SHA256,
+                "output_node": "SaveImage #99",
+            }
+        )
+
+
+def test_compact_remote_state_accepts_candidate_assembling_at_and_output_node() -> None:
+    state = compact_remote_state(
+        {
+            "batch_id": "batch-1",
+            "status": "ASSEMBLING",
+            "assembling_at": "2026-07-30T08:00:00Z",
+            "output_node": APPROVED_OUTPUT_NODE,
+        }
+    )
+
+    assert state["assembling_at"] == "2026-07-30T08:00:00Z"
+    assert state["assembling_started_at"] == "2026-07-30T08:00:00Z"
+    assert state["output_node"] == APPROVED_OUTPUT_NODE
+
+
+def test_download_artifact_resumes_a_verified_partial_file(tmp_path: Path) -> None:
+    payload = b"0123456789" * 100
+    expected_sha = hashlib.sha256(payload).hexdigest()
+    destination = tmp_path / "result.zip"
+    partial = tmp_path / "result.zip.part"
+    split = 430
+    partial.write_bytes(payload[:split])
+    observed_headers: dict[str, str] = {}
+
+    class FakeResponse:
+        status_code = 206
+        headers = {
+            "X-Artifact-SHA256": expected_sha,
+            "Content-Range": f"bytes {split}-{len(payload) - 1}/{len(payload)}",
+            "X-Request-ID": "download-response-1",
+        }
+
+        def iter_content(self, chunk_size):
+            assert chunk_size == 1024 * 1024
+            yield payload[split:]
+
+        def close(self):
+            return None
+
+    class FakeSession:
+        def get(self, _url, *, headers, **_kwargs):
+            observed_headers.update(headers)
+            return FakeResponse()
+
+    client = object.__new__(GpuControlBatchClient)
+    client.base_url = "https://gpu-control.test"
+    client.connect_timeout = 1
+    client.download_timeout = 30
+    client.retries = 2
+    client.verify = False
+    client.api_key = ""
+    client.session = FakeSession()
+    result = client.download_artifact(
+        {
+            "download_url": "/artifact/result.zip",
+            "sha256": expected_sha,
+            "size_bytes": len(payload),
+        },
+        destination,
+        request_id="download-1",
+    )
+
+    assert observed_headers["Range"] == f"bytes={split}-"
+    assert destination.read_bytes() == payload
+    assert not partial.exists()
+    assert result["resumed_from_bytes"] == split
+    assert result["attempts"] == 1
 
 
 def test_result_artifact_requires_exactly_one_complete_archive() -> None:
@@ -285,6 +460,166 @@ def test_partial_skip_run_preserves_preexisting_outputs_on_publish(tmp_path: Pat
 
     assert _sha256(output_root / "finished" / "frame.png") == existing_sha
     assert (output_root / "new" / "frame.png").is_file()
+
+
+def test_partial_result_publishes_only_successful_ordinals_without_erasing_existing(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    sources = []
+    for index in range(3):
+        source = input_root / f"{index:04d}.png"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (16, 16), (index * 20, 40, 80)).save(source)
+        sources.append(source)
+    prepared = build_input_batch("COMFY_PARTIAL", input_root, sources, tmp_path / "handoff", preserve_structure=True)
+
+    result_root = tmp_path / "partial_source"
+    items = []
+    files = []
+    for ordinal in (0, 2):
+        frame = prepared["frames"][ordinal]
+        output = result_root / frame["output_relative_path"]
+        output.parent.mkdir(parents=True, exist_ok=True)
+        _rgba_result(output, ordinal + 1)
+        items.append({
+            "ordinal": ordinal,
+            "input_relative_path": frame["relative_path"],
+            "input_sha256": frame["sha256"],
+            "output_relative_path": frame["output_relative_path"],
+            "output_sha256": _sha256(output),
+            "status": "SUCCEEDED",
+            "job_id": f"job-{ordinal}",
+            "node_id": "worker-3090-a",
+            "attempts": 1,
+        })
+        files.append((output, f"results/{frame['output_relative_path']}"))
+    manifest = {
+        "schema_version": "1.0",
+        "batch_id": "batch-partial",
+        "external_batch_id": prepared["external_batch_id"],
+        "total": 3,
+        "items": items,
+    }
+    archive_path = tmp_path / "partial.zip"
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("manifest.json", json.dumps(manifest))
+        for source, member in files:
+            archive.write(source, member)
+
+    output_root = tmp_path / "matte"
+    existing = output_root / "previous.png"
+    existing.parent.mkdir(parents=True)
+    _rgba_result(existing, 99)
+    existing_sha = _sha256(existing)
+    partial_status = {
+        "status": "PARTIAL_SUCCESS",
+        "counts": {
+            "total": 3,
+            "pending": 0,
+            "queued": 0,
+            "running": 0,
+            "succeeded": 2,
+            "failed": 1,
+            "cancelled": 0,
+        },
+        "failed_items": [{
+            "ordinal": 1,
+            "input_relative_path": prepared["frames"][1]["relative_path"],
+            "input_sha256": prepared["frames"][1]["sha256"],
+            "code": "COMFY_TIMEOUT",
+            "message": "timed out after three nodes",
+            "node_id": "control-4090",
+            "attempts": 3,
+            "attempted_node_ids": ["worker-3090-a", "worker-3090-b", "control-4090"],
+        }],
+    }
+    tampered_status = json.loads(json.dumps(partial_status))
+    tampered_status["failed_items"][0]["input_relative_path"] = "other/0001.png"
+    with pytest.raises(GpuControlError, match="input mapping mismatch"):
+        verify_and_publish_result(
+            archive_path,
+            _sha256(archive_path),
+            prepared,
+            output_root,
+            "COMFY_PARTIAL_TAMPERED",
+            preserve_existing=True,
+            expected_batch_id="batch-partial",
+            expected_external_batch_id=prepared["external_batch_id"],
+            allow_partial=True,
+            partial_status=tampered_status,
+        )
+    assert _sha256(existing) == existing_sha
+    assert not (output_root / "0000.png").exists()
+
+    published = verify_and_publish_result(
+        archive_path,
+        _sha256(archive_path),
+        prepared,
+        output_root,
+        "COMFY_PARTIAL",
+        preserve_existing=True,
+        expected_batch_id="batch-partial",
+        expected_external_batch_id=prepared["external_batch_id"],
+        allow_partial=True,
+        partial_status=partial_status,
+    )
+
+    assert [item["ordinal"] for item in published] == [0, 2]
+    assert _sha256(existing) == existing_sha
+    assert (output_root / "0000.png").is_file()
+    assert not (output_root / "0001.png").exists()
+    assert (output_root / "0002.png").is_file()
+
+
+def test_partial_failed_items_require_exact_identity_partition(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    sources = []
+    for index in range(3):
+        source = input_root / f"{index:04d}.png"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (8, 8), (index * 30, 20, 60)).save(source)
+        sources.append(source)
+    prepared = build_input_batch("COMFY_PARTITION", input_root, sources, tmp_path / "handoff", preserve_structure=True)
+    failed_frame = prepared["frames"][1]
+    status = {
+        "status": "PARTIAL_SUCCESS",
+        "counts": {
+            "total": 3,
+            "pending": 0,
+            "queued": 0,
+            "running": 0,
+            "succeeded": 2,
+            "failed": 1,
+            "cancelled": 0,
+        },
+        "failed_items": [{
+            "ordinal": 1,
+            "input_relative_path": failed_frame["relative_path"],
+            "input_sha256": failed_frame["sha256"],
+            "code": "GPU_OOM",
+            "message": "allocation failed",
+            "node_id": "control-4090",
+            "attempts": 3,
+            "attempted_node_ids": ["worker-3090-a", "worker-3090-b", "control-4090"],
+        }],
+    }
+
+    validated = validate_partial_failed_items(status, prepared, {0, 2})
+
+    assert [item["ordinal"] for item in validated] == [1]
+    tampered = json.loads(json.dumps(status))
+    tampered["failed_items"][0]["input_sha256"] = "0" * 64
+    with pytest.raises(GpuControlError, match="sha256 mismatch"):
+        validate_partial_failed_items(tampered, prepared, {0, 2})
+
+
+def test_compact_remote_state_preserves_failed_items() -> None:
+    failed_items = [{"ordinal": 93, "code": "COMFY_TIMEOUT"}]
+
+    compact = compact_remote_state({"status": "PARTIAL_SUCCESS", "failed_items": failed_items})
+    merged = merge_remote_state({"status": "RUNNING"}, {"status": "PARTIAL_SUCCESS", "failed_items": failed_items})
+
+    assert compact["failed_items"] == failed_items
+    assert merged["failed_items"] == failed_items
 
 
 def test_hybrid_router_keeps_one_small_task_local_and_overflows_when_busy(monkeypatch) -> None:
@@ -360,6 +695,29 @@ def test_hybrid_router_keeps_large_batch_remote_when_cluster_is_draining(monkeyp
 
     assert backend == "gpu_control"
     assert "submitting to the server queue" in reason
+    assert recorded["accepting_batches"] is False
+
+
+def test_hybrid_router_queues_small_overflow_remotely_when_local_is_busy(monkeypatch) -> None:
+    from assetclaw_matting.config import settings
+
+    monkeypatch.setattr(settings, "comfyui_fake_mode", False)
+    monkeypatch.setattr(settings, "matting_backend_mode", "hybrid")
+    monkeypatch.setattr(settings, "gpu_control_base_url", "https://10.3.34.11")
+    monkeypatch.setattr(settings, "gpu_control_large_batch_threshold", 64)
+    monkeypatch.setattr(hybrid_matting_router, "_active_local_run_count", lambda: 1)
+    monkeypatch.setattr(hybrid_matting_router, "_cluster_handshake", lambda: {
+        "checked": True,
+        "ready": True,
+        "capacity_supported": True,
+        "accepting_batches": False,
+        "reason": "scheduler capacity is full",
+    })
+
+    backend, reason, recorded = hybrid_matting_router.select_matting_backend(12, include_handshake=True)
+
+    assert backend == "gpu_control"
+    assert "server queue" in reason
     assert recorded["accepting_batches"] is False
 
 
@@ -501,7 +859,8 @@ def test_remote_worker_submits_validates_and_publishes_one_isolated_batch(monkey
             return {"path": str(destination), "sha256": self.artifact_sha, "size_bytes": destination.stat().st_size}
 
         def cancel_batch(self, *args, **kwargs):
-            return {"status": "CANCELLED"}
+            calls["cancel_count"] = int(calls.get("cancel_count") or 0) + 1
+            raise AssertionError("local watchdog must never cancel the remote parent")
 
     def fake_get_run(_run_id):
         return row
@@ -514,7 +873,7 @@ def test_remote_worker_submits_validates_and_publishes_one_isolated_batch(monkey
         row["status"] = status
 
     monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
-    monkeypatch.setattr(settings, "gpu_control_execution_timeout_seconds", 30)
+    monkeypatch.setattr(settings, "gpu_control_execution_timeout_seconds", -1)
     monkeypatch.setattr(comfyui_skills, "_get_run", fake_get_run)
     monkeypatch.setattr(comfyui_skills, "_save_run_progress", fake_save_progress)
     monkeypatch.setattr(comfyui_skills, "_set_run_status", fake_set_status)
@@ -529,6 +888,8 @@ def test_remote_worker_submits_validates_and_publishes_one_isolated_batch(monkey
     assert (output_root / "video_01" / "frame_0001.png").is_file()
     saved_options = json.loads(row["options_json"])
     assert saved_options["gpu_control"]["batch_id"] == "batch-1"
+    assert saved_options["gpu_control"]["watchdog_action"] == "OBSERVE_AND_RECONCILE_WITHOUT_CANCEL"
+    assert int(calls.get("cancel_count") or 0) == 0
     assert saved_options["prompt_map"][0]["src_path"] == str(source)
 
 
@@ -553,6 +914,9 @@ def test_remote_cancel_waits_for_terminal_and_uses_frozen_key(monkeypatch) -> No
 
     class FakeClient:
         def cancel_batch(self, batch_id, *, idempotency_key, request_id=None):
+            persisted_before_request = json.loads(row["options_json"])["gpu_control"]["cancel_intent"]
+            assert persisted_before_request["reason"] == "explicit_user_request"
+            assert persisted_before_request["idempotency_key"] == "assetclaw:VID_CANCEL:matting:g1:cancel"
             calls.update(
                 batch_id=batch_id,
                 idempotency_key=idempotency_key,
@@ -586,3 +950,73 @@ def test_remote_cancel_waits_for_terminal_and_uses_frozen_key(monkeypatch) -> No
     saved = json.loads(row["options_json"])["gpu_control"]
     assert saved["status"] == "CANCELLING"
     assert saved["cancel_response_meta"]["request_id"] == "server-cancel-1"
+    assert saved["cancel_intent"]["actor"] == "assetclaw_operator"
+    assert saved["cancel_intent"]["accepted_at"]
+
+
+def test_remote_cancelled_without_local_intent_fails_closed(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.config import settings
+
+    input_root = tmp_path / "input"
+    source = input_root / "frame.png"
+    input_root.mkdir()
+    Image.new("RGB", (8, 8), (10, 20, 30)).save(source)
+    run_id = "COMFY_ILLEGAL_CANCEL"
+    options = {
+        "matting_backend": "gpu_control",
+        "external_batch_id": "assetclaw:VID_ILLEGAL:matting:g1",
+        "preserve_structure": True,
+        "skip_existing": False,
+        "strict_frame_identity": False,
+        "cluster_parameters": {},
+        "prompt_map": [],
+    }
+    row = {
+        "id": run_id,
+        "status": "RUNNING",
+        "workflow_path": str(tmp_path / "unused.json"),
+        "input_dir": str(input_root),
+        "output_dir": str(tmp_path / "output"),
+        "total": 1,
+        "files_json": json.dumps([str(source)]),
+        "prompt_ids_json": "[]",
+        "options_json": json.dumps(options),
+    }
+
+    class FakeClient:
+        def create_batch(self, _archive_path, manifest, *, idempotency_key, request_id):
+            return {
+                "batch_id": "batch-illegal-cancel",
+                "external_batch_id": manifest["external_batch_id"],
+                "status": "QUEUED",
+            }
+
+        def get_batch(self, batch_id, *, request_id=None):
+            return {
+                "batch_id": batch_id,
+                "external_batch_id": options["external_batch_id"],
+                "status": "CANCELLED",
+                "progress": 10,
+            }
+
+        def cancel_batch(self, *args, **kwargs):
+            raise AssertionError("worker must not manufacture a cancel intent")
+
+    def save_progress(_run_id, prompt_ids, updated_options):
+        row["prompt_ids_json"] = json.dumps(prompt_ids)
+        row["options_json"] = json.dumps(updated_options)
+
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    monkeypatch.setattr(settings, "gpu_control_execution_timeout_seconds", 30)
+    monkeypatch.setattr(comfyui_skills, "_get_run", lambda _run_id: row)
+    monkeypatch.setattr(comfyui_skills, "_save_run_progress", save_progress)
+    monkeypatch.setattr(comfyui_skills, "_set_run_status", lambda _run_id, status: row.update(status=status))
+    monkeypatch.setattr(comfyui_skills, "_notify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("assetclaw_matting.services.gpu_control_batch.GpuControlBatchClient", FakeClient)
+
+    comfyui_skills._run_gpu_control_worker(run_id)
+
+    assert row["status"] == "FAILED"
+    remote = json.loads(row["options_json"])["gpu_control"]
+    assert remote["illegal_remote_cancelled"]["reason"] == "remote_cancelled_without_local_cancel_intent"
+    assert "without a persisted local cancel intent" in remote["client_error"]
