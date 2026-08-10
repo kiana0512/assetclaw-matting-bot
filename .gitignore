@@ -50,7 +50,8 @@ models/
 *.egg-info/
 .venv/
 .uv-cache/
-.pytest-tmp*/
+.pytest*/
+tmp/pytest*/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
