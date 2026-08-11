@@ -101,7 +101,8 @@ conda run -n assetclaw python -m pytest
 
 ### 飞书直传动画处理
 - 视频文件：飞书按“文件”发送 `.mp4/.mov` 后，确认执行再启动；流程为原视频 -> OpenCV 抽帧 -> ComfyUI 抠图 -> Cherry HTML 后处理 -> 单个 zip 回传。每个视频任务只返回 1 个完整结果包，包内包含 `original_videos/`、`frames/`、`matte/`、`smooth/` 和 `manifest.json`。
-- 图片文件/图片消息：收到后无需确认，直接 ComfyUI 抠图 -> Cherry HTML 后处理 -> 处理结果按文件附件回传，避免飞书压缩。
+- 单张图片文件/图片消息：收到后无需确认，直接 ComfyUI 抠图 -> Cherry HTML 后处理 -> 图片结果按文件附件回传，避免飞书压缩。
+- 序列帧 ZIP：按视频类任务处理，只返回 1 个完整结果包；包内固定包含 `01_original_frames/`、`02_matte/`、`03_postprocessed/` 和 `manifest.json`，不按图片阶段拆包。
 - 后处理预设：宽高完全相同走正方形 `256x256`，其他比例走长方形 `384x512`；状态回复会带当前预设。
 - 抠图管线：默认使用项目同级的 `<project-parent>\imageclip`（公共机为 `C:\imageclip`）管理 `ImageClip.json`、LoRA、`Cherry_lizi` 和 Cherry HTML；启动任务前会确认资源及软链接状态。
 

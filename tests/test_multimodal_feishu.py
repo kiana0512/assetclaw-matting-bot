@@ -1461,7 +1461,7 @@ def test_direct_image_send_results_returns_matte_processed_and_comparison(monkey
     assert run["images"][0]["result_path"] == str(result_image)
 
 
-def test_direct_image_sequence_sends_matte_and_postprocess_stage_zips(monkeypatch, tmp_path: Path) -> None:
+def test_direct_image_sequence_sends_one_complete_bundle(monkeypatch, tmp_path: Path) -> None:
     import zipfile
 
     from assetclaw_matting.feishu.client import feishu_client
@@ -1507,23 +1507,47 @@ def test_direct_image_sequence_sends_matte_and_postprocess_stage_zips(monkeypatc
 
     sent = direct_image_skills._send_results(run)
 
-    assert len(sent) == 2
-    assert sent_files == ["关键帧_01_matte.zip", "关键帧_02_postprocessed.zip"]
-    with zipfile.ZipFile(sent[0]) as archive:
-        matte_names = set(archive.namelist())
-    with zipfile.ZipFile(sent[1]) as archive:
-        processed_names = set(archive.namelist())
-    assert matte_names == {"matte/0000.png", "matte/0001.png", "manifest.json"}
-    assert processed_names == {"postprocessed/0000.png", "postprocessed/0001.png", "manifest.json"}
+    assert len(sent) == 1
+    assert sent_files == ["关键帧_animation_processed.zip"]
     complete_bundle = Path(run["sequence_zip_path"])
     assert complete_bundle.name == "关键帧_animation_processed.zip"
     with zipfile.ZipFile(complete_bundle) as archive:
         complete_names = set(archive.namelist())
+        assert archive.getinfo("manifest.json").compress_type == zipfile.ZIP_DEFLATED
     for index in range(2):
-        for section in ("frames", "matte", "smooth", "comparison"):
+        for section in ("01_original_frames", "02_matte", "03_postprocessed"):
             assert f"{section}/{index:04d}.png" in complete_names
-    assert run["delivery"]["artifact_count"] == 2
-    assert [item["status"] for item in run["delivery_artifacts"]] == ["DELIVERED", "DELIVERED"]
+    assert run["delivery"]["artifact_count"] == 1
+    assert [item["kind"] for item in run["delivery_artifacts"]] == ["complete_bundle"]
+    assert [item["status"] for item in run["delivery_artifacts"]] == ["DELIVERED"]
+
+
+def test_direct_image_matte_only_sequence_keeps_originals_and_stage_contract(monkeypatch, tmp_path: Path) -> None:
+    import zipfile
+
+    from assetclaw_matting.skills import direct_image_skills
+
+    monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", tmp_path / "runs")
+    original = tmp_path / "original.png"
+    matte = tmp_path / "matte.png"
+    Image.new("RGBA", (8, 8), (1, 2, 3, 255)).save(original)
+    Image.new("RGBA", (8, 8), (1, 2, 3, 128)).save(matte)
+    item = {"index": 1, "source_name": "0000.png", "original_path": str(original)}
+    run = {"id": "IMG_SEQUENCE_MATTE_ONLY", "run_label": "待补角色序列.zip", "images": [item]}
+
+    package = direct_image_skills._make_matte_only_zip(run, [(item, matte)])
+
+    with zipfile.ZipFile(package) as archive:
+        names = set(archive.namelist())
+        assert archive.testzip() is None
+        assert archive.getinfo("manifest.json").compress_type == zipfile.ZIP_DEFLATED
+    assert names == {
+        "01_original_frames/0000.png",
+        "02_matte/0000.png",
+        "03_postprocessed/README.txt",
+        "manifest.json",
+    }
+    assert not package.with_suffix(".zip.part").exists()
 
 
 def test_direct_video_delivery_sends_one_complete_zip_and_only_retries_missing(monkeypatch, tmp_path: Path) -> None:

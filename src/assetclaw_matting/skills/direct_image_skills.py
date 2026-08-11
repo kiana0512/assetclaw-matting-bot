@@ -1213,8 +1213,8 @@ def deliver_matte_only(
                 sent_files.append(str(package))
                 run["sequence_zip_path"] = str(package)
                 run["delivery_artifacts"] = [{
-                    "kind": "matte",
-                    "label": "透明抠图",
+                    "kind": "complete_bundle",
+                    "label": "序列帧完整结果包（原始帧、透明抠图、后处理说明）",
                     "path": str(package),
                     "file_name": package.name,
                     "size_bytes": package.stat().st_size,
@@ -1244,7 +1244,7 @@ def deliver_matte_only(
             _notify(
                 run,
                 f"抠图结果已交付：{run['id']}。\n"
-                "序列帧无需抽帧，已返回透明抠图 ZIP。\n"
+                "序列帧已返回 1 个完整 ZIP，包内包含原始帧、透明抠图和后处理说明。\n"
                 "未生成后处理结果：角色库中暂无对应角色的校色与位置矫正资料。",
             )
 
@@ -1277,14 +1277,49 @@ def _make_matte_only_zip(
 ) -> Path:
     name = _safe_name(Path(str(run.get("run_label") or run["id"])).stem) or str(run["id"])
     package = _run_dir(run) / f"{name}_matte_only.zip"
-    with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
-        for index, (item, matte) in enumerate(matte_files, start=1):
-            source = Path(str(item.get("source_name") or item.get("name") or matte.name))
-            arcname = f"{index:04d}_{_safe_name(source.stem) or 'frame'}_matte.png"
-            bundle.write(matte, arcname=arcname)
-    with zipfile.ZipFile(package, "r") as bundle:
-        if bundle.testzip() is not None or len(bundle.infolist()) != len(matte_files):
-            raise RuntimeError(f"matte-only ZIP verification failed: {package}")
+    package.parent.mkdir(parents=True, exist_ok=True)
+    partial = package.with_suffix(".zip.part")
+    manifest = {
+        "schema_version": "2.0",
+        "run_id": run.get("id"),
+        "artifact_kind": "sequence_complete_bundle",
+        "frame_count": len(matte_files),
+        "ordered": True,
+        "postprocess_applied": False,
+        "files": [],
+    }
+    try:
+        with zipfile.ZipFile(partial, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as bundle:
+            for position, (item, matte) in enumerate(matte_files):
+                original = Path(str(item.get("original_path") or ""))
+                if not original.is_file() or not matte.is_file():
+                    raise RuntimeError(f"matte-only sequence source is missing: original={original}, matte={matte}")
+                original_entry = f"01_original_frames/{position:04d}{original.suffix.lower() or '.png'}"
+                matte_entry = f"02_matte/{position:04d}{matte.suffix.lower() or '.png'}"
+                bundle.write(original, original_entry, compress_type=zipfile.ZIP_STORED)
+                bundle.write(matte, matte_entry, compress_type=zipfile.ZIP_STORED)
+                manifest["files"].append({
+                    "index": position,
+                    "source_name": item.get("source_name") or item.get("name") or "",
+                    "original_frames": original_entry,
+                    "matte": matte_entry,
+                })
+            bundle.writestr(
+                "03_postprocessed/README.txt",
+                "未生成后处理结果：角色库中暂无对应角色的校色与位置矫正资料。\n",
+                compress_type=zipfile.ZIP_DEFLATED,
+            )
+            bundle.writestr(
+                "manifest.json",
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+                compress_type=zipfile.ZIP_DEFLATED,
+            )
+        with zipfile.ZipFile(partial, "r") as bundle:
+            if bundle.testzip() is not None or len(bundle.infolist()) != len(matte_files) * 2 + 2:
+                raise RuntimeError(f"matte-only ZIP verification failed: {partial}")
+        os.replace(partial, package)
+    finally:
+        partial.unlink(missing_ok=True)
     return package
 
 
@@ -1299,8 +1334,8 @@ def _send_results(run: dict[str, Any]) -> list[str]:
     if bool(run.get("package_as_sequence")) or len(items) > 1:
         zip_path = _make_sequence_zip(run)
         run["sequence_zip_path"] = str(zip_path)
-        sent = _send_sequence_delivery_artifacts(run, chat_id=chat_id, include_postprocess=True)
-        _append_log(run, f"序列帧结果已分阶段发送：透明抠图、后处理结果，共 {len(items)} 帧")
+        sent = _send_sequence_delivery_artifacts(run, chat_id=chat_id)
+        _append_log(run, f"序列帧完整结果包已发送：原始帧、透明抠图、后处理结果，共 {len(items)} 帧")
         _save(run)
         return sent
 
@@ -1356,12 +1391,12 @@ def package_and_send(run_id: str | None = None, package_name: str = "", **_: Any
     _prepare_result_files(run)
     zip_path = _make_sequence_zip(run, package_name=package_name)
     run["sequence_zip_path"] = str(zip_path)
-    sent_files = _send_sequence_delivery_artifacts(run, chat_id=str(run["chat_id"]), include_postprocess=True)
+    sent_files = _send_sequence_delivery_artifacts(run, chat_id=str(run["chat_id"]))
     run["sent_files"] = sent_files
     run["status"] = "DONE"
     run["stage"] = "done"
     run["error"] = ""
-    _append_log(run, f"序列帧结果已分阶段补发：透明抠图、后处理结果，共 {len(run.get('images') or [])} 帧")
+    _append_log(run, f"序列帧完整结果包已补发：原始帧、透明抠图、后处理结果，共 {len(run.get('images') or [])} 帧")
     _save(run)
     return {
         "ok": True,
@@ -1388,105 +1423,68 @@ def _make_sequence_zip(run: dict[str, Any], package_name: str = "") -> Path:
             label = f"序列帧_{len(items)}张"
         zip_name = f"{Path(_safe_name(label)).stem}_animation_processed.zip"
     zip_path = _run_dir(run) / zip_name
-    manifest = {"run_id": run.get("id"), "frame_count": len(items), "ordered": True, "files": []}
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as archive:
-        for position, item in enumerate(items):
-            original = Path(str(item.get("original_path") or ""))
-            matte = Path(str(item.get("matte_result_path") or ""))
-            processed = Path(str(item.get("postprocessed_result_path") or ""))
-            comparison = Path(str(item.get("comparison_path") or ""))
-            paths = {"frames": original, "matte": matte, "smooth": processed, "comparison": comparison}
-            missing = [f"{kind}:{path}" for kind, path in paths.items() if not path.is_file()]
-            if missing:
-                raise RuntimeError("sequence package missing result files: " + ", ".join(missing))
-            stem = f"{position:04d}"
-            entries: dict[str, str] = {}
-            for kind, path in paths.items():
-                entry = f"{kind}/{stem}{path.suffix.lower() or '.png'}"
-                archive.write(path, entry)
-                entries[kind] = entry
-            manifest["files"].append(
-                {"index": position, "source_name": item.get("source_name") or item.get("name") or "", **entries}
-            )
-        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-    return zip_path
-
-
-def _make_sequence_stage_zip(run: dict[str, Any], *, kind: str, label: str, suffix: str) -> Path:
-    items = sorted(run.get("images") or [], key=lambda item: int(item.get("index") or 0))
-    if not items:
-        raise RuntimeError("sequence run contains no images")
-    field = "matte_result_path" if kind == "matte" else "postprocessed_result_path"
-    files: list[tuple[int, dict[str, Any], Path]] = []
-    for position, item in enumerate(items):
-        path = Path(str(item.get(field) or ""))
-        if not path.is_file():
-            raise RuntimeError(f"sequence {label} file is missing: {path}")
-        files.append((position, item, path))
-    run_label = str(run.get("run_label") or run.get("id") or "sequence")
-    stem = Path(_safe_name(run_label)).stem or str(run.get("id") or "sequence")
-    package = _run_dir(run) / f"{stem}_{suffix}.zip"
-    if package.is_file():
-        with zipfile.ZipFile(package, "r") as archive:
-            if archive.testzip() is not None or len(archive.infolist()) != len(files) + 1:
-                raise RuntimeError(f"sequence {label} ZIP verification failed: {package}")
-        return package
-    partial = package.with_suffix(".zip.part")
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
     manifest = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "run_id": run.get("id"),
-        "artifact_kind": kind,
-        "label": label,
-        "frame_count": len(files),
+        "artifact_kind": "sequence_complete_bundle",
+        "frame_count": len(items),
         "ordered": True,
-        "postprocess_applied": kind == "postprocessed",
+        "stages": ["original_frames", "matte", "postprocessed"],
         "files": [],
     }
+    partial = zip_path.with_suffix(".zip.part")
     try:
-        with zipfile.ZipFile(partial, "w", compression=zipfile.ZIP_STORED) as archive:
-            for position, item, path in files:
-                entry = f"{kind}/{position:04d}{path.suffix.lower() or '.png'}"
-                archive.write(path, entry)
+        with zipfile.ZipFile(partial, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+            for position, item in enumerate(items):
+                paths = {
+                    "original_frames": Path(str(item.get("original_path") or "")),
+                    "matte": Path(str(item.get("matte_result_path") or "")),
+                    "postprocessed": Path(str(item.get("postprocessed_result_path") or "")),
+                }
+                missing = [f"{kind}:{path}" for kind, path in paths.items() if not path.is_file()]
+                if missing:
+                    raise RuntimeError("sequence package missing result files: " + ", ".join(missing))
+                entries: dict[str, str] = {}
+                for order, (kind, path) in enumerate(paths.items(), start=1):
+                    entry = f"{order:02d}_{kind}/{position:04d}{path.suffix.lower() or '.png'}"
+                    archive.write(path, entry, compress_type=zipfile.ZIP_STORED)
+                    entries[kind] = entry
                 manifest["files"].append({
                     "index": position,
                     "source_name": item.get("source_name") or item.get("name") or "",
-                    "entry": entry,
+                    **entries,
                 })
-            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            archive.writestr(
+                "manifest.json",
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+                compress_type=zipfile.ZIP_DEFLATED,
+            )
         with zipfile.ZipFile(partial, "r") as archive:
-            if archive.testzip() is not None or len(archive.infolist()) != len(files) + 1:
-                raise RuntimeError(f"sequence {label} ZIP verification failed: {partial}")
-        os.replace(partial, package)
+            if archive.testzip() is not None or len(archive.infolist()) != len(items) * 3 + 1:
+                raise RuntimeError(f"sequence complete ZIP verification failed: {partial}")
+        os.replace(partial, zip_path)
     finally:
         partial.unlink(missing_ok=True)
-    return package
+    return zip_path
 
 
 def _send_sequence_delivery_artifacts(
     run: dict[str, Any],
     *,
     chat_id: str,
-    include_postprocess: bool,
     attempts: int = 5,
 ) -> list[str]:
     from assetclaw_matting.feishu.client import feishu_client
 
+    package = Path(str(run.get("sequence_zip_path") or ""))
+    if not package.is_file():
+        raise RuntimeError(f"sequence complete bundle is missing: {package}")
     specs = [{
-        "kind": "matte",
-        "label": "透明抠图",
-        "path": str(_make_sequence_stage_zip(run, kind="matte", label="透明抠图", suffix="01_matte")),
+        "kind": "complete_bundle",
+        "label": "序列帧完整结果包（原始帧、透明抠图、后处理结果）",
+        "path": str(package),
     }]
-    if include_postprocess:
-        specs.append({
-            "kind": "postprocessed",
-            "label": "后处理结果",
-            "path": str(_make_sequence_stage_zip(
-                run,
-                kind="postprocessed",
-                label="后处理结果",
-                suffix="02_postprocessed",
-            )),
-        })
     previous = {
         str(item.get("kind") or ""): item
         for item in run.get("delivery_artifacts") or []
@@ -1565,7 +1563,7 @@ def _send_sequence_delivery_artifacts(
         "artifact_count": len(artifacts),
         "delivered_count": len(sent),
         "complete_bundle_path": str(run.get("sequence_zip_path") or ""),
-        "postprocess_applied": include_postprocess,
+        "postprocess_applied": True,
         "delivered_at": _now(),
     }
     _save(run)

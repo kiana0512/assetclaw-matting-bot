@@ -221,6 +221,20 @@ AssetClaw Win3090 机器人通过飞书长连接接收指令，在本机执行�
 
 大结果包超过飞书消息附件阈值时会自动使用飞书云盘分片上传并返回可访问链接；发送成功必须保存真实消息回执。重发只重发同一个完整结果包，不会重新抽帧、抠图或拆分 ZIP。
 
+序列帧 ZIP 虽然由多张图片组成，但业务上按视频类任务处理，不走单张图片交付规则。每个序列帧任务只返回 1 个完整 ZIP：
+
+```text
+<序列名>_animation_processed.zip
+├─ manifest.json
+├─ 01_original_frames/  # 用户上传 ZIP 中的原始序列帧
+├─ 02_matte/            # ComfyUI 透明抠图结果
+└─ 03_postprocessed/    # Cherry 后处理结果
+```
+
+三个目录的帧数必须一致；打包完成后通过 ZIP CRC 和条目数量校验才允许发送。旧的 `_01_matte.zip`、`_02_postprocessed.zip` 分阶段交付形式已停用。
+
+如果角色资料缺失，序列帧仍只返回 1 个 ZIP：保留 `01_original_frames/` 和 `02_matte/`，并在 `03_postprocessed/README.txt` 明确说明未生成后处理结果。
+
 后处理会按视频原始宽高自动选择预设：
 
 - 宽高完全相同：正方形 `256x256`

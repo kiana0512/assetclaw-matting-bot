@@ -4,7 +4,7 @@
 
 视频直传任务的最终交付合同已统一为：**一个视频任务只发送一个完整 ZIP**。ZIP 内同时保存原视频、原始抽帧、透明抠图、Cherry 后处理结果和任务 manifest，不再把三个阶段拆成三个附件。
 
-本次修复遵循“稳定性、质量、速度”的优先级。完整回归为 `481 passed`；未发现本次改动引入的失败。
+本次修复遵循“稳定性、质量、速度”的优先级。视频与序列帧补充修复后的完整回归为 `482 passed`；未发现本次改动引入的失败。
 
 ## 根因
 
@@ -68,11 +68,19 @@ PNG、JPEG、WebP、GIF 和常见视频格式本身已压缩，重复 DEFLATE �
 - 每个分片读取长度必须符合预期，结束前校验累计上传字节数；源文件中途变化或提前结束会明确失败，不会提交不完整上传。
 - 最终状态仍要求真实消息回执，缺少 `message_id` 不标记为已交付。
 
+### 6. 序列帧 ZIP 与视频任务对齐
+
+- 单张图片继续按图片结果交付；序列帧 ZIP 在业务上按视频类任务处理。
+- 序列帧任务只发送一个完整包，不再分别发送 `_01_matte.zip` 和 `_02_postprocessed.zip`。
+- 完整包固定包含 `01_original_frames/`、`02_matte/`、`03_postprocessed/` 和 `manifest.json`。
+- 三阶段帧数、ZIP 条目数和 CRC 均通过后才允许发送。
+- matte-only 序列仍保留原始帧与抠图帧，并在 `03_postprocessed/README.txt` 说明后处理缺失原因。
+
 ## 验证记录
 
 - 定向视频交付与飞书兼容测试：`6 passed`。
-- `tests/test_multimodal_feishu.py`：`76 passed`。
-- 全仓测试：`481 passed`，`13 warnings`。
+- `tests/test_multimodal_feishu.py`：`77 passed`。
+- 全仓测试：`482 passed`，`14 warnings`。
 - ZIP CRC、目录结构、媒体 `ZIP_STORED`、manifest `ZIP_DEFLATED`、`.part` 清理均有回归断言。
 - Ruff `F` 类阻断性检查通过；全规则扫描仍暴露历史行宽、import 排序与宽泛异常捕获债务，不在本次稳定性修复中批量改写，避免扩大热修范围。
 
