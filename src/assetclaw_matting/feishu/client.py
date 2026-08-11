@@ -133,7 +133,7 @@ class FeishuClient:
             return self._send_drive_file_to_chat(chat_id, path, file_name, cause=exc)
         payload = {
             "receive_id": chat_id,
-            "msg_type": "file",
+            "msg_type": _feishu_message_type(file_name or path.name),
             "content": json.dumps({"file_key": file_key}, ensure_ascii=False),
         }
         response = self._post_with_retry(
@@ -235,11 +235,16 @@ class FeishuClient:
         if not upload_id or block_size <= 0 or block_num <= 0:
             raise RuntimeError(f"invalid drive upload_prepare response: {payload}")
 
+        uploaded_bytes = 0
         with path.open("rb") as f:
             for seq in range(block_num):
                 chunk = f.read(block_size)
-                if not chunk:
-                    break
+                expected_size = min(block_size, size - uploaded_bytes)
+                if len(chunk) != expected_size:
+                    raise RuntimeError(
+                        f"drive upload source changed or ended early: seq={seq} "
+                        f"expected={expected_size} actual={len(chunk)}"
+                    )
                 part = self._post_with_retry(
                     f"{FEISHU_BASE}/drive/v1/files/upload_part",
                     headers=self._headers(),
@@ -254,6 +259,10 @@ class FeishuClient:
                         f"upload_drive_file_part failed: seq={seq} code={part_data.get('code')} "
                         f"msg={part_data.get('msg')} error={part_data.get('error')}"
                     )
+                uploaded_bytes += len(chunk)
+
+        if uploaded_bytes != size:
+            raise RuntimeError(f"drive upload byte count mismatch: expected={size} actual={uploaded_bytes}")
 
         finish = self._post_with_retry(
             f"{FEISHU_BASE}/drive/v1/files/upload_finish",
@@ -435,6 +444,15 @@ def _feishu_file_type(file_name: str) -> str:
     if suffix == ".pdf":
         return "pdf"
     return "stream"
+
+
+def _feishu_message_type(file_name: str) -> str:
+    suffix = Path(file_name).suffix.lower()
+    if suffix == ".mp4":
+        return "media"
+    if suffix == ".opus":
+        return "audio"
+    return "file"
 
 
 def _guess_mime_type(file_name: str) -> str:

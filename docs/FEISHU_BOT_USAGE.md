@@ -203,8 +203,23 @@ AssetClaw Win3090 机器人通过飞书长连接接收指令，在本机执行�
 确认后流程是：
 
 ```text
-原视频 -> OpenCV 抽帧 -> ComfyUI 抠图 -> Cherry 后处理 -> zip 回传
+原视频 -> OpenCV 抽帧 -> ComfyUI 抠图 -> Cherry 后处理 -> 单个 zip 回传
 ```
+
+每个视频任务只返回 **1 个 ZIP**，不会把三个处理阶段拆成三个附件。完整包结构固定为：
+
+```text
+<视频名>_animation_processed.zip
+├─ manifest.json
+├─ original_videos/   # 收到的原视频副本
+├─ frames/            # OpenCV 原始抽帧
+├─ matte/             # ComfyUI 透明抠图
+└─ smooth/            # Cherry 后处理结果
+```
+
+如果角色库缺少对应校色/位置矫正资料，任务会以 matte-only 模式交付，但仍然只返回 1 个 ZIP。包内保留原视频、`frames/`、`matte/`，并在 `smooth/README.txt` 明确说明后处理未生成，禁止用抠图结果冒充后处理结果。
+
+大结果包超过飞书消息附件阈值时会自动使用飞书云盘分片上传并返回可访问链接；发送成功必须保存真实消息回执。重发只重发同一个完整结果包，不会重新抽帧、抠图或拆分 ZIP。
 
 后处理会按视频原始宽高自动选择预设：
 

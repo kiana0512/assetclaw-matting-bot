@@ -329,7 +329,7 @@ def deliver_matte_only(
             _notify(
                 run,
                 f"抠图结果已交付：{run['id']}。\n"
-                "已返回 2 个 ZIP：原始抽帧、透明抠图。\n"
+                "已返回 1 个 ZIP，包内包含原始抽帧、透明抠图和后处理目录。\n"
                 "未生成后处理结果：角色库中暂无对应角色的校色与位置矫正资料。",
             )
         return {"ok": True, "run_id": run_id, **_public(run)}
@@ -671,19 +671,19 @@ def _worker(run_id: str) -> None:
         suffix = f"，{plan}" if plan else ""
         _notify(
             run,
-            f"动画处理完成：{run['id']}，正在分阶段发送 3 个 ZIP："
-            f"原始抽帧、透明抠图、后处理结果{suffix}。",
+            f"动画处理完成：{run['id']}，正在发送 1 个完整 ZIP："
+            f"包内包含原始抽帧、透明抠图、后处理结果{suffix}。",
         )
         _send_zip_with_retries(run, zip_path)
         run["status"] = "DONE"
         run["stage"] = "done"
         run["error"] = ""
         run["updated_at"] = _now()
-        _append_log(run, f"分阶段结果发送完成；完整归档保留于本机：{zip_path.name}，{zip_path.stat().st_size} bytes")
+        _append_log(run, f"完整结果包发送完成：{zip_path.name}，{zip_path.stat().st_size} bytes")
         _save(run)
         _notify(
             run,
-            f"动画完成：{run['id']}。已返回原始抽帧、透明抠图、后处理结果 3 个 ZIP。"
+            f"动画完成：{run['id']}。已返回 1 个 ZIP，包内包含原始抽帧、透明抠图、后处理结果。"
             f"{_character_completion_lines(run.get('videos') or [])}",
         )
     except Exception as exc:
@@ -957,60 +957,12 @@ def _make_zip(run: dict[str, Any]) -> Path:
     manifest = run_dir / "manifest.json"
     manifest.write_text(json.dumps(_public(run), ensure_ascii=False, indent=2), encoding="utf-8")
     zip_path = run_dir / _zip_filename(run)
-    if zip_path.exists():
-        zip_path.unlink()
-    include_dirs = ["original_videos", "frames", "matte", "smooth"]
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.write(manifest, arcname="manifest.json")
-        for folder in include_dirs:
-            root = run_dir / folder
-            if not root.exists():
-                continue
-            for path in root.rglob("*"):
-                if path.is_file():
-                    zf.write(path, arcname=str(path.relative_to(run_dir)).replace("\\", "/"))
-    _verify_zip(zip_path)
-    return zip_path
-
-
-def _make_video_stage_zip(
-    run: dict[str, Any],
-    *,
-    kind: str,
-    folder: str,
-    suffix: str,
-    notice: str,
-) -> Path:
-    """Build one user-facing stage archive while keeping the complete bundle local."""
-
-    run_dir = _run_dir(run)
-    source_root = run_dir / folder
-    files = sorted((path for path in source_root.rglob("*") if path.is_file()), key=lambda path: str(path).lower())
-    if not files:
-        raise RuntimeError(f"delivery stage {kind} has no files: {source_root}")
-    videos = run.get("videos") or []
-    source_name = str((videos[0] if videos else {}).get("source_name") or run.get("run_label") or run["id"])
-    stem = Path(_safe_name(source_name)).stem or str(run["id"])
-    zip_path = run_dir / f"{stem}_{suffix}.zip"
-    if zip_path.is_file():
-        _verify_zip(zip_path)
-        return zip_path
-    manifest = {
-        "schema_version": "1.0",
-        "run_id": run.get("id"),
-        "artifact_kind": kind,
-        "file_count": len(files),
-        "notice": notice,
-        "postprocess_applied": kind == "postprocessed",
-        "files": [str(path.relative_to(source_root)).replace("\\", "/") for path in files],
-    }
     partial = zip_path.with_suffix(".zip.part")
+    include_dirs = ["original_videos", "frames", "matte", "smooth"]
     try:
-        with zipfile.ZipFile(partial, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-            for path in files:
-                relative = str(path.relative_to(source_root)).replace("\\", "/")
-                archive.write(path, arcname=f"{folder}/{relative}")
+        with zipfile.ZipFile(partial, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
+            zf.write(manifest, arcname="manifest.json", compress_type=zipfile.ZIP_DEFLATED)
+            _write_run_folders(zf, run_dir, include_dirs)
         _verify_zip(partial)
         os.replace(partial, zip_path)
     finally:
@@ -1018,45 +970,14 @@ def _make_video_stage_zip(
     return zip_path
 
 
-def _video_delivery_specs(run: dict[str, Any], *, include_postprocess: bool) -> list[dict[str, Any]]:
-    specs = [
-        {
-            "kind": "extracted_frames",
-            "label": "原始抽帧",
-            "path": str(_make_video_stage_zip(
-                run,
-                kind="extracted_frames",
-                folder="frames",
-                suffix="01_extracted_frames",
-                notice="从原视频提取的原始序列帧，未进行抠图或后处理。",
-            )),
-        },
-        {
-            "kind": "matte",
-            "label": "透明抠图",
-            "path": str(_make_video_stage_zip(
-                run,
-                kind="matte",
-                folder="matte",
-                suffix="02_matte",
-                notice="透明抠图结果，尚未包含角色校色与位置矫正。",
-            )),
-        },
-    ]
-    if include_postprocess:
-        specs.append(
-            {
-                "kind": "postprocessed",
-                "label": "后处理结果",
-                "path": str(_make_video_stage_zip(
-                    run,
-                    kind="postprocessed",
-                    folder="smooth",
-                    suffix="03_postprocessed",
-                    notice="已完成角色校色、位置矫正及配置的全部后处理。",
-                )),
-            }
-        )
+def _video_delivery_specs(run: dict[str, Any], *, zip_path: Path) -> list[dict[str, Any]]:
+    """Return one delivery artifact containing every completed video stage."""
+
+    specs = [{
+        "kind": "complete_bundle",
+        "label": "完整结果包（原始抽帧、透明抠图、后处理结果）",
+        "path": str(zip_path),
+    }]
     previous = {
         str(item.get("kind") or ""): item
         for item in run.get("delivery_artifacts") or []
@@ -1115,17 +1036,44 @@ def _make_matte_only_zip(run: dict[str, Any]) -> Path:
     source_name = str((videos[0] if videos else {}).get("source_name") or run.get("run_label") or run["id"])
     stem = Path(_safe_name(source_name)).stem or str(run["id"])
     zip_path = run_dir / f"{stem}_matte_only.zip"
-    if zip_path.exists():
-        zip_path.unlink()
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.write(manifest, arcname="manifest.json")
-        for item in videos:
-            index = int(item.get("index") or 0)
-            matte_root = Path(str(item.get("matte_dir") or ""))
-            for path in sorted(matte_root.glob("*.png"), key=lambda value: value.name.lower()):
-                archive.write(path, arcname=f"matte/video_{index:02d}/{path.name}")
-    _verify_zip(zip_path)
+    partial = zip_path.with_suffix(".zip.part")
+    try:
+        with zipfile.ZipFile(partial, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+            archive.write(manifest, arcname="manifest.json", compress_type=zipfile.ZIP_DEFLATED)
+            _write_run_folders(archive, run_dir, ("original_videos", "frames", "matte"))
+            archive.writestr(
+                "smooth/README.txt",
+                "未生成后处理结果：角色库中暂无对应角色的校色与位置矫正资料。\n",
+                compress_type=zipfile.ZIP_DEFLATED,
+            )
+        _verify_zip(partial)
+        os.replace(partial, zip_path)
+    finally:
+        partial.unlink(missing_ok=True)
     return zip_path
+
+
+def _write_run_folders(
+    archive: zipfile.ZipFile,
+    run_dir: Path,
+    folders: list[str] | tuple[str, ...],
+) -> None:
+    """Add run outputs deterministically without recompressing PNG/video data."""
+
+    already_compressed = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm", ".mkv"}
+    for folder in folders:
+        root = run_dir / folder
+        if not root.exists():
+            continue
+        for path in sorted(root.rglob("*"), key=lambda value: str(value).lower()):
+            if not path.is_file():
+                continue
+            compression = zipfile.ZIP_STORED if path.suffix.lower() in already_compressed else zipfile.ZIP_DEFLATED
+            archive.write(
+                path,
+                arcname=str(path.relative_to(run_dir)).replace("\\", "/"),
+                compress_type=compression,
+            )
 
 
 def _verify_zip(zip_path: Path) -> None:
@@ -1258,8 +1206,7 @@ def _send_zip(run: dict[str, Any], zip_path: Path) -> dict[str, str]:
 def _send_zip_with_retries(run: dict[str, Any], zip_path: Path, attempts: int = 5) -> None:
     if not zip_path.is_file():
         raise RuntimeError(f"complete result bundle is missing: {zip_path}")
-    include_postprocess = str(run.get("result_mode") or "").lower() != "matte_only"
-    artifacts = _video_delivery_specs(run, include_postprocess=include_postprocess)
+    artifacts = _video_delivery_specs(run, zip_path=zip_path)
     from assetclaw_matting.feishu.client import feishu_client
 
     chat_id = str(run.get("chat_id") or "")
