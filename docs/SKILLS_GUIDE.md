@@ -76,6 +76,8 @@ Z:\公共机共享\抠图 = \\audioshare.lilith.com\AIart\公共机共享\抠图
 | `feishu.zip_and_send` | 打包文件/目录后立刻发到当前飞书会话 | egress_caution |
 | `direct_video.full_resend` | 把已结束视频任务的原视频、抽帧、抠图和后处理重新打为一个 ZIP，并强制发到原飞书会话 | egress_caution |
 | `direct_image.full_resend` | 把已结束图片/序列帧任务的原始帧、抠图和后处理重新打为一个 ZIP，并强制发到原飞书会话 | egress_caution |
+| `direct_video.full_rerun` | 二次确认后复用原任务 ID，从原视频重新抽帧、抠图、后处理、打包并发送；旧状态进入重跑历史 | egress_caution |
+| `direct_image.full_rerun` | 二次确认后复用原任务 ID，从原图片/序列帧重新抠图、后处理、打包并发送；旧状态进入重跑历史 | egress_caution |
 | `translate.text` | 翻译文本，输出自然语言译文 | readonly |
 | `translate.image_text` | 识别图片中文字并翻译 | readonly |
 | `speech.transcribe` | 把本地音频或飞书语音附件转文字，默认 FunASR/SenseVoiceSmall | readonly |

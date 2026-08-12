@@ -53,6 +53,9 @@ const state = reactive({
   directVideoRuns: [],
   redeliveryBusy: {},
   redeliveryConfirm: null,
+  rerunBusy: {},
+  rerunConfirm: null,
+  cancelConfirm: null,
   jobs: [],
   taskFilter: "all",
   taskStatusFilter: "all",
@@ -127,15 +130,18 @@ const childTasks = computed(() => {
   const cherry = state.cherryRuns.map((item) => normalizeTask("CHERRY", item));
   return mergeCurrentTasks([...flowTasks, ...comfy, ...frame, ...cherry]).sort((a, b) => b.timeValue - a.timeValue);
 });
-const managedParentTasks = computed(() => [
+const managedParentTasks = computed(() => collapseEquivalentDirectTasks([
   ...[state.flows.current, ...(state.flows.items || [])]
     .filter((item, index, list) => item && list.findIndex((candidate) => (candidate?.run_id || candidate?.id) === (item.run_id || item.id)) === index)
     .map((item) => normalizeTask("AFLOW", (item.run_id || item.id) === (currentFlow.value?.run_id || currentFlow.value?.id) ? currentFlow.value : item)),
   ...state.directImageRuns.map((item) => normalizeDirectTask("DIRECT_IMAGE", item)),
   ...state.directVideoRuns.map((item) => normalizeDirectTask("DIRECT_VIDEO", item)),
-]);
+]));
 const allTasks = computed(() => {
-  const claimed = new Set(managedParentTasks.value.flatMap((task) => parentChildIds(task.raw)));
+  const claimed = new Set(managedParentTasks.value.flatMap((task) => [
+    ...parentChildIds(task.raw),
+    ...(task.supersededAttempts || []).flatMap((attempt) => attempt.childIds || []),
+  ]));
   const parentIds = new Set(managedParentTasks.value.map((task) => task.id));
   const standalone = childTasks.value.filter((task) => {
     if (task.module === "AFLOW" || claimed.has(task.id)) return false;
@@ -624,8 +630,19 @@ function openTaskDetail(task) {
   state.detail = { key: taskKey(task), snapshot: task };
 }
 
-async function cancelManagedTask(task) {
-  if (!task?.id || !window.confirm(`确认取消 ${task.label || task.module} ${task.id}？`)) return;
+function requestCancelTask(task) {
+  if (!task?.id || !isActiveStatus(task.status)) return;
+  state.cancelConfirm = task;
+}
+
+function closeCancelConfirm() {
+  state.cancelConfirm = null;
+}
+
+async function confirmCancelTask() {
+  const task = state.cancelConfirm;
+  if (!task?.id) return;
+  closeCancelConfirm();
   const skills = {
     AFLOW: "animation_flow.cancel",
     DIRECT_IMAGE: "direct_image.cancel",
@@ -706,6 +723,61 @@ function redeliveryContents(task) {
   return task?.module === "DIRECT_VIDEO"
     ? ["原视频", "原始抽帧", "透明抠图", "后处理结果"]
     : ["原始图片 / 序列帧", "透明抠图", "后处理结果"];
+}
+
+function rerunActive(task) {
+  return ["PREPARING", "QUEUED", "RUNNING", "PENDING", "WAITING_CHARACTER", "PAUSED"]
+    .includes(String(task?.rerun?.status || "").toUpperCase());
+}
+
+function rerunDisabled(task) {
+  return isActiveStatus(task?.status) || rerunActive(task) || Boolean(state.rerunBusy[taskKey(task)]);
+}
+
+function rerunLabel(task) {
+  const status = String(task?.rerun?.status || "").toUpperCase();
+  if (["PREPARING", "QUEUED"].includes(status)) return "等待重跑";
+  if (["RUNNING", "PENDING", "WAITING_CHARACTER", "PAUSED"].includes(status)) return "重跑处理中";
+  if (["FAILED", "DONE_WITH_ERRORS"].includes(status)) return "重试重跑";
+  if (status === "DONE") return "再次重跑";
+  return "完整重跑";
+}
+
+function requestFullRerun(task) {
+  if (!isDirectTask(task) || !task.id || rerunDisabled(task)) return;
+  state.rerunConfirm = task;
+}
+
+function closeRerunConfirm() {
+  state.rerunConfirm = null;
+}
+
+async function confirmFullRerun() {
+  const task = state.rerunConfirm;
+  if (!task) return;
+  const key = taskKey(task);
+  closeRerunConfirm();
+  state.rerunBusy[key] = true;
+  try {
+    const skill = task.module === "DIRECT_VIDEO" ? "direct_video.full_rerun" : "direct_image.full_rerun";
+    const payload = unwrapSkill(await skillCall(skill, { run_id: task.id, confirmed: true }, false));
+    if (payload?.already_running) {
+      toast("该任务已经在原地重跑处理中");
+    } else {
+      toast(`任务 ${payload?.run_id || task.id} 已从头重新运行`);
+    }
+    await refreshAll(true);
+  } catch (error) {
+    toast(String(error?.message || error), "bad");
+  } finally {
+    delete state.rerunBusy[key];
+  }
+}
+
+function rerunSteps(task) {
+  return task?.module === "DIRECT_VIDEO"
+    ? ["读取原视频", "重新抽帧", "重新抠图", "重新后处理", "打包并发送"]
+    : ["读取原图 / 序列帧", "重新抠图", "重新后处理", "打包并发送"];
 }
 
 function progressFrom(raw) {
@@ -1085,8 +1157,62 @@ function normalizeDirectTask(module, raw) {
       avatarUrl: String(raw.feishu_user?.avatar_url || ""),
     },
     redelivery: raw.redelivery || {},
+    rerun: raw.rerun || {},
     raw,
   };
+}
+
+function directContentSignature(task) {
+  if (!isDirectTask(task)) return "";
+  const raw = task.raw || {};
+  const items = task.module === "DIRECT_IMAGE" ? (raw.images || []) : (raw.videos || []);
+  if (!items.length) return "";
+  const owner = String(raw.user_id || raw.chat_id || task.user?.displayName || "").trim().toLocaleLowerCase();
+  const sources = [...items]
+    .sort((a, b) => Number(a.index || 0) - Number(b.index || 0))
+    .map((item) => `${String(item.source_name || item.name || "").trim().toLocaleLowerCase()}:${Number(item.source_size_bytes || 0)}`)
+    .join("|");
+  return `${task.module}:${owner}:${sources}`;
+}
+
+function collapseEquivalentDirectTasks(tasks) {
+  const result = [];
+  const bySignature = new Map();
+  for (const task of tasks) {
+    const signature = directContentSignature(task);
+    const existingIndex = signature ? bySignature.get(signature) : undefined;
+    if (existingIndex === undefined) {
+      if (signature) bySignature.set(signature, result.length);
+      result.push(task);
+      continue;
+    }
+    const existing = result[existingIndex];
+    const canCollapse = [existing, task].some((item) => ["FAILED", "CANCELED", "DONE_WITH_ERRORS"].includes(item.status));
+    if (!canCollapse) {
+      result.push(task);
+      continue;
+    }
+    const winner = task.timeValue > existing.timeValue ? task : existing;
+    const superseded = winner === task ? existing : task;
+    const original = task.timeValue < existing.timeValue ? task : existing;
+    result[existingIndex] = {
+      ...winner,
+      name: original.name || winner.name,
+      supersededAttempts: [
+        ...(winner.supersededAttempts || []),
+        ...(superseded.supersededAttempts || []),
+        {
+          id: superseded.id,
+          status: superseded.status,
+          stage: superseded.stage,
+          error: superseded.raw?.error || "",
+          updatedAt: superseded.raw?.updated_at || "",
+          childIds: parentChildIds(superseded.raw),
+        },
+      ],
+    };
+  }
+  return result;
 }
 
 function directStageProgress(run, isImage) {
@@ -1636,7 +1762,14 @@ function toast(message, type = "ok") {
             <div class="task-actions">
               <button v-if="task.module === 'COMFY' && task.status === 'RUNNING'" class="ghost" @click="controlComfy('pause', task.id)">暂停</button>
               <button v-if="task.module === 'COMFY' && task.status === 'PAUSED'" class="ghost" @click="controlComfy('resume', task.id)">继续</button>
-              <button v-if="isActiveStatus(task.status)" class="danger" @click="cancelManagedTask(task)">取消</button>
+              <button v-if="isActiveStatus(task.status)" class="danger" @click="requestCancelTask(task)">取消</button>
+              <button
+                v-if="isDirectTask(task)"
+                class="rerun"
+                :disabled="rerunDisabled(task)"
+                :title="task.rerun?.error || '保留当前任务 ID 和审计历史，从原始素材开始重新执行完整处理流程'"
+                @click="requestFullRerun(task)"
+              >{{ rerunLabel(task) }}</button>
               <button
                 v-if="isDirectTask(task)"
                 class="redeliver"
@@ -1747,6 +1880,43 @@ function toast(message, type = "ok") {
     </main>
 
     <div
+      v-if="state.cancelConfirm"
+      class="redelivery-modal-backdrop"
+      role="presentation"
+      @click.self="closeCancelConfirm"
+    >
+      <section class="redelivery-modal cancel-modal" role="dialog" aria-modal="true" aria-labelledby="cancel-title">
+        <header>
+          <div class="redelivery-recipient">
+            <span class="task-avatar large">
+              <i>{{ isDirectTask(state.cancelConfirm) ? userInitial(state.cancelConfirm) : '任' }}</i>
+              <img v-if="state.cancelConfirm.user?.avatarUrl" :src="state.cancelConfirm.user.avatarUrl" alt="" />
+            </span>
+            <span><small>当前任务</small><b>{{ state.cancelConfirm.user?.displayName || state.cancelConfirm.label }}</b></span>
+          </div>
+          <button class="modal-close" aria-label="关闭" @click="closeCancelConfirm">×</button>
+        </header>
+        <div class="redelivery-modal-body">
+          <span class="modal-kicker">停止当前执行</span>
+          <h3 id="cancel-title">{{ state.cancelConfirm.name || state.cancelConfirm.id }}</h3>
+          <p>确认取消当前任务？系统会停止正在运行的阶段，但不会删除原始素材、处理记录或已生成的文件。</p>
+          <div class="cancel-task-summary">
+            <span><small>任务 ID</small><b>{{ state.cancelConfirm.id }}</b></span>
+            <span><small>当前阶段</small><b>{{ state.cancelConfirm.stageLabel || formatStage(state.cancelConfirm.stage) }}</b></span>
+          </div>
+          <div class="redelivery-fallback-note cancel-warning">
+            <b>取消后仍可完整重跑</b>
+            <span>该任务会在原位置显示“已取消”，历史记录继续保留，不会新增或删除列表项。</span>
+          </div>
+        </div>
+        <footer>
+          <button class="ghost" @click="closeCancelConfirm">继续运行</button>
+          <button class="danger cancel-confirm-button" @click="confirmCancelTask">确认取消任务</button>
+        </footer>
+      </section>
+    </div>
+
+    <div
       v-if="state.redeliveryConfirm"
       class="redelivery-modal-backdrop"
       role="presentation"
@@ -1778,6 +1948,42 @@ function toast(message, type = "ok") {
         <footer>
           <button class="ghost" @click="closeRedeliveryConfirm">取消</button>
           <button class="primary redelivery-confirm-button" @click="confirmFullRedelivery">确认完整重发</button>
+        </footer>
+      </section>
+    </div>
+
+    <div
+      v-if="state.rerunConfirm"
+      class="redelivery-modal-backdrop"
+      role="presentation"
+      @click.self="closeRerunConfirm"
+    >
+      <section class="redelivery-modal rerun-modal" role="dialog" aria-modal="true" aria-labelledby="rerun-title">
+        <header>
+          <div class="redelivery-recipient">
+            <span class="task-avatar large">
+              <i>{{ userInitial(state.rerunConfirm) }}</i>
+              <img v-if="state.rerunConfirm.user.avatarUrl" :src="state.rerunConfirm.user.avatarUrl" alt="" />
+            </span>
+            <span><small>完成后发送回原飞书会话</small><b>{{ state.rerunConfirm.user.displayName }}</b></span>
+          </div>
+          <button class="modal-close" aria-label="关闭" @click="closeRerunConfirm">×</button>
+        </header>
+        <div class="redelivery-modal-body">
+          <span class="modal-kicker">端到端完整重跑</span>
+          <h3 id="rerun-title">{{ state.rerunConfirm.name }}</h3>
+          <p>系统会保留当前任务 ID 和列表位置，将本次失败写入内部历史，然后从原始素材开始执行全部步骤。列表始终只显示这一条任务。</p>
+          <div class="redelivery-content-list rerun-step-list">
+            <span v-for="(item, index) in rerunSteps(state.rerunConfirm)" :key="item"><i>{{ index + 1 }}</i>{{ item }}</span>
+          </div>
+          <div class="redelivery-fallback-note rerun-warning">
+            <b>这是一次原地完整重算</b>
+            <span>会重新占用 ComfyUI / GPU 和后处理资源；旧状态只保留在审计历史中，不会新增第二行任务。</span>
+          </div>
+        </div>
+        <footer>
+          <button class="ghost" @click="closeRerunConfirm">取消</button>
+          <button class="primary rerun-confirm-button" @click="confirmFullRerun">确认完整重跑</button>
         </footer>
       </section>
     </div>

@@ -177,6 +177,13 @@ def full_resend(run_id: str | None = None, **_: Any) -> dict[str, Any]:
     return request_redelivery("video", run_id)
 
 
+def full_rerun(run_id: str | None = None, confirmed: bool = False, **_: Any) -> dict[str, Any]:
+    """Restart a video task in place after UI confirmation."""
+    from assetclaw_matting.services.task_rerun_service import request_full_rerun
+
+    return request_full_rerun("video", run_id, confirmed=confirmed)
+
+
 def list_runs(limit: int = 10, include_finished: bool = True, **_: Any) -> dict[str, Any]:
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     items = []
@@ -1577,6 +1584,7 @@ def _append_log(run: dict[str, Any], message: str) -> None:
 
 def _public(run: dict[str, Any]) -> dict[str, Any]:
     from assetclaw_matting.services.feishu_user_profile_service import profile_for_run
+    from assetclaw_matting.services.task_rerun_service import rerun_state
 
     terminal = str(run.get("status") or "").upper() in FINISHED
     character_resolution = dict(run.get("character_resolution") or {})
@@ -1600,6 +1608,8 @@ def _public(run: dict[str, Any]) -> dict[str, Any]:
         "drive_file": run.get("drive_file") or {},
         "feishu_user": profile_for_run(run),
         "redelivery": run.get("redelivery") or {},
+        "rerun": rerun_state("video", run),
+        "rerun_history": run.get("rerun_history") or [],
         "character_question": "" if terminal else (run.get("character_question") or ""),
         "character_resolution": character_resolution,
         "integrity": run.get("integrity") or {},

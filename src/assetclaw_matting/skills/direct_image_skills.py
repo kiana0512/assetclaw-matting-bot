@@ -201,6 +201,13 @@ def full_resend(run_id: str | None = None, **_: Any) -> dict[str, Any]:
     return request_redelivery("image", run_id)
 
 
+def full_rerun(run_id: str | None = None, confirmed: bool = False, **_: Any) -> dict[str, Any]:
+    """Restart an image/sequence task in place after UI confirmation."""
+    from assetclaw_matting.services.task_rerun_service import request_full_rerun
+
+    return request_full_rerun("image", run_id, confirmed=confirmed)
+
+
 def recover_incomplete_runs() -> dict[str, Any]:
     """Close image parents orphaned by a Gateway or Feishu process restart."""
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -2041,6 +2048,7 @@ def _append_log(run: dict[str, Any], message: str) -> None:
 
 def _public(run: dict[str, Any]) -> dict[str, Any]:
     from assetclaw_matting.services.feishu_user_profile_service import profile_for_run
+    from assetclaw_matting.services.task_rerun_service import rerun_state
 
     terminal = str(run.get("status") or "").upper() in FINISHED
     character_resolution = dict(run.get("character_resolution") or {})
@@ -2062,6 +2070,8 @@ def _public(run: dict[str, Any]) -> dict[str, Any]:
         "delivery_artifacts": run.get("delivery_artifacts") or [],
         "feishu_user": profile_for_run(run),
         "redelivery": run.get("redelivery") or {},
+        "rerun": rerun_state("image", run),
+        "rerun_history": run.get("rerun_history") or [],
         "result_mode": run.get("result_mode") or "full",
         "postprocess_skipped": run.get("postprocess_skipped") or {},
         "character_question": "" if terminal else (run.get("character_question") or ""),

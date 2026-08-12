@@ -918,6 +918,22 @@ h3 {
   opacity: .66;
 }
 
+.task-actions .rerun {
+  border-color: color-mix(in srgb, var(--teal) 58%, var(--line));
+  color: color-mix(in srgb, var(--teal) 78%, var(--text));
+  background: color-mix(in srgb, var(--teal) 10%, var(--surface));
+}
+
+.task-actions .rerun:hover:not(:disabled) {
+  border-color: var(--teal);
+  background: color-mix(in srgb, var(--teal) 18%, var(--surface));
+}
+
+.task-actions .rerun:disabled {
+  cursor: wait;
+  opacity: .66;
+}
+
 .task-user {
   min-width: 0;
   display: flex;
@@ -1152,9 +1168,93 @@ h3 {
   min-width: 142px !important;
 }
 
+.rerun-modal {
+  border-color: color-mix(in srgb, var(--teal) 34%, var(--line));
+}
+
+.rerun-modal > header {
+  background: linear-gradient(120deg, color-mix(in srgb, var(--teal) 12%, transparent), color-mix(in srgb, var(--blue) 6%, transparent));
+}
+
+.rerun-step-list {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.rerun-step-list span {
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  padding: 11px 7px;
+  text-align: center;
+}
+
+.rerun-step-list i {
+  width: 21px;
+  height: 21px;
+  color: color-mix(in srgb, var(--teal) 84%, var(--text));
+}
+
+.rerun-warning {
+  border-left-color: color-mix(in srgb, var(--teal) 74%, var(--blue));
+  background: color-mix(in srgb, var(--teal) 7%, transparent);
+}
+
+.rerun-confirm-button {
+  min-width: 142px !important;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--teal) 82%, #06756f), color-mix(in srgb, var(--blue) 48%, #118a83));
+}
+
+.cancel-modal {
+  width: min(560px, 100%);
+  border-color: color-mix(in srgb, #f06f75 34%, var(--line));
+}
+
+.cancel-modal > header {
+  background: linear-gradient(120deg, color-mix(in srgb, #f06f75 11%, transparent), color-mix(in srgb, var(--blue) 5%, transparent));
+}
+
+.cancel-task-summary {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.cancel-task-summary > span {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel-2) 88%, transparent);
+}
+
+.cancel-task-summary small {
+  color: var(--muted);
+}
+
+.cancel-task-summary b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cancel-warning {
+  border-left-color: color-mix(in srgb, #f06f75 72%, var(--line));
+  background: color-mix(in srgb, #f06f75 7%, transparent);
+}
+
+.cancel-confirm-button {
+  min-width: 132px !important;
+}
+
 @media (max-width: 560px) {
   .redelivery-modal-backdrop { padding: 12px; }
   .redelivery-content-list { grid-template-columns: 1fr; }
+  .rerun-step-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cancel-task-summary { grid-template-columns: 1fr; }
   .redelivery-modal > footer { align-items: stretch; flex-direction: column-reverse; }
   .redelivery-modal > footer button { width: 100%; }
 }
