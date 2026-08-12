@@ -51,8 +51,12 @@ const state = reactive({
   cherryRuns: [],
   directImageRuns: [],
   directVideoRuns: [],
+  redeliveryBusy: {},
+  redeliveryConfirm: null,
   jobs: [],
   taskFilter: "all",
+  taskStatusFilter: "all",
+  taskQuery: "",
   runtimeConfig: { animation_root: "", unity_project: "" },
   detail: null,
   toasts: [],
@@ -157,7 +161,24 @@ const selectedTask = computed(() => {
 const selectedPerformance = computed(() => selectedTask.value ? taskPerformance(selectedTask.value) : null);
 const activeTasks = computed(() => allTasks.value.filter((task) => !FINISHED.has(task.status)));
 const taskCategories = computed(() => buildTaskCategories(activeTasks.value));
-const filteredTasks = computed(() => state.taskFilter === "all" ? allTasks.value : allTasks.value.filter((task) => task.category === state.taskFilter));
+const taskSummary = computed(() => ({
+  total: allTasks.value.length,
+  active: allTasks.value.filter((task) => isActiveStatus(task.status)).length,
+  done: allTasks.value.filter((task) => task.status === "DONE").length,
+  attention: allTasks.value.filter((task) => ["FAILED", "BLOCKED", "DONE_WITH_ERRORS"].includes(task.status)).length,
+}));
+const filteredTasks = computed(() => {
+  const query = state.taskQuery.trim().toLocaleLowerCase();
+  return allTasks.value.filter((task) => {
+    if (state.taskFilter !== "all" && task.category !== state.taskFilter) return false;
+    if (state.taskStatusFilter === "active" && !isActiveStatus(task.status)) return false;
+    if (state.taskStatusFilter === "done" && task.status !== "DONE") return false;
+    if (state.taskStatusFilter === "attention" && !["FAILED", "BLOCKED", "DONE_WITH_ERRORS"].includes(task.status)) return false;
+    if (!query) return true;
+    return [task.name, task.id, task.label, task.stageLabel, task.user?.displayName]
+      .some((value) => String(value || "").toLocaleLowerCase().includes(query));
+  });
+});
 const filteredTaskRows = computed(() => filteredTasks.value.map((task) => ({ ...task, performance: taskPerformance(task) })));
 const unifiedQueue = computed(() => [...activeTasks.value]
   .filter(isMeaningfulActiveTask)
@@ -626,6 +647,67 @@ async function cancelManagedTask(task) {
   }
 }
 
+function isDirectTask(task) {
+  return task?.module === "DIRECT_IMAGE" || task?.module === "DIRECT_VIDEO";
+}
+
+function redeliveryActive(task) {
+  return ["QUEUED", "PACKAGING", "UPLOADING"].includes(String(task?.redelivery?.status || "").toUpperCase());
+}
+
+function redeliveryDisabled(task) {
+  return isActiveStatus(task?.status) || redeliveryActive(task) || Boolean(state.redeliveryBusy[taskKey(task)]);
+}
+
+function redeliveryLabel(task) {
+  const status = String(task?.redelivery?.status || "").toUpperCase();
+  if (status === "QUEUED") return "等待重发";
+  if (status === "PACKAGING") return "正在打包";
+  if (status === "UPLOADING") return "正在上传";
+  if (status === "FAILED") return "重试重发";
+  if (status === "DONE") return "再次重发";
+  return "完整重发";
+}
+
+function userInitial(task) {
+  return Array.from(String(task?.user?.displayName || "飞书").trim())[0] || "飞";
+}
+
+async function requestFullRedelivery(task) {
+  const key = taskKey(task);
+  if (!isDirectTask(task) || !task.id || redeliveryDisabled(task)) return;
+  state.redeliveryConfirm = task;
+}
+
+function closeRedeliveryConfirm() {
+  state.redeliveryConfirm = null;
+}
+
+async function confirmFullRedelivery() {
+  const task = state.redeliveryConfirm;
+  if (!task) return;
+  const key = taskKey(task);
+  const userName = task.user?.displayName || "飞书用户";
+  closeRedeliveryConfirm();
+  state.redeliveryBusy[key] = true;
+  try {
+    const skill = task.module === "DIRECT_VIDEO" ? "direct_video.full_resend" : "direct_image.full_resend";
+    const payload = unwrapSkill(await skillCall(skill, { run_id: task.id }, false));
+    toast(payload?.already_running ? "该任务已在重发队列中" : `已开始为 ${userName} 重新打包并发送`);
+    await refreshAll(true);
+  } catch (error) {
+    toast(String(error?.message || error), "bad");
+  } finally {
+    delete state.redeliveryBusy[key];
+  }
+}
+
+function redeliveryContents(task) {
+  return task?.module === "DIRECT_VIDEO"
+    ? ["原视频", "原始抽帧", "透明抠图", "后处理结果"]
+    : ["原始图片 / 序列帧", "透明抠图", "后处理结果"];
+}
+
 function progressFrom(raw) {
   if (typeof raw.progress_percent === "number") return Math.round(raw.progress_percent);
   const total = Number(raw.total || raw.total_records || 0);
@@ -998,6 +1080,11 @@ function normalizeDirectTask(module, raw) {
     detail: `${items.length} ${isImage ? "张图片" : "个视频"} · ${stageInfo.label} ${stageInfo.count}`,
     time: formatDateTime(created),
     timeValue: Date.parse(created) || 0,
+    user: {
+      displayName: String(raw.feishu_user?.display_name || "飞书用户"),
+      avatarUrl: String(raw.feishu_user?.avatar_url || ""),
+    },
+    redelivery: raw.redelivery || {},
     raw,
   };
 }
@@ -1404,7 +1491,7 @@ function toast(message, type = "ok") {
           </div>
         </section>
 
-        <section class="panel queue-panel">
+        <section v-if="unifiedQueue.length" class="panel queue-panel">
           <div class="panel-title">
             <div><h3>统一任务队列</h3><span>跨来源按先后顺序汇总；各来源仍保持独立分类</span></div>
             <div class="queue-overall"><span>总体进度</span><b>{{ queueSummary.progress }}%</b></div>
@@ -1415,8 +1502,7 @@ function toast(message, type = "ok") {
             <span><b>{{ queueSummary.waiting }}</b> 等待 / 暂停</span>
             <div class="progress"><i :style="{ width: `${queueSummary.progress}%` }"></i></div>
           </div>
-          <div v-if="!unifiedQueue.length" class="empty">当前队列为空。</div>
-          <div v-else class="queue-track">
+          <div class="queue-track">
             <button v-for="task in unifiedQueue" :key="task.module + task.id" class="queue-item" @click="openTaskDetail(task)">
               <strong>{{ task.queueIndex }}</strong>
               <span><b>{{ task.name || task.label || task.module }}</b><small>{{ task.id }} · 已用 {{ formatDurationMs(taskPerformance(task).totalMs) }}</small></span>
@@ -1504,23 +1590,41 @@ function toast(message, type = "ok") {
       </section>
 
       <section v-if="state.tab === 'tasks'" class="view">
-        <section class="panel queue-panel compact-queue">
-          <div class="panel-title"><div><h3>统一任务队列</h3><span>按先后顺序查看所有来源的父任务</span></div><div class="queue-overall"><span>总体进度</span><b>{{ queueSummary.progress }}%</b></div></div>
-          <div class="queue-summary"><span><b>{{ queueSummary.total }}</b> 队列任务</span><span><b>{{ queueSummary.running }}</b> 正在处理</span><span><b>{{ queueSummary.waiting }}</b> 等待 / 暂停</span><div class="progress"><i :style="{ width: `${queueSummary.progress}%` }"></i></div></div>
-          <div v-if="!unifiedQueue.length" class="empty">当前队列为空。</div>
-          <div v-else class="queue-track"><button v-for="task in unifiedQueue" :key="task.module + task.id" class="queue-item" @click="openTaskDetail(task)"><strong>{{ task.queueIndex }}</strong><span><b>{{ task.name || task.label || task.module }}</b><small>{{ task.label }} · {{ task.id }} · 已用 {{ formatDurationMs(taskPerformance(task).totalMs) }}</small></span><em>{{ task.queueLabel }}</em><span class="queue-stage"><b>{{ task.stageLabel || formatStage(task.stage) }}</b><small>{{ task.count || `${task.progress}%` }}</small></span><i>{{ task.progress }}%</i></button></div>
-        </section>
         <section class="panel">
-          <div class="panel-title"><div><h3>任务中心</h3><span>保留状态、阶段与耗时；完整路径和原始字段移入详情</span></div><span>{{ filteredTaskRows.length }} 条</span></div>
-          <div class="task-filters">
+          <div class="task-center-heading">
+            <div><p class="eyebrow">TASK OPERATIONS</p><h2>任务中心</h2><span>统一查看来源、处理状态、性能和交付操作</span></div>
+            <div class="task-summary-cards">
+              <button :class="{ active: state.taskStatusFilter === 'all' }" @click="state.taskStatusFilter = 'all'"><small>全部任务</small><b>{{ taskSummary.total }}</b></button>
+              <button :class="{ active: state.taskStatusFilter === 'active' }" @click="state.taskStatusFilter = 'active'"><small>处理中</small><b>{{ taskSummary.active }}</b></button>
+              <button :class="{ active: state.taskStatusFilter === 'done' }" @click="state.taskStatusFilter = 'done'"><small>已完成</small><b>{{ taskSummary.done }}</b></button>
+              <button :class="['attention', { active: state.taskStatusFilter === 'attention' }]" @click="state.taskStatusFilter = 'attention'"><small>需关注</small><b>{{ taskSummary.attention }}</b></button>
+            </div>
+          </div>
+          <div class="task-toolbar">
+            <label class="task-search"><span>⌕</span><input v-model="state.taskQuery" placeholder="搜索任务名、用户、任务 ID 或阶段" /><button v-if="state.taskQuery" aria-label="清空搜索" @click="state.taskQuery = ''">×</button></label>
+            <span class="task-result-count">{{ filteredTaskRows.length }} 条结果</span>
+          </div>
+          <div class="task-filters task-source-filters">
             <button v-for="item in [{key:'all',label:'全部'}, {key:'image',label:'图片直发'}, {key:'video',label:'视频直发'}, {key:'feishu',label:'飞书动画'}, {key:'standalone',label:'独立任务'}]" :key="item.key" :class="{ active: state.taskFilter === item.key }" @click="state.taskFilter = item.key">{{ item.label }} <span>{{ item.key === 'all' ? allTasks.length : allTasks.filter(task => task.category === item.key).length }}</span></button>
           </div>
-          <div v-if="!filteredTaskRows.length" class="empty">这个分类当前没有任务。</div>
+          <div v-if="filteredTaskRows.length" class="task-table-head"><span>任务</span><span>来源用户</span><span>状态</span><span>当前阶段</span><span>性能</span><span>操作</span></div>
+          <div v-if="!filteredTaskRows.length" class="empty task-empty"><b>没有匹配的任务</b><span>调整来源、状态筛选或搜索关键词后再试。</span></div>
           <article v-for="task in filteredTaskRows" :key="task.module + task.id" class="task-row large performance-task-row">
             <div class="task-main">
               <b :title="task.name || task.label || task.module">{{ task.name || task.label || task.module }}</b>
               <span>{{ task.label }} · {{ task.id }}</span>
               <small>启动 {{ task.time || "-" }} · {{ task.count || "-" }}</small>
+            </div>
+            <div v-if="isDirectTask(task)" class="task-user" :title="`飞书来源：${task.user.displayName}`">
+              <span class="task-avatar">
+                <i>{{ userInitial(task) }}</i>
+                <img v-if="task.user.avatarUrl" :src="task.user.avatarUrl" alt="" @error="$event.currentTarget.remove()" />
+              </span>
+              <span><b>{{ task.user.displayName }}</b><small>来源：飞书</small></span>
+            </div>
+            <div v-else class="task-user task-user-local">
+              <span class="task-avatar"><i>本</i></span>
+              <span><b>本地任务</b><small>来源：系统</small></span>
             </div>
             <span :class="['status-pill', statusClass(task.status)]" :title="task.status">{{ statusLabel(task.status) }}</span>
             <span class="stage-name">{{ task.stageLabel || task.last || formatStage(task.stage) }}</span>
@@ -1533,6 +1637,13 @@ function toast(message, type = "ok") {
               <button v-if="task.module === 'COMFY' && task.status === 'RUNNING'" class="ghost" @click="controlComfy('pause', task.id)">暂停</button>
               <button v-if="task.module === 'COMFY' && task.status === 'PAUSED'" class="ghost" @click="controlComfy('resume', task.id)">继续</button>
               <button v-if="isActiveStatus(task.status)" class="danger" @click="cancelManagedTask(task)">取消</button>
+              <button
+                v-if="isDirectTask(task)"
+                class="redeliver"
+                :disabled="redeliveryDisabled(task)"
+                :title="task.redelivery?.error || '重新生成一个完整素材包并发送到原飞书会话'"
+                @click="requestFullRedelivery(task)"
+              >{{ redeliveryLabel(task) }}</button>
               <button class="ghost" @click="openTaskDetail(task)">耗时详情</button>
             </div>
           </article>
@@ -1634,6 +1745,42 @@ function toast(message, type = "ok") {
         </section>
       </section>
     </main>
+
+    <div
+      v-if="state.redeliveryConfirm"
+      class="redelivery-modal-backdrop"
+      role="presentation"
+      @click.self="closeRedeliveryConfirm"
+    >
+      <section class="redelivery-modal" role="dialog" aria-modal="true" aria-labelledby="redelivery-title">
+        <header>
+          <div class="redelivery-recipient">
+            <span class="task-avatar large">
+              <i>{{ userInitial(state.redeliveryConfirm) }}</i>
+              <img v-if="state.redeliveryConfirm.user.avatarUrl" :src="state.redeliveryConfirm.user.avatarUrl" alt="" />
+            </span>
+            <span><small>发送回原飞书会话</small><b>{{ state.redeliveryConfirm.user.displayName }}</b></span>
+          </div>
+          <button class="modal-close" aria-label="关闭" @click="closeRedeliveryConfirm">×</button>
+        </header>
+        <div class="redelivery-modal-body">
+          <span class="modal-kicker">完整素材重发</span>
+          <h3 id="redelivery-title">{{ state.redeliveryConfirm.name }}</h3>
+          <p>系统会重新生成一个压缩包，历史交付记录不会导致本次发送被跳过。</p>
+          <div class="redelivery-content-list">
+            <span v-for="item in redeliveryContents(state.redeliveryConfirm)" :key="item"><i>✓</i>{{ item }}</span>
+          </div>
+          <div class="redelivery-fallback-note">
+            <b>缺少后处理也会交付</b>
+            <span>已有的原始素材和透明抠图会照常打包，并在对应目录附说明。</span>
+          </div>
+        </div>
+        <footer>
+          <button class="ghost" @click="closeRedeliveryConfirm">取消</button>
+          <button class="primary redelivery-confirm-button" @click="confirmFullRedelivery">确认完整重发</button>
+        </footer>
+      </section>
+    </div>
 
     <TaskDetailDrawer v-if="selectedTask && selectedPerformance" :task="selectedTask" :performance="selectedPerformance" @close="state.detail = null" />
 

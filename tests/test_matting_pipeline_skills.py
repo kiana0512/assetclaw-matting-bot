@@ -91,6 +91,53 @@ def test_preflight_cache_cannot_skip_a_later_task_check(monkeypatch) -> None:
     assert matting_pipeline_skills._cached_preflight(not_before=checked_at + 0.001) is None
 
 
+def test_runtime_node_check_ignores_frontend_and_disabled_nodes(monkeypatch) -> None:
+    from assetclaw_matting.comfyui.client import comfyui_client
+    from assetclaw_matting.skills import matting_pipeline_skills
+
+    workflow = {
+        "nodes": [
+            {"id": 1, "type": "LoadImage", "mode": 0},
+            {"id": 2, "type": "Reroute", "mode": 0},
+            {"id": 3, "type": "MissingButBypassed", "mode": 4},
+            {"id": 4, "type": "MissingActiveNode", "mode": 0},
+        ]
+    }
+    monkeypatch.setattr(comfyui_client, "get_object_info", lambda: {"LoadImage": {}})
+
+    checked = matting_pipeline_skills._verify_workflow_runtime(workflow)
+
+    assert checked["reachable"] is True
+    assert checked["missing_node_types"] == ["MissingActiveNode"]
+
+
+def test_runtime_node_check_reports_unreachable_registry(monkeypatch) -> None:
+    from assetclaw_matting.comfyui.client import comfyui_client
+    from assetclaw_matting.skills import matting_pipeline_skills
+
+    def fail() -> dict:
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(comfyui_client, "get_object_info", fail)
+
+    checked = matting_pipeline_skills._verify_workflow_runtime({"1": {"class_type": "LoadImage"}})
+
+    assert checked["reachable"] is False
+    assert checked["missing_node_types"] == []
+    assert "connection refused" in checked["error"]
+
+
+def test_preflight_error_prefers_specific_runtime_errors() -> None:
+    from assetclaw_matting.skills import matting_pipeline_skills
+
+    message = matting_pipeline_skills.preflight_error(
+        {"ok": False, "errors": ["工作流包含秋叶未注册的节点：MissingNode"]}
+    )
+
+    assert message == "工作流包含秋叶未注册的节点：MissingNode"
+    assert "preflight" not in message
+
+
 def test_pipeline_git_error_is_hidden_from_user() -> None:
     from assetclaw_matting.brain.result_formatter import format_skill_results
 

@@ -34,7 +34,13 @@ Win3090 本地 -> 飞书 WebSocket 端点
    - `im:message:create_and_send_msg`（发送消息）
    - 文件上传/下载相关权限（用于接收原视频文件、回传 zip 和处理后的图片附件）
    - 消息表情反应相关权限（可选，用于“进度如何”这类消息上的轻量反馈）
+   - `contact:contact.base:readonly`（任务中心识别飞书来源用户）
+   - `contact:user.base:readonly`（任务中心显示用户姓名和头像）
 7. 发布版本（应用版本）。
+
+> 姓名和头像权限必须使用“应用身份”，并把可访问数据范围覆盖实际使用机器人
+> 的用户。只开 `contact:contact.base:readonly` 时接口可能只返回 `open_id`，仍不会
+> 返回姓名和头像。权限变更后必须发布新版本，任务中心会在后台刷新本地资料缓存。
 
 ---
 

@@ -64,6 +64,16 @@ def verify(**_: Any) -> dict[str, Any]:
         try:
             data = json.loads(workflow.read_text(encoding="utf-8"))
             payload["workflow_nodes"] = inspect_workflow(data)["node_count"] if isinstance(data, dict) else 0
+            runtime = _verify_workflow_runtime(data)
+            payload["comfyui_runtime"] = runtime
+            if not runtime["reachable"]:
+                errors.append(f"ComfyUI 节点注册表无法读取：{runtime['error']}")
+            elif runtime["missing_node_types"]:
+                errors.append(
+                    "工作流包含秋叶未注册的节点："
+                    + "、".join(runtime["missing_node_types"])
+                    + "。请补齐 ImageClip 自定义节点并重启秋叶。"
+                )
         except Exception as exc:
             errors.append(f"工作流 JSON 无法解析：{exc}")
     else:
@@ -79,6 +89,59 @@ def verify(**_: Any) -> dict[str, Any]:
     payload["ok"] = not errors
     payload["errors"] = errors
     return payload
+
+
+_FRONTEND_ONLY_NODE_TYPES = {
+    "Float",
+    "Int",
+    "PrimitiveFloat",
+    "PrimitiveInt",
+    "Reroute",
+}
+
+
+def _active_workflow_node_types(workflow: dict[str, Any]) -> set[str]:
+    """Return server node types that an active workflow can execute.
+
+    Frontend workflows retain muted/bypassed and browser-only helper nodes.
+    Those nodes must not make the runtime compatibility check fail.
+    """
+    if isinstance(workflow.get("nodes"), list):
+        return {
+            str(node.get("type") or "")
+            for node in workflow["nodes"]
+            if isinstance(node, dict)
+            and node.get("mode", 0) not in {2, 4}
+            and str(node.get("type") or "") not in _FRONTEND_ONLY_NODE_TYPES
+        }
+    return {
+        str(node.get("class_type") or "")
+        for node in workflow.values()
+        if isinstance(node, dict)
+        and str(node.get("class_type") or "") not in _FRONTEND_ONLY_NODE_TYPES
+    }
+
+
+def _verify_workflow_runtime(workflow: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from assetclaw_matting.comfyui.client import comfyui_client
+
+        object_info = comfyui_client.get_object_info()
+        registered = set(object_info) if isinstance(object_info, dict) else set()
+        missing = sorted(_active_workflow_node_types(workflow) - registered)
+        return {
+            "reachable": True,
+            "registered_node_types": len(registered),
+            "missing_node_types": missing,
+            "error": "",
+        }
+    except Exception as exc:
+        return {
+            "reachable": False,
+            "registered_node_types": 0,
+            "missing_node_types": [],
+            "error": str(exc),
+        }
 
 
 def update(force_copy: bool = False, **_: Any) -> dict[str, Any]:
@@ -215,6 +278,14 @@ def _cached_preflight(not_before: float | None = None) -> dict[str, Any] | None:
 def _remember_preflight(result: dict[str, Any]) -> None:
     _PREFLIGHT_CACHE["ts"] = time.monotonic()
     _PREFLIGHT_CACHE["value"] = dict(result)
+
+
+def preflight_error(result: dict[str, Any]) -> str:
+    """Return the most useful operator-facing preflight failure."""
+    errors = [str(item).strip() for item in (result.get("errors") or []) if str(item).strip()]
+    if errors:
+        return "；".join(errors)
+    return str(result.get("error") or "抠图管线启动前检查未通过")
 
 
 def _sync_repo(repo: Path) -> str:

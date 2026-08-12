@@ -439,15 +439,24 @@ export default defineConfig(({ mode }) => {
         "/api": {
           target,
           changeOrigin: false,
+          headers: skillToken ? { "X-Skill-Token": readParentEnv("SKILL_API_TOKEN") || skillToken } : {},
           rewrite: (rawPath) => {
             const [pathname, query = ""] = rawPath.split("?");
             const mapped = apiRewrite[pathname] || pathname.replace(/^\/api/, "");
             return query ? `${mapped}?${query}` : mapped;
           },
           configure: (proxy) => {
-            proxy.on("proxyReq", (proxyReq, req) => {
-              if (skillToken && (req.url?.startsWith("/api/skills/") || req.url?.startsWith("/skills/"))) {
-                proxyReq.setHeader("X-Skill-Token", skillToken);
+            proxy.on("proxyReq", (proxyReq) => {
+              // This proxy is mounted only at /api.  Vite/http-proxy may hand
+              // this callback either the original or already-rewritten URL,
+              // so URL-prefix checks can silently omit the auth header.
+              // Prefer the project .env at request time so a gateway/WebUI
+              // rolling restart cannot leave the proxy with a stale token.
+              const currentSkillToken = readParentEnv("ASSETCLAW_SKILL_TOKEN")
+                || readParentEnv("SKILL_API_TOKEN")
+                || skillToken;
+              if (currentSkillToken) {
+                proxyReq.setHeader("X-Skill-Token", currentSkillToken);
               }
             });
           },

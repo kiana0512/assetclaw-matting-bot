@@ -88,6 +88,50 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\clean_project.ps
 Invoke-RestMethod http://127.0.0.1:7865/health
 ```
 
+## 任务中心完整重发
+
+任务中心的“完整重发”只对已结束的图片/序列帧和视频直发任务开放。操作会：
+
+1. 自动锁定任务保存的原飞书会话，不允许在 UI 临时改收件人；
+2. 在后台重新生成一个 ZIP，不复用“历史已交付”判断；
+3. 视频包包含原视频、抽帧、透明抠图和后处理；
+4. 图片/序列帧包包含原始帧、透明抠图和后处理；
+5. 没有角色参考资料时仍交付原始素材与透明抠图，并在后处理目录附 README；
+6. 单独记录排队、打包、上传、成功或失败，不覆盖原任务的完成状态和交付历史。
+
+按钮重复点击会被后台请求 ID 和 worker PID 双重拦截。重发进程日志位于
+`storage/logs/task_redelivery_<RUN_ID>.log`。若 WebUI 报 `invalid X-Skill-Token`，
+确认根目录 `.env` 的 `SKILL_API_TOKEN` 后重启 WebUI；Vite 代理会从同一文件注入令牌。
+
+任务中心只在存在运行中或等待中的父任务时展示统一队列，空闲时不重复占用空间。
+列表支持按来源、状态和关键字筛选；完整重发使用站内确认弹窗，不再调用浏览器原生
+确认框。重发成功或失败信息通过按钮状态和悬浮说明表达，不额外增加一行，避免任务列
+错位。中等宽度窗口使用两层自适应布局，任务列表不会产生横向滚动；任务行没有整行
+hover 变色，滚轮滚动时不会连续闪烁。
+
+## ImageClip 工作流运行时兼容检查
+
+每次使用默认 ImageClip 工作流启动图片或视频直发前，系统除同步 Git 资源外，还会读取
+秋叶 ComfyUI 的 `/object_info`，核对所有启用节点类型是否已注册。检查失败发生在创建任务
+之前，因此不会占用 GPU，也不会把一个实际未启动的任务轻易标成处理失败。
+
+若返回类似：
+
+```text
+工作流包含秋叶未注册的节点：CodexFootRegionPasteOriginalShapeV4。
+请补齐 ImageClip 自定义节点并重启秋叶。
+```
+
+说明工作流 JSON 已引用该节点，但 ImageClip 仓库或秋叶运行时尚未包含对应 Python 实现。
+此时等待上游更新并重启秋叶；不要重复提交用户素材。更新后先执行：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8188/system_stats
+Invoke-RestMethod http://127.0.0.1:8188/queue
+```
+
+然后运行 `matting_pipeline.verify`，确认 `missing_node_types` 为空，再进行真实单图 smoke test。
+
 ## 查看日志
 
 ```powershell

@@ -74,6 +74,8 @@ Z:\公共机共享\抠图 = \\audioshare.lilith.com\AIart\公共机共享\抠图
 | `feishu.send_image` | 把本地图片以飞书图片形式发回，可直接预览 | egress_caution |
 | `feishu.send_image_by_name` | 按文件名查找图片并以飞书图片形式发回 | egress_caution |
 | `feishu.zip_and_send` | 打包文件/目录后立刻发到当前飞书会话 | egress_caution |
+| `direct_video.full_resend` | 把已结束视频任务的原视频、抽帧、抠图和后处理重新打为一个 ZIP，并强制发到原飞书会话 | egress_caution |
+| `direct_image.full_resend` | 把已结束图片/序列帧任务的原始帧、抠图和后处理重新打为一个 ZIP，并强制发到原飞书会话 | egress_caution |
 | `translate.text` | 翻译文本，输出自然语言译文 | readonly |
 | `translate.image_text` | 识别图片中文字并翻译 | readonly |
 | `speech.transcribe` | 把本地音频或飞书语音附件转文字，默认 FunASR/SenseVoiceSmall | readonly |

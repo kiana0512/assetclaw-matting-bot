@@ -11,6 +11,10 @@ from assetclaw_matting.feishu.models import FeishuMessageEvent, FeishuProcessRes
 from assetclaw_matting.ops_trace import trace
 from assetclaw_matting.progress import reset_progress_sender, set_progress_sender
 from assetclaw_matting.runtime_context import reset_runtime_context, set_runtime_context
+from assetclaw_matting.services.feishu_user_profile_service import (
+    get_cached_user_profile,
+    schedule_user_profile_refresh,
+)
 from assetclaw_matting.skills.security import redact_secrets
 
 log = logging.getLogger(__name__)
@@ -33,6 +37,8 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
         trace_id, event.event_id, event.message_id, event.chat_id, event.open_id,
     )
     user_key = event.open_id or event.user_id or "unknown_user"
+    feishu_user = get_cached_user_profile(user_key)
+    schedule_user_profile_refresh(user_key)
     conversation_id = f"feishu:{event.chat_id}:{user_key}"
     trace(
         "feishu.incoming",
@@ -152,6 +158,7 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
                     "user_id": event.user_id,
                     "conversation_id": conversation_id,
                     "trace_id": trace_id,
+                    "feishu_user": feishu_user,
                 },
                 callback=_on_job_done,
             )
@@ -210,6 +217,7 @@ def process_feishu_message(event: FeishuMessageEvent) -> FeishuProcessResult:
         return FeishuProcessResult(
             ok=False,
             trace_id=trace_id,
+            feishu_user=feishu_user,
             error=envelope.to_log_dict(),
         )
 
@@ -851,6 +859,7 @@ def _try_handle_folder_message(
     trace(
         "feishu.folder_recognized",
         trace_id=trace_id,
+        feishu_user=get_cached_user_profile(event.open_id or event.user_id),
         conversation_id=conversation_id,
         message_id=event.message_id,
         folder_name=name,

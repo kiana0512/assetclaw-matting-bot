@@ -44,6 +44,39 @@ class FeishuClient:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.get_tenant_access_token()}"}
 
+    def get_user_profile(self, open_id: str) -> dict[str, str]:
+        """Resolve a Feishu user to presentation-safe profile fields.
+
+        The contact API permission is optional for existing deployments.  Callers
+        are expected to cache failures and use a name-only fallback instead of
+        exposing ``open_id`` in the UI.
+        """
+        if not open_id:
+            raise ValueError("open_id is required")
+        response = requests.get(
+            f"{FEISHU_BASE}/contact/v3/users/{open_id}?user_id_type=open_id",
+            headers=self._headers(),
+            timeout=15,
+        )
+        self._raise_for_api_error(response, "get_user_profile")
+        data = response.json()
+        if data.get("code") != 0:
+            raise RuntimeError(
+                f"get_user_profile failed: code={data.get('code')} msg={data.get('msg')}"
+            )
+        user = (data.get("data") or {}).get("user") or {}
+        avatar = user.get("avatar") or {}
+        return {
+            "display_name": str(user.get("name") or user.get("en_name") or "").strip(),
+            "avatar_url": str(
+                avatar.get("avatar_72")
+                or avatar.get("avatar_240")
+                or avatar.get("avatar_640")
+                or avatar.get("avatar_origin")
+                or ""
+            ).strip(),
+        }
+
     def reply_text(self, message_id: str, text: str) -> None:
         if not message_id:
             return

@@ -51,7 +51,7 @@ def start(
     if not workflow_path and Path(settings.comfyui_workflow_path).name == settings.matting_pipeline_workflow_name:
         pipeline = matting_pipeline_skills.ensure_latest_for_task()
         if not pipeline.get("ok"):
-            raise RuntimeError(str(pipeline.get("error") or "matting pipeline preflight failed"))
+            raise RuntimeError(matting_pipeline_skills.preflight_error(pipeline))
         workflow_path = str(pipeline.get("workflow_path") or "")
         pipeline_notice = str(pipeline.get("message") or "")
     names = list(source_names or [])
@@ -123,6 +123,7 @@ def start(
         "chat_id": (ctx.get("chat_id") or "") if ctx.get("channel") == "feishu" else "",
         "conversation_id": ctx.get("conversation_id") or "",
         "user_id": (ctx.get("open_id") or ctx.get("user_id") or "") if ctx.get("channel") == "feishu" else "",
+        "feishu_user": dict(ctx.get("feishu_user") or {}),
         "videos": video_items,
         "children": {},
         "fps": int(fps),
@@ -167,6 +168,13 @@ def status(run_id: str | None = None, **_: Any) -> dict[str, Any]:
     if not run:
         return {"ok": False, "error": "direct video run not found"}
     return {"ok": True, "run_id": run["id"], **_public(run)}
+
+
+def full_resend(run_id: str | None = None, **_: Any) -> dict[str, Any]:
+    """Queue a fresh, complete bundle and force-send it to the original chat."""
+    from assetclaw_matting.services.task_redelivery_service import request_redelivery
+
+    return request_redelivery("video", run_id)
 
 
 def list_runs(limit: int = 10, include_finished: bool = True, **_: Any) -> dict[str, Any]:
@@ -1568,6 +1576,8 @@ def _append_log(run: dict[str, Any], message: str) -> None:
 
 
 def _public(run: dict[str, Any]) -> dict[str, Any]:
+    from assetclaw_matting.services.feishu_user_profile_service import profile_for_run
+
     terminal = str(run.get("status") or "").upper() in FINISHED
     character_resolution = dict(run.get("character_resolution") or {})
     if terminal:
@@ -1588,6 +1598,8 @@ def _public(run: dict[str, Any]) -> dict[str, Any]:
         "result_mode": run.get("result_mode") or "full",
         "postprocess_skipped": run.get("postprocess_skipped") or {},
         "drive_file": run.get("drive_file") or {},
+        "feishu_user": profile_for_run(run),
+        "redelivery": run.get("redelivery") or {},
         "character_question": "" if terminal else (run.get("character_question") or ""),
         "character_resolution": character_resolution,
         "integrity": run.get("integrity") or {},
