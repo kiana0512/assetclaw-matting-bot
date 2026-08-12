@@ -132,8 +132,70 @@ def prepare_api_prompt_for_run(
     these auxiliary save nodes at the current ComfyUI installation at runtime.
     """
     prompt = workflow_to_api_prompt(workflow)
+    inline_primitive_numeric_nodes(prompt)
     if auxiliary_output_root:
         patch_auxiliary_output_roots(prompt, auxiliary_output_root)
+    return prompt
+
+
+def inline_primitive_numeric_nodes(prompt: dict[str, Any]) -> dict[str, Any]:
+    """Inline frontend ``Int``/``Float`` primitives before API submission.
+
+    ComfyUI's browser can display primitive numeric nodes, but they are virtual
+    frontend helpers and therefore do not appear in the server's ``object_info``
+    registry.  API-format workflows exported by some frontend versions retain
+    those helpers as ordinary nodes.  Submitting them verbatim makes the server
+    reject an otherwise valid graph with ``missing_node_type``.
+
+    Replace references to output slot 0 with the numeric literal and remove the
+    helper node.  Unparseable or multiply-shaped primitives are left untouched
+    so a malformed workflow still fails visibly instead of being guessed at.
+    """
+
+    constants: dict[str, int | float] = {}
+    for node_id, node in prompt.items():
+        if not isinstance(node, dict):
+            continue
+        class_type = str(node.get("class_type") or "")
+        if class_type not in {"Int", "Float"}:
+            continue
+        inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        raw_value = inputs.get("Number")
+        if isinstance(raw_value, bool):
+            continue
+        try:
+            value = int(str(raw_value).strip()) if class_type == "Int" else float(str(raw_value).strip())
+        except (TypeError, ValueError):
+            continue
+        constants[str(node_id)] = value
+
+    if not constants:
+        return prompt
+
+    for node_id, node in list(prompt.items()):
+        if str(node_id) in constants or not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for input_name, value in list(inputs.items()):
+            if (
+                isinstance(value, list)
+                and len(value) == 2
+                and str(value[0]) in constants
+                and value[1] == 0
+            ):
+                inputs[input_name] = constants[str(value[0])]
+
+    referenced_constants = {
+        str(value[0])
+        for node in prompt.values()
+        if isinstance(node, dict) and isinstance(node.get("inputs"), dict)
+        for value in node["inputs"].values()
+        if isinstance(value, list) and len(value) == 2 and str(value[0]) in constants
+    }
+    for node_id in constants.keys() - referenced_constants:
+        prompt.pop(node_id, None)
     return prompt
 
 

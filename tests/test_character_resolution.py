@@ -448,7 +448,7 @@ def test_one_character_unit_can_bind_mixed_profiles_without_crossing_references(
     assert items[1]["color_reference_sha256"] == _sha256(emoji_refs / "tasha.png")
 
 
-def test_missing_emoji_reference_fails_closed_instead_of_using_full_reference(monkeypatch, tmp_path: Path) -> None:
+def test_missing_emoji_reference_reports_profile_gap_without_using_full_reference(monkeypatch, tmp_path: Path) -> None:
     full_refs, _emoji_refs = _setup(monkeypatch, tmp_path)
     initialize_run_resolutions(
         run_kind="direct_image",
@@ -472,10 +472,11 @@ def test_missing_emoji_reference_fails_closed_instead_of_using_full_reference(mo
         "cherry_profile": "half",
     }
 
-    with pytest.raises(RuntimeError) as error:
-        bind_run_items("direct_image", "IMG_MISSING_EMOJI", [item])
+    result = bind_run_items("direct_image", "IMG_MISSING_EMOJI", [item])
 
-    message = str(error.value).lower()
+    assert result["ready"] is False
+    assert len(result["missing_profiles"]) == 1
+    message = str(result["missing_profiles"][0]).lower()
     assert "huggy" in message
     assert any(marker in message for marker in ("half", "emoji", "256x256", "半身"))
     assert "color_reference_path" not in item

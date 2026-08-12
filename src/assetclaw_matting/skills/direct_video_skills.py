@@ -294,6 +294,7 @@ def deliver_matte_only(
         return {"ok": False, "run_id": run_id, "error": "direct video run not found"}
     if not _allow_active and str(run.get("status") or "").upper() in {"RUNNING", "QUEUED", "PENDING"}:
         return {"ok": False, "run_id": run_id, "error": "task is still running; matte-only delivery refused"}
+    delivery_confirmed = False
     try:
         run["status"] = "RUNNING"
         run["stage"] = "matte_only_package"
@@ -314,9 +315,18 @@ def deliver_matte_only(
             run["stage"] = "matte_only_delivery"
             _save(run)
             _send_zip_with_retries(run, zip_path)
+            delivery_confirmed = True
         from assetclaw_matting.services.character_resolution import cancel_run_resolutions
 
-        cancel_run_resolutions("direct_video", str(run["id"]))
+        try:
+            cancel_run_resolutions("direct_video", str(run["id"]))
+        except Exception as cleanup_exc:
+            run.setdefault("warnings", []).append({
+                "stage": "character_resolution_cleanup",
+                "message": str(cleanup_exc),
+                "recorded_at": _now(),
+            })
+            _append_log(run, f"结果已交付；角色确认记录清理告警（不影响完成状态）：{cleanup_exc}")
         run["character_question"] = ""
         run.setdefault("character_resolution", {})["pending"] = 0
         run["status"] = "DONE"
@@ -326,15 +336,37 @@ def deliver_matte_only(
         _append_log(run, f"透明抠图结果已直接交付：{zip_path.name}；角色校色与位置矫正未执行。")
         _save(run)
         if resend and run.get("chat_id"):
-            _notify(
-                run,
-                f"抠图结果已交付：{run['id']}。\n"
-                "已返回 1 个 ZIP，包内包含原始抽帧、透明抠图和后处理目录。\n"
-                "未生成后处理结果：角色库中暂无对应角色的校色与位置矫正资料。",
-            )
+            try:
+                _notify(
+                    run,
+                    f"抠图结果已交付：{run['id']}。\n"
+                    "已返回 1 个 ZIP，包内包含原始抽帧、透明抠图和后处理目录。\n"
+                    "未生成后处理结果：角色库中暂无对应角色的校色与位置矫正资料。",
+                )
+            except Exception as notify_exc:
+                run.setdefault("warnings", []).append({
+                    "stage": "completion_notice",
+                    "message": str(notify_exc),
+                    "recorded_at": _now(),
+                })
+                _append_log(run, f"结果已交付；完成提示发送告警（不影响完成状态）：{notify_exc}")
+                _save(run)
         return {"ok": True, "run_id": run_id, **_public(run)}
     except Exception as exc:
         run = _load(run_id) or run
+        if delivery_confirmed:
+            run["status"] = "DONE"
+            run["stage"] = "done_matte_only"
+            run["error"] = ""
+            run.setdefault("warnings", []).append({
+                "stage": "post_delivery_finalize",
+                "message": str(exc),
+                "recorded_at": _now(),
+            })
+            run["updated_at"] = _now()
+            _append_log(run, f"透明抠图结果已交付；后置收尾告警（不影响完成状态）：{exc}")
+            _save(run)
+            return {"ok": True, "run_id": run_id, **_public(run)}
         run["status"] = "FAILED"
         run["stage"] = "matte_only_delivery_failed"
         run["error"] = str(exc)

@@ -562,6 +562,11 @@ def _prepare_full_pipeline_retry(run: dict[str, Any], error: Exception) -> bool:
 
     if str(run.get("status") or "").upper() in {"CANCELED", "WAITING_CHARACTER"}:
         return False
+    if _is_deterministic_workflow_error(error):
+        recovery = run.setdefault("full_pipeline_recovery", {})
+        recovery["retry_disabled_reason"] = "deterministic_workflow_error"
+        recovery["last_error"] = str(error)
+        return False
     if str(run.get("stage") or "").lower() in {
         "character_confirmation_timeout",
         "waiting_character",
@@ -628,6 +633,26 @@ def _prepare_full_pipeline_retry(run: dict[str, Any], error: Exception) -> bool:
     _append_log(run, f"自动恢复第 {attempt}/{MAX_FULL_PIPELINE_RETRIES} 次：已恢复原图并从抠图开始完整重跑。")
     _save(run)
     return True
+
+
+_DETERMINISTIC_WORKFLOW_ERROR_MARKERS = (
+    "missing_node_type",
+    "node 'int' not found",
+    "node type not found",
+    "unknown node type",
+    "workflow/runtime incompatibility",
+)
+
+
+def _is_deterministic_workflow_error(error: Exception | str) -> bool:
+    folded = str(error).casefold()
+    current = error if isinstance(error, BaseException) else None
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        folded += "\n" + str(current).casefold()
+        current = current.__cause__ or current.__context__
+    return any(marker in folded for marker in _DETERMINISTIC_WORKFLOW_ERROR_MARKERS)
 
 
 def _ensure_original_images(run: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1168,6 +1193,7 @@ def deliver_matte_only(
         return {"ok": False, "run_id": run_id, "error": "direct image run not found"}
     if not _allow_active and str(run.get("status") or "").upper() in {"RUNNING", "QUEUED", "PENDING"}:
         return {"ok": False, "run_id": run_id, "error": "task is still running; matte-only delivery refused"}
+    delivery_confirmed = False
     try:
         items = list(run.get("images") or [])
         matte_files: list[tuple[dict[str, Any], Path]] = []
@@ -1233,6 +1259,7 @@ def deliver_matte_only(
                 sent_files.append(str(matte))
             if not all(str(receipt.get("message_id") or "") for receipt in receipts):
                 raise RuntimeError("Feishu matte-only delivery returned no message receipt")
+            delivery_confirmed = True
             run["delivery"] = {
                 "status": "DELIVERED",
                 "chat_id": chat_id,
@@ -1241,16 +1268,17 @@ def deliver_matte_only(
                 "delivered_at": _now(),
                 "postprocess_applied": False,
             }
-            _notify(
-                run,
-                f"抠图结果已交付：{run['id']}。\n"
-                "序列帧已返回 1 个完整 ZIP，包内包含原始帧、透明抠图和后处理说明。\n"
-                "未生成后处理结果：角色库中暂无对应角色的校色与位置矫正资料。",
-            )
-
         from assetclaw_matting.services.character_resolution import cancel_run_resolutions
 
-        cancel_run_resolutions("direct_image", str(run["id"]))
+        try:
+            cancel_run_resolutions("direct_image", str(run["id"]))
+        except Exception as cleanup_exc:
+            run.setdefault("warnings", []).append({
+                "stage": "character_resolution_cleanup",
+                "message": str(cleanup_exc),
+                "recorded_at": _now(),
+            })
+            _append_log(run, f"结果已交付；角色确认记录清理告警（不影响完成状态）：{cleanup_exc}")
         run["matte_only_delivery_receipts"] = receipts
         run["sent_files"] = sent_files
         run["status"] = "DONE"
@@ -1259,9 +1287,38 @@ def deliver_matte_only(
         run["updated_at"] = _now()
         _append_log(run, "透明抠图结果已交付；角色校色与位置矫正未执行。")
         _save(run)
+        if delivery_confirmed:
+            try:
+                _notify(
+                    run,
+                    f"抠图结果已交付：{run['id']}。\n"
+                    "序列帧已返回 1 个完整 ZIP，包内包含原始帧、透明抠图和后处理说明。\n"
+                    "未生成后处理结果：角色库中暂无对应角色的校色与位置矫正资料。",
+                )
+            except Exception as notify_exc:
+                run.setdefault("warnings", []).append({
+                    "stage": "completion_notice",
+                    "message": str(notify_exc),
+                    "recorded_at": _now(),
+                })
+                _append_log(run, f"结果已交付；完成提示发送告警（不影响完成状态）：{notify_exc}")
+                _save(run)
         return {"ok": True, "run_id": run_id, **_public(run)}
     except Exception as exc:
         run = _load(run_id) or run
+        if delivery_confirmed:
+            run["status"] = "DONE"
+            run["stage"] = "done_matte_only"
+            run["error"] = ""
+            run.setdefault("warnings", []).append({
+                "stage": "post_delivery_finalize",
+                "message": str(exc),
+                "recorded_at": _now(),
+            })
+            run["updated_at"] = _now()
+            _append_log(run, f"透明抠图结果已交付；后置收尾告警（不影响完成状态）：{exc}")
+            _save(run)
+            return {"ok": True, "run_id": run_id, **_public(run)}
         run["status"] = "FAILED"
         run["stage"] = "matte_only_delivery_failed"
         run["error"] = str(exc)

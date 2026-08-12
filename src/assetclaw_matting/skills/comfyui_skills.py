@@ -1361,6 +1361,10 @@ def _run_worker(run_id: str) -> None:
                             target.unlink()
                         if isinstance(exc, TimeoutError):
                             raise
+                        if _is_non_retryable_prompt_error(exc):
+                            raise RuntimeError(
+                                f"ComfyUI workflow/runtime incompatibility; retry disabled: {exc}"
+                            ) from exc
                         if attempt < attempts:
                             _notify(
                                 run_id,
@@ -1729,6 +1733,28 @@ _LOCAL_GPU_OOM_MARKERS = (
 )
 
 
+_NON_RETRYABLE_PROMPT_MARKERS = (
+    "missing_node_type",
+    "node 'int' not found",
+    "node type not found",
+    "unknown node type",
+)
+
+
+def _is_non_retryable_prompt_error(exc: BaseException) -> bool:
+    """Return true for deterministic workflow validation/submission errors."""
+
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    folded = "\n".join(str(item) for item in chain).casefold()
+    return any(marker in folded for marker in _NON_RETRYABLE_PROMPT_MARKERS)
+
+
 def _execution_failure_detail(exc: BaseException) -> dict[str, str]:
     """Preserve a compact, structured failure classification before UI truncation."""
 
@@ -1741,7 +1767,12 @@ def _execution_failure_detail(exc: BaseException) -> dict[str, str]:
         current = current.__cause__ or current.__context__
     text = "\n".join(f"{type(item).__name__}: {item}" for item in chain)
     folded = text.casefold()
-    kind = "GPU_OOM" if any(marker in folded for marker in _LOCAL_GPU_OOM_MARKERS) else "EXECUTION_ERROR"
+    if any(marker in folded for marker in _LOCAL_GPU_OOM_MARKERS):
+        kind = "GPU_OOM"
+    elif any(marker in folded for marker in _NON_RETRYABLE_PROMPT_MARKERS):
+        kind = "WORKFLOW_INCOMPATIBLE"
+    else:
+        kind = "EXECUTION_ERROR"
     exception_type = ""
     match = re.search(r"exception_type['\"]?\s*[:=]\s*['\"]([^'\"]+)", text, flags=re.IGNORECASE)
     if match:

@@ -99,6 +99,16 @@ def test_full_pipeline_retry_is_bounded_and_audited(monkeypatch, tmp_path: Path)
     assert [entry["error"] for entry in recovery["attempts"]] == ["first", "second"]
 
 
+def test_full_pipeline_retry_skips_deterministic_missing_node_error() -> None:
+    run = {"status": "FAILED", "stage": "matting"}
+    error = RuntimeError(
+        "ComfyUI workflow/runtime incompatibility; retry disabled: missing_node_type: Node 'Int' not found"
+    )
+
+    assert direct_image_skills._prepare_full_pipeline_retry(run, error) is False
+    assert run["full_pipeline_recovery"]["retry_disabled_reason"] == "deterministic_workflow_error"
+
+
 def test_local_gpu_oom_switches_only_this_run_to_gpu_control(monkeypatch, tmp_path: Path) -> None:
     source = _png(tmp_path / "imports" / "Gary.png")
     target = _png(

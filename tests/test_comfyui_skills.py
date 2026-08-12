@@ -175,6 +175,44 @@ def test_prepare_api_prompt_does_not_rewire_workflow() -> None:
     assert prompt["2"]["inputs"]["images"] == ["1", 0]
 
 
+def test_prepare_api_prompt_inlines_frontend_numeric_primitives() -> None:
+    workflow = {
+        "97": {
+            "class_type": "KSampler",
+            "inputs": {"steps": ["101", 0], "cfg": 1.0},
+        },
+        "101": {
+            "class_type": "Int",
+            "inputs": {"Number": "6"},
+            "_meta": {"title": "Int"},
+        },
+        "113": {
+            "class_type": "Float",
+            "inputs": {"Number": "0.88"},
+            "_meta": {"title": "Float"},
+        },
+    }
+    workflow["97"]["inputs"]["denoise"] = ["113", 0]
+
+    prompt = prepare_api_prompt_for_run(workflow)
+
+    assert prompt["97"]["inputs"]["steps"] == 6
+    assert prompt["97"]["inputs"]["denoise"] == 0.88
+    assert "101" not in prompt
+    assert "113" not in prompt
+
+
+def test_missing_node_submission_error_is_classified_as_workflow_incompatible() -> None:
+    error = RuntimeError(
+        "400 ComfyUI /prompt failed: missing_node_type: Node 'Float' not found"
+    )
+
+    detail = comfyui_skills._execution_failure_detail(error)
+
+    assert detail["kind"] == "WORKFLOW_INCOMPATIBLE"
+    assert comfyui_skills._is_non_retryable_prompt_error(error) is True
+
+
 def test_prepare_api_prompt_replaces_cherry_mirror_machine_path() -> None:
     workflow = {
         "20": {

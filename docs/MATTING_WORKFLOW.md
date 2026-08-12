@@ -112,6 +112,12 @@ ComfyUI 现在在跑什么管线
 
 ComfyUI 的 `SaveImage` 默认写到 ComfyUI 自己的 output 区域。机器人会通过 history 里的输出记录，再用 `/view` 下载到用户指定的 `output_dir`。
 
+### 前端 Primitive 节点兼容
+
+部分 ComfyUI 前端导出的 API JSON 会保留 `Int`、`Float` 等仅供界面使用的 Primitive 节点。它们可以在浏览器画布中正常显示，但并不是后端 `object_info` 注册的可执行节点；原样提交会收到 `missing_node_type`。AssetClaw 在提交前会把这类数值 Primitive 的输出内联为对应的整数或浮点常量，再移除虚拟节点，不要求安装不存在的自定义节点。
+
+`missing_node_type` 等确定性的工作流校验错误不会执行输出校验重试，也不会触发整条图片流水线的重复 GPU 消耗；状态中会保留明确的工作流/运行时不兼容原因，等待工作流修复后再恢复任务。
+
 如果 workflow 里有多个 `LoadImage` 节点，可以在 skill 参数里指定 `input_node_id` 和 `input_name`。不指定时默认 patch 第一个 `LoadImage.inputs.image`。
 
 默认批量抠图约定：

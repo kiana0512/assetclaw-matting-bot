@@ -520,7 +520,12 @@ def bind_run_items(run_kind: str, run_id: str, items: list[dict[str, Any]]) -> d
             if snapshot_row is not None:
                 snapshot_rows[(unit_id, profile)] = snapshot_row
         if snapshot_row is None:
-            raise RuntimeError(_missing_profile_message(str(row["character_id"]), profile))
+            # Missing the exact output profile is an expected catalog gap, not
+            # a processing failure.  The direct image/video caller must fail
+            # closed for postprocessing and deliver its verified matte-only
+            # bundle instead of substituting the other profile.
+            missing_profiles.append(_missing_profile_message(str(row["character_id"]), profile))
+            continue
         snapshot = Path(str(snapshot_row.get("reference_snapshot_path") or ""))
         expected_sha = str(snapshot_row.get("reference_sha256") or "").lower()
         verification_key = (unit_id, profile, str(snapshot), expected_sha)
