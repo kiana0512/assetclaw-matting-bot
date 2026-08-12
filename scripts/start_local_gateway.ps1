@@ -13,15 +13,6 @@ Write-Host "Cloudflare disabled."
 Write-Host ""
 
 $env:PYTHONPATH = "$ProjectRoot\src;$ProjectRoot"
-$CondaExe = Join-Path $env:USERPROFILE "miniconda3\Scripts\conda.exe"
-if (-not (Test-Path $CondaExe)) {
-  $cmd = Get-Command conda -ErrorAction SilentlyContinue
-  if (-not $cmd) { throw "conda not found. Install Miniconda or add conda to PATH." }
-  $CondaExe = $cmd.Source
-}
-function Invoke-AssetPython {
-  & $CondaExe run -n assetclaw python @args
-}
 function Get-AssetPythonExe {
   $candidates = @(
     (Join-Path $env:USERPROFILE "miniconda3\envs\assetclaw\python.exe"),
@@ -34,10 +25,15 @@ function Get-AssetPythonExe {
   throw "assetclaw python.exe not found."
 }
 
+$AssetPython = Get-AssetPythonExe
+function Invoke-AssetPython {
+  & $script:AssetPython @args
+}
+
 # Init DB (idempotent)
+Write-Host "Using assetclaw Python: $AssetPython"
 Invoke-AssetPython -m assetclaw_matting.cli.main init-db 2>&1 | Write-Host
 
 Write-Host "Starting Gateway on 127.0.0.1:7865 ..."
 $Workers = if ($env:ASSETCLAW_GATEWAY_WORKERS) { [int]$env:ASSETCLAW_GATEWAY_WORKERS } else { 1 }
-$AssetPython = Get-AssetPythonExe
 & $AssetPython -m uvicorn assetclaw_matting.api.main:app --host 127.0.0.1 --port 7865 --log-level info --workers $Workers

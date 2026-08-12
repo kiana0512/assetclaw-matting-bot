@@ -1,5 +1,6 @@
 param(
-  [switch]$NoMonitor
+  [switch]$NoMonitor,
+  [switch]$NoOpenWebUI
 )
 $ErrorActionPreference = "Stop"
 chcp 65001 | Out-Null
@@ -34,7 +35,12 @@ function Get-AssetPythonExe {
     if (Test-Path $candidate) { return $candidate }
   }
 
-  $json = & $script:CondaExe env list --json 2>$null
+  # Only ask Conda to enumerate environments when none of the stable,
+  # well-known environment paths exists.  Normal service startup must not
+  # depend on `conda run`: its plugin/bootstrap layer can fail independently
+  # even when the target environment's python.exe is completely healthy.
+  $condaExe = Get-CondaExe
+  $json = & $condaExe env list --json 2>$null
   if ($LASTEXITCODE -eq 0 -and $json) {
     $envs = ($json | ConvertFrom-Json).envs
     foreach ($envPath in $envs) {
@@ -49,7 +55,7 @@ function Get-AssetPythonExe {
 }
 
 function Invoke-AssetPython {
-  & $script:CondaExe run -n assetclaw python @args
+  & $script:AssetPythonExe @args
 }
 
 function Stop-OldProcesses {
@@ -187,16 +193,16 @@ Write-Host "AssetClaw Bot - Local Safe Mode"
 Write-Host "Starting Gateway + Feishu WS + WebUI in background..."
 Write-Host ""
 
-$script:CondaExe = Get-CondaExe
 $script:AssetPythonExe = Get-AssetPythonExe
 $env:PYTHONPATH = "$ProjectRoot\src;$ProjectRoot"
 
 Stop-OldProcesses
 
-Write-Host "Checking Python dependencies in conda env: assetclaw..."
+Write-Host "Using assetclaw Python: $script:AssetPythonExe"
+Write-Host "Checking Python dependencies in assetclaw environment..."
 $depCheck = Invoke-AssetPython -c "import pydantic_settings, uvicorn, lark_oapi; from lark_oapi.ws import Client; print('deps OK')" 2>&1
 if ($LASTEXITCODE -ne 0) {
-  Write-Host "Installing requirements.txt into conda env assetclaw..."
+  Write-Host "Installing requirements.txt into assetclaw environment..."
   Invoke-AssetPython -m pip install -r requirements.txt
 }
 
@@ -252,8 +258,16 @@ Start-Process -FilePath $PowerShellExe `
   -RedirectStandardError "logs\webui_console.err.log" `
   -WindowStyle Hidden
 
-if (-not (Wait-WebUI)) {
+$webUiReady = Wait-WebUI
+if (-not $webUiReady) {
   Write-Host "WebUI did not become ready. Check logs\webui_console.err.log and logs\webui_console.out.log"
+} elseif (-not $NoOpenWebUI) {
+  Write-Host "Opening WebUI in the default browser: http://127.0.0.1:5180/"
+  try {
+    Start-Process "http://127.0.0.1:5180/"
+  } catch {
+    Write-Host "WebUI is ready, but the browser could not be opened automatically: $($_.Exception.Message)"
+  }
 }
 
 Start-Sleep -Seconds 5
