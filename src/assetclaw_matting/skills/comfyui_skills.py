@@ -248,7 +248,7 @@ def run_start(
 
     if options.get("chat_id") and files:
         notice = f"\n{pipeline_notice}" if pipeline_notice else ""
-        backend_label = "本机 4070Ti" if selected_backend == "local" else "GPU Control 集群"
+        backend_label = "GPU Control 集群"
         _notify(run_id, f"抠图批量任务已启动：{len(files)} 张，后端：{backend_label}{notice}\n输入：{src}\n输出：{dst}")
         _start_progress_monitor(run_id)
     if files:

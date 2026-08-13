@@ -69,7 +69,7 @@ def module_catalog() -> dict[str, Any]:
             },
             {
                 "id": "comfyui",
-                "name": "ComfyUI 抠图管线",
+                "name": "GPU Control 抠图管线",
                 "skills": ["comfyui.run_preview", "comfyui.run_start", "comfyui.run_update", "comfyui.run_status"],
                 "parameters": {
                     "workflow_path": "工作流 JSON 路径",
@@ -120,7 +120,7 @@ def module_catalog() -> dict[str, Any]:
                 "parameters": {
                     "input_dir": "视频输入/下载目录",
                     "frame_output_dir": "抽帧输出目录",
-                    "matte_output_dir": "ComfyUI 抠图输出目录",
+                    "matte_output_dir": "GPU Control 抠图输出目录",
                     "smooth_output_dir": "Cherry 平滑输出目录",
                     "workflow_path": "ComfyUI 工作流路径",
                     "fps": "抽帧 FPS",

@@ -622,7 +622,7 @@ def test_compact_remote_state_preserves_failed_items() -> None:
     assert merged["failed_items"] == failed_items
 
 
-def test_hybrid_router_keeps_one_small_task_local_and_overflows_when_busy(monkeypatch) -> None:
+def test_legacy_hybrid_mode_routes_every_real_task_to_gpu_control(monkeypatch) -> None:
     from assetclaw_matting.config import settings
 
     monkeypatch.setattr(settings, "comfyui_fake_mode", False)
@@ -630,26 +630,20 @@ def test_hybrid_router_keeps_one_small_task_local_and_overflows_when_busy(monkey
     monkeypatch.setattr(settings, "gpu_control_base_url", "https://10.3.34.11")
     monkeypatch.setattr(settings, "gpu_control_large_batch_threshold", 64)
     monkeypatch.setattr(settings, "gpu_control_max_batch_frames", 5000)
-    monkeypatch.setattr(hybrid_matting_router, "_active_local_run_count", lambda: 0)
-    assert hybrid_matting_router.select_matting_backend(12)[0] == "local"
-
-    monkeypatch.setattr(hybrid_matting_router, "_active_local_run_count", lambda: 1)
+    assert hybrid_matting_router.select_matting_backend(12)[0] == "gpu_control"
     assert hybrid_matting_router.select_matting_backend(12)[0] == "gpu_control"
     assert hybrid_matting_router.select_matting_backend(64)[0] == "gpu_control"
 
 
-def test_hybrid_router_never_splits_an_oversized_task(monkeypatch) -> None:
+def test_gpu_control_only_router_rejects_an_oversized_task(monkeypatch) -> None:
     from assetclaw_matting.config import settings
 
     monkeypatch.setattr(settings, "comfyui_fake_mode", False)
     monkeypatch.setattr(settings, "matting_backend_mode", "hybrid")
     monkeypatch.setattr(settings, "gpu_control_base_url", "https://10.3.34.11")
     monkeypatch.setattr(settings, "gpu_control_max_batch_frames", 100)
-    monkeypatch.setattr(hybrid_matting_router, "_active_local_run_count", lambda: 1)
-
-    backend, reason = hybrid_matting_router.select_matting_backend(101)
-    assert backend == "local"
-    assert "intact task" in reason
+    with pytest.raises(RuntimeError, match="exceeding configured limit"):
+        hybrid_matting_router.select_matting_backend(101)
 
 
 def test_hybrid_router_persists_accepted_scheduler_handshake(monkeypatch) -> None:
@@ -673,7 +667,7 @@ def test_hybrid_router_persists_accepted_scheduler_handshake(monkeypatch) -> Non
     backend, reason, recorded = hybrid_matting_router.select_matting_backend(12, include_handshake=True)
 
     assert backend == "gpu_control"
-    assert "4070Ti" in reason
+    assert "GPU Control" in reason
     assert recorded == handshake
 
 

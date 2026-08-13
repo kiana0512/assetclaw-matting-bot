@@ -57,10 +57,11 @@ def select_matting_backend(
     *,
     include_handshake: bool = False,
 ) -> tuple[str, str] | tuple[str, str, dict[str, Any]]:
-    """Return ``local`` or ``gpu_control`` and a human-readable reason.
+    """Route every production matting task to GPU Control.
 
-    The caller must hold :func:`matting_route_lock` until its run row is
-    committed, otherwise idle-local selection is racy across worker processes.
+    The old local/hybrid selector is intentionally retained as a compatibility
+    entry point for callers, but local ImageClip execution no longer exists.
+    Fake mode is the only local adapter and is restricted to tests.
     """
 
     from assetclaw_matting.config import settings
@@ -73,58 +74,26 @@ def select_matting_backend(
     if settings.comfyui_fake_mode:
         return result("local", "fake mode always uses the local adapter")
 
-    mode = str(settings.matting_backend_mode or "local").strip().lower()
-    aliases = {"cluster": "gpu_control", "remote": "gpu_control", "comfyui": "local"}
+    mode = str(settings.matting_backend_mode or "gpu_control").strip().lower()
+    aliases = {"cluster": "gpu_control", "remote": "gpu_control"}
     mode = aliases.get(mode, mode)
     forced = aliases.get(str(requested or "").strip().lower(), str(requested or "").strip().lower())
-    if forced:
-        if forced not in {"local", "gpu_control"}:
-            raise ValueError("backend must be local or gpu_control")
-        if forced == "gpu_control" and not _cluster_configured():
-            raise RuntimeError("GPU Control backend was requested but is not configured")
-        if forced == "local":
-            return result("local", "explicit backend=local")
-        handshake = _cluster_handshake() if include_handshake else None
-        reason = "explicit backend=gpu_control"
-        if handshake and not handshake.get("accepting_batches"):
-            reason += "; scheduler advisory is saturated; submitting to the server queue"
-        return result("gpu_control", reason, handshake)
-
-    if mode == "local":
-        return result("local", "matting_backend_mode=local")
-    if mode not in {"hybrid", "gpu_control"}:
-        raise ValueError("MATTING_BACKEND_MODE must be local, hybrid, or gpu_control")
+    if forced and forced not in {"local", "comfyui", "hybrid", "gpu_control"}:
+        raise ValueError("backend must be gpu_control")
+    if mode not in {"local", "comfyui", "hybrid", "gpu_control"}:
+        raise ValueError("MATTING_BACKEND_MODE must be gpu_control")
     if not _cluster_configured():
-        if mode == "gpu_control":
-            raise RuntimeError("MATTING_BACKEND_MODE=gpu_control but GPU_CONTROL_BASE_URL is empty")
-        return result("local", "GPU Control is not configured")
-    handshake = _cluster_handshake() if include_handshake else None
-    if mode == "gpu_control":
-        maximum = max(1, int(settings.gpu_control_max_batch_frames or 1))
-        if int(total) > maximum:
-            raise RuntimeError(f"GPU Control batch has {total} frames, exceeding configured limit {maximum}")
-        reason = "matting_backend_mode=gpu_control"
-        if handshake and not handshake.get("accepting_batches"):
-            reason += "; scheduler advisory is saturated; submitting to the server queue"
-        return result("gpu_control", reason, handshake)
-
+        raise RuntimeError("GPU Control is required for matting but GPU_CONTROL_BASE_URL is empty")
     maximum = max(1, int(settings.gpu_control_max_batch_frames or 1))
     if int(total) > maximum:
-        return result("local", f"batch size {total} exceeds remote limit {maximum}; keep the intact task local", handshake)
-    threshold = max(1, int(settings.gpu_control_large_batch_threshold or 1))
-    if int(total) >= threshold:
-        reason = f"batch size {total} reached remote threshold {threshold}"
-        if handshake and not handshake.get("accepting_batches"):
-            reason += "; scheduler advisory is saturated; submitting to the server queue"
-        return result("gpu_control", reason, handshake)
-    if _active_local_run_count() > 0:
-        reason = "local 4070Ti already has an active matting run"
-        if handshake and not handshake.get("accepting_batches"):
-            reason += "; scheduler advisory is saturated; submitting to the server queue"
-        return result("gpu_control", reason, handshake)
+        raise RuntimeError(f"GPU Control batch has {total} frames, exceeding configured limit {maximum}")
+    handshake = _cluster_handshake() if include_handshake else None
+    reason = "all matting is owned by GPU Control"
+    if forced in {"local", "comfyui", "hybrid"} or mode in {"local", "comfyui", "hybrid"}:
+        reason += "; legacy local/hybrid request was upgraded to gpu_control"
     if handshake and not handshake.get("accepting_batches"):
-        return result("local", f"GPU Control handshake unavailable: {handshake.get('reason') or 'not accepting'}", handshake)
-    return result("local", "local 4070Ti is idle and the batch is below the remote threshold", handshake)
+        reason += "; scheduler advisory is saturated; submitting to the server queue"
+    return result("gpu_control", reason, handshake)
 
 
 def _cluster_handshake() -> dict[str, Any]:
@@ -191,11 +160,9 @@ def _cluster_handshake() -> dict[str, Any]:
 
 
 def local_pipeline_serialization_required() -> bool:
-    """Legacy whole-video serialization is only needed in local-only mode."""
+    """Local GPU serialization was removed with the GPU Control-only cutover."""
 
-    from assetclaw_matting.config import settings
-
-    return str(settings.matting_backend_mode or "local").strip().lower() in {"local", "comfyui"}
+    return False
 
 
 def _cluster_configured() -> bool:

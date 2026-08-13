@@ -1,0 +1,13 @@
+[Unit]
+Description=Delayed safe start for GPU Control ComfyUI on WSL2
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 30
+ExecStart=/bin/sh -c 'i=0; while [ "$i" -lt 30 ]; do /usr/lib/wsl/lib/nvidia-smi >/dev/null 2>&1 && exec /usr/bin/docker start gpu-control-node-comfyui-1; i=$((i+1)); sleep 2; done; exit 1'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

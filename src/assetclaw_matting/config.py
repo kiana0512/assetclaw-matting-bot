@@ -187,12 +187,10 @@ class Settings(BaseSettings):
     comfyui_timeout_seconds: int = 600
     comfyui_poll_interval_seconds: int = 2
 
-    # Hybrid ImageClip execution.  ``local`` preserves the existing 4070Ti
-    # behavior.  ``hybrid`` keeps small work local while overflowing large or
-    # concurrent runs to GPU Control.  ``gpu_control`` forces all real runs to
-    # the remote batch service.  The remote service performs matting only;
-    # every other animation stage remains on this machine.
-    matting_backend_mode: str = "local"
+    # ImageClip execution is owned exclusively by GPU Control. The animation
+    # manager still owns extraction, post-processing and delivery, but it must
+    # never execute matting through a local ComfyUI instance.
+    matting_backend_mode: str = "gpu_control"
     gpu_control_base_url: str = "https://10.3.34.11"
     gpu_control_api_key: str = ""
     gpu_control_verify_tls: bool = True

@@ -24,10 +24,10 @@ from assetclaw_matting.comfyui.output_resolver import inspect_local_png
 TERMINAL_BATCH_STATUSES = {"SUCCEEDED", "PARTIAL_SUCCESS", "FAILED", "CANCELLED"}
 RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
 APPROVED_WORKFLOW_KEY = "imageclip-rgba"
-APPROVED_WORKFLOW_VERSION = "2026.07.30-691770c-r1"
-APPROVED_PIPELINE_COMMIT = "691770cd6a59fd7c51391456fe900dc57a313233"
-APPROVED_PIPELINE_SHA256 = "00e7104762f0a1fdf3a4c20e043bec2b9f088132452d5a5ce4302ba268edac0b"
-APPROVED_OUTPUT_NODE = "SaveImage #25"
+APPROVED_WORKFLOW_VERSION = "2026.08.12-c39ed0b-fp8-r1"
+APPROVED_PIPELINE_COMMIT = "c39ed0b3b637f0a1435bbe10e5a3acf6bfca07bd"
+APPROVED_PIPELINE_SHA256 = "07928d57852ed56ed37527960ec9955d867c0090456fda687fbcd12fecf1775c"
+APPROVED_OUTPUT_NODE = "SaveImage #102"
 V2_ALLOWED_INPUT_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 V2_MAX_FRAMES = 5000
 V2_MAX_MANIFEST_BYTES = 4 * 1024 * 1024
@@ -935,7 +935,7 @@ def validate_workflow_identity(payload: dict[str, Any]) -> dict[str, Any]:
 
     GPU Control currently returns key/version more consistently than commit/SHA. Missing
     identity remains visible as partial evidence, while any value the server does return
-    must match the jointly approved 2026-07-30 baseline.
+    must match the jointly approved GPU Control 1.5.14 / 2026-08-12 baseline.
     """
 
     observed = {

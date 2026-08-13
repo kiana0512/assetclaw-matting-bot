@@ -1,0 +1,353 @@
+---BOOT---
+8b00f8a8-442d-4929-8720-4493090677ad
+ 18:57:19 up 1 min,  2 users,  load average: 0.34, 0.10, 0.03
+active
+active
+active
+2: eth0    inet 172.24.3.33/20 brd 172.24.15.255 scope global eth0\       valid_lft forever preferred_lft forever
+---COMPOSE---
+/opt/gpu-control/deploy/gpu-node/compose.yaml-1-name: gpu-control-node
+/opt/gpu-control/deploy/gpu-node/compose.yaml-2-x-logging: &default-logging
+/opt/gpu-control/deploy/gpu-node/compose.yaml-3-  driver: json-file
+/opt/gpu-control/deploy/gpu-node/compose.yaml-4-  options: {max-size: "20m", max-file: "5"}
+/opt/gpu-control/deploy/gpu-node/compose.yaml-5-
+/opt/gpu-control/deploy/gpu-node/compose.yaml-6-services:
+/opt/gpu-control/deploy/gpu-node/compose.yaml:7:  comfyui:
+/opt/gpu-control/deploy/gpu-node/compose.yaml:8:    image: ${COMFY_IMAGE:-registry.local:5000/gpu-control/comfyui:projects-0.2.3}
+/opt/gpu-control/deploy/gpu-node/compose.yaml-9-    restart: unless-stopped
+/opt/gpu-control/deploy/gpu-node/compose.yaml-10-    ports: ["${NODE_BIND_IP:-0.0.0.0}:8188:8188"]
+/opt/gpu-control/deploy/gpu-node/compose.yaml-11-    deploy: {resources: {reservations: {devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]}}}
+/opt/gpu-control/deploy/gpu-node/compose.yaml-12-    volumes:
+/opt/gpu-control/deploy/gpu-node/compose.yaml-13-      - ${MODEL_ROOT:-/opt/imageclip/models}:/opt/comfyui/models:ro
+/opt/gpu-control/deploy/gpu-node/compose.yaml-14-      - ${MODELVIEW_ROOT:-/opt/modelviewcreator}/model:/opt/modelviewcreator/model:ro
+/opt/gpu-control/deploy/gpu-node/compose.yaml-15-      - ../../configs/comfyui-extra-model-paths.yaml:/opt/comfyui/extra_model_paths.yaml:ro
+/opt/gpu-control/deploy/gpu-node/compose.yaml-16-      - ${IMAGECLIP_ROOT:-/opt/imageclip}/Cherry_lizi:/opt/comfyui/custom_nodes/Cherry_lizi:ro
+/opt/gpu-control/deploy/gpu-node/compose.yaml-17-      - ${IMAGECLIP_ROOT:-/opt/imageclip}/ComfyLiterals:/opt/comfyui/custom_nodes/ComfyLiterals:ro
+/opt/gpu-control/deploy/gpu-node/compose.yaml-18-      - ${MODELVIEW_ROOT:-/opt/modelviewcreator}/custom_nodes/haoze-LiClick:/opt/comfyui/custom_nodes/haoze-LiClick:ro
+/opt/gpu-control/deploy/gpu-node/compose.yaml-19-      - /srv/comfyui/runtime/input:/opt/comfyui/input
+/opt/gpu-control/deploy/gpu-node/compose.yaml-20-      - /srv/comfyui/runtime/output:/opt/comfyui/output
+/opt/gpu-control/deploy/gpu-node/compose.yaml-21-      - /srv/comfyui/runtime/temp:/opt/comfyui/temp
+/opt/gpu-control/deploy/gpu-node/compose.yaml-22-      - /srv/comfyui/runtime/user:/opt/comfyui/user
+/opt/gpu-control/deploy/gpu-node/compose.yaml-23-      - ${IMAGECLIP_ROOT:-/opt/imageclip}/ImageClip.json:/opt/comfyui/user/default/workflows/ImageClip.json:ro
+/opt/gpu-control/deploy/gpu-node/compose.yaml-24-      - ${MODELVIEW_ROOT:-/opt/modelviewcreator}/flux_fill_inpaint.json:/opt/comfyui/user/default/workflows/ModelViewCreator_flux_fill_inpaint.json:ro
+/opt/gpu-control/deploy/gpu-node/compose.yaml-25-    healthcheck: {test: ["CMD", "python3.11", "/usr/local/bin/comfy-healthcheck"], interval: 20s, timeout: 5s, start_period: 120s, retries: 6}
+/opt/gpu-control/deploy/gpu-node/compose.yaml-26-    logging: *default-logging
+/opt/gpu-control/deploy/gpu-node/compose.yaml-27-
+/opt/gpu-control/deploy/gpu-node/compose.yaml-28-  node-exporter:
+/opt/gpu-control/deploy/gpu-node/compose.yaml-29-    image: prom/node-exporter:v1.9.1
+/opt/gpu-control/deploy/gpu-node/compose.yaml-30-    restart: unless-stopped
+/opt/gpu-control/deploy/gpu-node/compose.yaml-31-    ports: ["${NODE_BIND_IP:-0.0.0.0}:9100:9100"]
+/opt/gpu-control/deploy/gpu-node/compose.yaml-32-    command: ["--path.rootfs=/host"]
+/opt/gpu-control/deploy/gpu-node/compose.yaml-33-    volumes: ["/:/host:ro,rslave"]
+/opt/gpu-control/deploy/gpu-node/compose.yaml-34-    logging: *default-logging
+/opt/gpu-control/deploy/gpu-node/compose.yaml-35-
+/opt/gpu-control/deploy/gpu-node/compose.yaml-36-  dcgm-exporter:
+/opt/gpu-control/deploy/gpu-node/compose.yaml-37-    image: nvcr.io/nvidia/k8s/dcgm-exporter:4.2.3-4.1.1-ubuntu22.04
+/opt/gpu-control/deploy/gpu-node/compose.yaml-38-    restart: unless-stopped
+/opt/gpu-control/deploy/gpu-node/compose.yaml-39-    ports: ["${NODE_BIND_IP:-0.0.0.0}:9400:9400"]
+/opt/gpu-control/deploy/gpu-node/compose.yaml-40-    deploy: {resources: {reservations: {devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]}}}
+/opt/gpu-control/deploy/gpu-node/compose.yaml-41-    cap_add: [SYS_ADMIN]
+/opt/gpu-control/deploy/gpu-node/compose.yaml-42-    logging: *default-logging
+/opt/gpu-control/deploy/gpu-node/compose.yaml-43-
+/opt/gpu-control/deploy/gpu-node/compose.yaml-44-  alloy:
+/opt/gpu-control/deploy/gpu-node/compose.yaml-45-    image: grafana/alloy:v1.9.1
+/opt/gpu-control/deploy/gpu-node/compose.yaml-46-    restart: unless-stopped
+/opt/gpu-control/deploy/gpu-node/compose.yaml-47-    command: ["run", "/etc/alloy/config.alloy", "--storage.path=/var/lib/alloy/data"]
+/opt/gpu-control/deploy/gpu-node/compose.yaml-48-    environment: {NODE_ID: "${NODE_ID}", CONTROL_HOST: "${CONTROL_HOST}"}
+--
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-1-# WSL2-only runtime overlay. Use together with compose.yaml on Windows/WSL nodes.
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-2-services:
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml:3:  comfyui:
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-4-    # 12 GiB WSL runtime placement validated with the unchanged upstream
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-5-    # ImageClip workflow. These flags only control Comfy memory residency.
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-6-    command:
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-7-      - "--disable-dynamic-vram"
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-8-      - "--lowvram"
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-9-      - "--reserve-vram"
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-10-      - "3.0"
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-11-      - "--cpu-vae"
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-12-      - "--disable-async-offload"
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-13-      - "--disable-pinned-memory"
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-14-    environment:
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-15-      TRITON_LIBCUDA_PATH: /usr/lib/wsl/lib
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-16-    volumes:
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-17-      - /usr/lib/wsl/lib:/usr/lib/wsl/lib:ro
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-18-
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-19-  # WSL GPU telemetry is provided by the signed Node Agent. DCGM remains an
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-20-  # explicit opt-in because it is not part of the validated WSL baseline.
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-21-  dcgm-exporter:
+/opt/gpu-control/deploy/gpu-node/compose.wsl.yaml-22-    profiles: ["dcgm"]
+---CONTAINERS---
+gpu-control-node-comfyui-1|Up About a minute (healthy)|registry.local:5000/gpu-control/comfyui:projects-0.2.3
+gpu-control-node-blender-worker-1|Up About a minute|li3d/blender-worker:1.4.46-retopo-fused-fallback-v1
+gpu-control-node-node-agent-1|Up About a minute (healthy)|gpu-control-node-agent:1.5.12-4070-canary-v1
+---COMFY-LOG---
+2026-08-12T10:33:56.141769519Z [32m[INFO][0m got prompt
+2026-08-12T10:33:56.148553668Z [32m[INFO][0m [32mPrompt executed in 0.00 seconds[0m
+2026-08-12T10:34:03.863612606Z [32m[INFO][0m got prompt
+2026-08-12T10:34:08.937556964Z [32m[INFO][0m loaded partially; 7062.68 MB usable, 6820.02 MB loaded, 2176.00 MB offloaded, 240.00 MB buffer reserved, lowvram patches: 0
+2026-08-12T10:34:18.307183627Z 
+  0%|          | 0/6 [00:00<?, ?it/s]
+ 17%|鈻堚枊        | 1/6 [00:01<00:06,  1.22s/it]
+ 33%|鈻堚枅鈻堚枎      | 2/6 [00:02<00:04,  1.01s/it]
+ 50%|鈻堚枅鈻堚枅鈻?    | 3/6 [00:02<00:02,  1.06it/s]
+ 67%|鈻堚枅鈻堚枅鈻堚枅鈻?  | 4/6 [00:03<00:01,  1.09it/s]
+ 83%|鈻堚枅鈻堚枅鈻堚枅鈻堚枅鈻?| 5/6 [00:04<00:00,  1.10it/s]
+100%|鈻堚枅鈻堚枅鈻堚枅鈻堚枅鈻堚枅| 6/6 [00:05<00:00,  1.11it/s]
+100%|鈻堚枅鈻堚枅鈻堚枅鈻堚枅鈻堚枅| 6/6 [00:05<00:00,  1.07it/s]
+2026-08-12T10:34:18.307201527Z [32m[INFO][0m [32mPrompt executed in 14.44 seconds[0m
+2026-08-12T10:34:42.568351499Z [32m[INFO][0m got prompt
+2026-08-12T10:34:59.342068889Z [32m[INFO][0m 0 models unloaded.
+2026-08-12T10:34:59.364808414Z [32m[INFO][0m Unloaded partially: 6820.02 MB freed, 0.00 MB remains loaded, 720.00 MB buffer reserved, lowvram patches: 231
+2026-08-12T10:36:34.789105662Z 
+  0%|          | 0/6 [00:00<?, ?it/s]
+ 17%|鈻堚枊        | 1/6 [00:10<00:50, 10.02s/it]
+ 33%|鈻堚枅鈻堚枎      | 2/6 [00:19<00:38,  9.56s/it]
+ 50%|鈻堚枅鈻堚枅鈻?    | 3/6 [00:28<00:28,  9.40s/it]
+ 67%|鈻堚枅鈻堚枅鈻堚枅鈻?  | 4/6 [00:37<00:18,  9.34s/it]
+ 83%|鈻堚枅鈻堚枅鈻堚枅鈻堚枅鈻?| 5/6 [00:46<00:09,  9.32s/it]
+100%|鈻堚枅鈻堚枅鈻堚枅鈻堚枅鈻堚枅| 6/6 [00:56<00:00,  9.31s/it]
+100%|鈻堚枅鈻堚枅鈻堚枅鈻堚枅鈻堚枅| 6/6 [00:56<00:00,  9.38s/it]
+2026-08-12T10:36:34.789128362Z [32m[INFO][0m [32mPrompt executed in 112.22 seconds[0m
+2026-08-12T10:50:00.728291700Z [32m[INFO][0m 
+2026-08-12T10:50:00.728489000Z Prestartup times for custom nodes:
+2026-08-12T10:50:00.728493900Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/ComfyUI-Easy-Use
+2026-08-12T10:50:00.728495500Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/rgthree-comfy
+2026-08-12T10:50:00.728496500Z [32m[INFO][0m 
+2026-08-12T10:50:03.519715300Z [1m[33m[WARNING][0m WARNING: You need pytorch with cu130 or higher to use optimized CUDA operations.
+2026-08-12T10:50:03.519733900Z [32m[INFO][0m Found comfy_kitchen backend cuda: {'available': True, 'disabled': True, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope_split_half', 'apply_rope_split_half1', 'convrot_w4a4_linear', 'dequantize_convrot_w4a4_weight', 'dequantize_int8_convrot_weight', 'dequantize_int8_convrot_weight_dtype', 'dequantize_int8_simple', 'dequantize_int8_simple_dtype', 'dequantize_nvfp4', 'dequantize_per_tensor_fp8', 'gemv_awq_w4a16', 'prepare_int4_weight_for_int8_linear', 'quantize_and_rotate_rowwise', 'quantize_convrot_w4a4_weight', 'quantize_int8_convrot_weight', 'quantize_int8_rowwise', 'quantize_int8_tensorwise', 'quantize_mxfp8', 'quantize_nvfp4', 'quantize_per_tensor_fp8', 'quantize_svdquant_w4a4', 'rms_rope', 'rms_rope1', 'rms_rope_split_half', 'rms_rope_split_half1', 'scaled_mm_svdquant_w4a4', 'stochastic_rounding_fp8']}
+2026-08-12T10:50:03.519747600Z [32m[INFO][0m Found comfy_kitchen backend eager: {'available': True, 'disabled': False, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope_split_half', 'apply_rope_split_half1', 'convrot_w4a4_linear', 'dequantize_convrot_w4a4_weight', 'dequantize_int8_convrot_weight', 'dequantize_int8_convrot_weight_dtype', 'dequantize_int8_simple', 'dequantize_int8_simple_dtype', 'dequantize_mxfp8', 'dequantize_nvfp4', 'dequantize_per_tensor_fp8', 'gemv_awq_w4a16', 'int8_linear', 'prepare_int4_weight_for_int8_linear', 'quantize_and_rotate_rowwise', 'quantize_convrot_w4a4_weight', 'quantize_int8_convrot_weight', 'quantize_int8_rowwise', 'quantize_int8_tensorwise', 'quantize_mxfp8', 'quantize_nvfp4', 'quantize_per_tensor_fp8', 'quantize_svdquant_w4a4', 'rms_rope', 'rms_rope1', 'rms_rope_split_half', 'rms_rope_split_half1', 'scaled_mm_mxfp8', 'scaled_mm_nvfp4', 'scaled_mm_svdquant_w4a4', 'stochastic_rounding_fp8']}
+2026-08-12T10:50:03.519750100Z [32m[INFO][0m Found comfy_kitchen backend triton: {'available': True, 'disabled': True, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope_split_half', 'apply_rope_split_half1', 'dequantize_nvfp4', 'dequantize_per_tensor_fp8', 'int8_linear', 'quantize_and_rotate_rowwise', 'quantize_int8_rowwise', 'quantize_mxfp8', 'quantize_nvfp4', 'quantize_per_tensor_fp8']}
+2026-08-12T10:50:03.526562000Z [32m[INFO][0m Checkpoint files will always be loaded safely.
+2026-08-12T10:50:03.705172600Z [32m[INFO][0m Total VRAM 12282 MB, total RAM 32097 MB
+2026-08-12T10:50:03.705202200Z [32m[INFO][0m pytorch version: 2.7.1+cu128
+2026-08-12T10:50:03.705328800Z [32m[INFO][0m Set vram state to: LOW_VRAM
+2026-08-12T10:50:03.705481400Z [32m[INFO][0m Device: cuda:0 NVIDIA GeForce RTX 4070 Ti : cudaMallocAsync
+2026-08-12T10:50:03.949631300Z [32m[INFO][0m Using pytorch attention
+2026-08-12T10:50:05.925289900Z [32m[INFO][0m Python version: 3.11.13 (main, Jul 22 2026, 09:01:13) [GCC 13.3.0]
+2026-08-12T10:50:05.925308300Z [32m[INFO][0m ComfyUI version: 0.28.0
+2026-08-12T10:50:05.925583200Z [32m[INFO][0m comfy-aimdo version: 0.4.10
+2026-08-12T10:50:05.926065700Z [32m[INFO][0m comfy-kitchen version: 0.2.20
+2026-08-12T10:50:05.926074300Z [1m[33m[WARNING][0m Dynamic vram disabled with argument. If you have any issues with dynamic vram enabled please give us a detailed reports as this argument will be removed soon. If you use gguf we recommend keeping dynamic vram enabled and using native ComfyUI model formats instead. ComfyUI native formats like fp8 will be faster even if they are larger than your memory.
+2026-08-12T10:50:05.928101800Z [32m[INFO][0m comfyui-frontend-package version: 1.45.21
+2026-08-12T10:50:05.928107600Z [32m[INFO][0m comfyui-workflow-templates version: 0.11.9
+2026-08-12T10:50:05.928109300Z [32m[INFO][0m comfyui-embedded-docs version: 0.5.8
+2026-08-12T10:50:05.928147200Z [32m[INFO][0m comfy-kitchen version: 0.2.20
+2026-08-12T10:50:05.928153100Z [32m[INFO][0m comfy-aimdo version: 0.4.10
+2026-08-12T10:50:05.928897100Z [32m[INFO][0m [Prompt Server] web root: /opt/python/lib/python3.11/site-packages/comfyui_frontend_package/static
+2026-08-12T10:50:05.929313700Z [32m[INFO][0m Asset seeder disabled
+2026-08-12T10:50:06.348924500Z [32m[INFO][0m No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+2026-08-12T10:50:07.258248800Z [32m[INFO][0m ComfyUI-GGUF: Partial torch compile only, consider updating pytorch
+2026-08-12T10:50:07.342886200Z [32m[INFO][0m ======================================== ComfyUI-nunchaku Initialization ========================================
+2026-08-12T10:50:07.343310000Z [32m[INFO][0m Nunchaku version: 1.0.0
+2026-08-12T10:50:07.343481800Z [32m[INFO][0m ComfyUI-nunchaku version: 1.0.1
+2026-08-12T10:50:16.153763100Z /opt/python/lib/python3.11/site-packages/albumentations/check_version.py:147: UserWarning: Error fetching version info <urlopen error [Errno -3] Temporary failure in name resolution>
+2026-08-12T10:50:16.153780800Z   data = fetch_version_info()
+2026-08-12T10:50:16.153782000Z /opt/python/lib/python3.11/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+2026-08-12T10:50:16.153782900Z   warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+2026-08-12T10:50:16.153783800Z [32m[INFO][0m =================================================================================================================
+2026-08-12T10:50:16.254650100Z [32m[INFO][0m 
+2026-08-12T10:50:16.254663900Z Import times for custom nodes:
+2026-08-12T10:50:16.254664900Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/websocket_image_save.py
+2026-08-12T10:50:16.254665800Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/ComfyLiterals
+2026-08-12T10:50:16.254666700Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/ComfyUI-Inpaint-CropAndStitch
+2026-08-12T10:50:16.254667400Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/haoze-LiClick
+2026-08-12T10:50:16.254668500Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/ComfyUI-GGUF
+2026-08-12T10:50:16.254669200Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/rgthree-comfy
+2026-08-12T10:50:16.254669900Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/ComfyUI-KJNodes
+2026-08-12T10:50:16.254670600Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/ComfyUI-Easy-Use
+2026-08-12T10:50:16.254671200Z [32m[INFO][0m    0.1 seconds: /opt/comfyui/custom_nodes/Cherry_lizi
+2026-08-12T10:50:16.254671900Z [32m[INFO][0m    0.8 seconds: /opt/comfyui/custom_nodes/ComfyUI-SeedVR2_VideoUpscaler
+2026-08-12T10:50:16.254680800Z [32m[INFO][0m    8.8 seconds: /opt/comfyui/custom_nodes/ComfyUI-nunchaku
+2026-08-12T10:50:16.254681600Z [32m[INFO][0m 
+2026-08-12T10:50:16.258859700Z [32m[INFO][0m Context impl SQLiteImpl.
+2026-08-12T10:50:16.258863800Z [32m[INFO][0m Will assume non-transactional DDL.
+2026-08-12T10:50:16.300223500Z [32m[INFO][0m Using RAM pressure cache.
+2026-08-12T10:50:16.300431300Z [32m[INFO][0m Starting server
+2026-08-12T10:50:16.300433500Z 
+2026-08-12T10:50:16.300596300Z [32m[INFO][0m To see the GUI go to: http://0.0.0.0:8188
+2026-08-12T10:56:19.968800200Z [32m[INFO][0m 
+2026-08-12T10:56:19.969066200Z Prestartup times for custom nodes:
+2026-08-12T10:56:19.969071600Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/rgthree-comfy
+2026-08-12T10:56:19.969073100Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/ComfyUI-Easy-Use
+2026-08-12T10:56:19.969074100Z [32m[INFO][0m 
+2026-08-12T10:56:22.879146800Z [1m[33m[WARNING][0m WARNING: You need pytorch with cu130 or higher to use optimized CUDA operations.
+2026-08-12T10:56:22.879167600Z [32m[INFO][0m Found comfy_kitchen backend triton: {'available': True, 'disabled': True, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope_split_half', 'apply_rope_split_half1', 'dequantize_nvfp4', 'dequantize_per_tensor_fp8', 'int8_linear', 'quantize_and_rotate_rowwise', 'quantize_int8_rowwise', 'quantize_mxfp8', 'quantize_nvfp4', 'quantize_per_tensor_fp8']}
+2026-08-12T10:56:22.879172100Z [32m[INFO][0m Found comfy_kitchen backend eager: {'available': True, 'disabled': False, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope_split_half', 'apply_rope_split_half1', 'convrot_w4a4_linear', 'dequantize_convrot_w4a4_weight', 'dequantize_int8_convrot_weight', 'dequantize_int8_convrot_weight_dtype', 'dequantize_int8_simple', 'dequantize_int8_simple_dtype', 'dequantize_mxfp8', 'dequantize_nvfp4', 'dequantize_per_tensor_fp8', 'gemv_awq_w4a16', 'int8_linear', 'prepare_int4_weight_for_int8_linear', 'quantize_and_rotate_rowwise', 'quantize_convrot_w4a4_weight', 'quantize_int8_convrot_weight', 'quantize_int8_rowwise', 'quantize_int8_tensorwise', 'quantize_mxfp8', 'quantize_nvfp4', 'quantize_per_tensor_fp8', 'quantize_svdquant_w4a4', 'rms_rope', 'rms_rope1', 'rms_rope_split_half', 'rms_rope_split_half1', 'scaled_mm_mxfp8', 'scaled_mm_nvfp4', 'scaled_mm_svdquant_w4a4', 'stochastic_rounding_fp8']}
+2026-08-12T10:56:22.879176600Z [32m[INFO][0m Found comfy_kitchen backend cuda: {'available': True, 'disabled': True, 'unavailable_reason': None, 'capabilities': ['adaln', 'apply_rope', 'apply_rope1', 'apply_rope_split_half', 'apply_rope_split_half1', 'convrot_w4a4_linear', 'dequantize_convrot_w4a4_weight', 'dequantize_int8_convrot_weight', 'dequantize_int8_convrot_weight_dtype', 'dequantize_int8_simple', 'dequantize_int8_simple_dtype', 'dequantize_nvfp4', 'dequantize_per_tensor_fp8', 'gemv_awq_w4a16', 'prepare_int4_weight_for_int8_linear', 'quantize_and_rotate_rowwise', 'quantize_convrot_w4a4_weight', 'quantize_int8_convrot_weight', 'quantize_int8_rowwise', 'quantize_int8_tensorwise', 'quantize_mxfp8', 'quantize_nvfp4', 'quantize_per_tensor_fp8', 'quantize_svdquant_w4a4', 'rms_rope', 'rms_rope1', 'rms_rope_split_half', 'rms_rope_split_half1', 'scaled_mm_svdquant_w4a4', 'stochastic_rounding_fp8']}
+2026-08-12T10:56:22.885972800Z [32m[INFO][0m Checkpoint files will always be loaded safely.
+2026-08-12T10:56:23.030072600Z [32m[INFO][0m Total VRAM 12282 MB, total RAM 32097 MB
+2026-08-12T10:56:23.030088500Z [32m[INFO][0m pytorch version: 2.7.1+cu128
+2026-08-12T10:56:23.030217900Z [32m[INFO][0m Set vram state to: LOW_VRAM
+2026-08-12T10:56:23.030383800Z [32m[INFO][0m Device: cuda:0 NVIDIA GeForce RTX 4070 Ti : cudaMallocAsync
+2026-08-12T10:56:23.261552800Z [32m[INFO][0m Using pytorch attention
+2026-08-12T10:56:25.213964500Z [32m[INFO][0m Python version: 3.11.13 (main, Jul 22 2026, 09:01:13) [GCC 13.3.0]
+2026-08-12T10:56:25.213981200Z [32m[INFO][0m ComfyUI version: 0.28.0
+2026-08-12T10:56:25.214517800Z [32m[INFO][0m comfy-aimdo version: 0.4.10
+2026-08-12T10:56:25.214858100Z [32m[INFO][0m comfy-kitchen version: 0.2.20
+2026-08-12T10:56:25.214866600Z [1m[33m[WARNING][0m Dynamic vram disabled with argument. If you have any issues with dynamic vram enabled please give us a detailed reports as this argument will be removed soon. If you use gguf we recommend keeping dynamic vram enabled and using native ComfyUI model formats instead. ComfyUI native formats like fp8 will be faster even if they are larger than your memory.
+2026-08-12T10:56:25.216834700Z [32m[INFO][0m comfyui-frontend-package version: 1.45.21
+2026-08-12T10:56:25.216839800Z [32m[INFO][0m comfyui-workflow-templates version: 0.11.9
+2026-08-12T10:56:25.216841000Z [32m[INFO][0m comfyui-embedded-docs version: 0.5.8
+2026-08-12T10:56:25.216841700Z [32m[INFO][0m comfy-kitchen version: 0.2.20
+2026-08-12T10:56:25.216842400Z [32m[INFO][0m comfy-aimdo version: 0.4.10
+2026-08-12T10:56:25.217735500Z [32m[INFO][0m [Prompt Server] web root: /opt/python/lib/python3.11/site-packages/comfyui_frontend_package/static
+2026-08-12T10:56:25.218246500Z [32m[INFO][0m Asset seeder disabled
+2026-08-12T10:56:25.638321800Z [32m[INFO][0m No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+2026-08-12T10:56:26.583404500Z [32m[INFO][0m ComfyUI-GGUF: Partial torch compile only, consider updating pytorch
+2026-08-12T10:56:26.671913600Z [32m[INFO][0m ======================================== ComfyUI-nunchaku Initialization ========================================
+2026-08-12T10:56:26.672483000Z [32m[INFO][0m Nunchaku version: 1.0.0
+2026-08-12T10:56:26.672962100Z [32m[INFO][0m ComfyUI-nunchaku version: 1.0.1
+2026-08-12T10:56:27.847856400Z /opt/python/lib/python3.11/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+2026-08-12T10:56:27.847876300Z   warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+2026-08-12T10:56:27.847885100Z [32m[INFO][0m =================================================================================================================
+2026-08-12T10:56:27.950607300Z [32m[INFO][0m 
+2026-08-12T10:56:27.950627800Z Import times for custom nodes:
+2026-08-12T10:56:27.950629700Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/websocket_image_save.py
+2026-08-12T10:56:27.950631300Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/ComfyUI-Inpaint-CropAndStitch
+2026-08-12T10:56:27.950632500Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/ComfyLiterals
+2026-08-12T10:56:27.950633600Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/haoze-LiClick
+2026-08-12T10:56:27.950634800Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/ComfyUI-GGUF
+2026-08-12T10:56:27.950635900Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/rgthree-comfy
+2026-08-12T10:56:27.950637000Z [32m[INFO][0m    0.0 seconds: /opt/comfyui/custom_nodes/ComfyUI-KJNodes
+2026-08-12T10:56:27.950638200Z [32m[INFO][0m    0.1 seconds: /opt/comfyui/custom_nodes/ComfyUI-Easy-Use
+2026-08-12T10:56:27.950639300Z [32m[INFO][0m    0.1 seconds: /opt/comfyui/custom_nodes/Cherry_lizi
+2026-08-12T10:56:27.950640400Z [32m[INFO][0m    0.9 seconds: /opt/comfyui/custom_nodes/ComfyUI-SeedVR2_VideoUpscaler
+2026-08-12T10:56:27.950641600Z [32m[INFO][0m    1.2 seconds: /opt/comfyui/custom_nodes/ComfyUI-nunchaku
+2026-08-12T10:56:27.950642800Z [32m[INFO][0m 
+2026-08-12T10:56:27.955051700Z [32m[INFO][0m Context impl SQLiteImpl.
+2026-08-12T10:56:27.955071400Z [32m[INFO][0m Will assume non-transactional DDL.
+2026-08-12T10:56:27.993244800Z [32m[INFO][0m Using RAM pressure cache.
+2026-08-12T10:56:27.993420400Z [32m[INFO][0m Starting server
+2026-08-12T10:56:27.993426500Z 
+2026-08-12T10:56:27.993580000Z [32m[INFO][0m To see the GUI go to: http://0.0.0.0:8188
+---AGENT-LOG---
+2026-08-12T10:48:38.717593728Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "service": "node-agent", "environment": "production", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:48:38.717193Z", "module": "main"}
+2026-08-12T10:48:43.243592074Z INFO:     127.0.0.1:57764 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:48:51.773445134Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "service": "node-agent", "environment": "production", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:48:51.773107Z", "module": "main"}
+2026-08-12T10:48:53.312046364Z INFO:     127.0.0.1:42066 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:49:03.388234368Z INFO:     127.0.0.1:55342 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:49:04.829786407Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "service": "node-agent", "environment": "production", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:49:04.829383Z", "module": "main"}
+2026-08-12T10:49:13.448206155Z INFO:     127.0.0.1:51288 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:49:17.917805515Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "service": "node-agent", "environment": "production", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:49:17.917406Z", "module": "main"}
+2026-08-12T10:49:23.508252309Z INFO:     127.0.0.1:39548 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:49:30.973525104Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "service": "node-agent", "environment": "production", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:49:30.973158Z", "module": "main"}
+2026-08-12T10:49:33.578880564Z INFO:     127.0.0.1:43160 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:49:36.984898802Z INFO:     Shutting down
+2026-08-12T10:49:37.085252287Z INFO:     Waiting for application shutdown.
+2026-08-12T10:49:37.085463190Z INFO:     Application shutdown complete.
+2026-08-12T10:49:37.085512691Z INFO:     Finished server process [1]
+2026-08-12T10:50:00.350322300Z INFO:     Started server process [1]
+2026-08-12T10:50:00.351443400Z INFO:     Waiting for application startup.
+2026-08-12T10:50:00.353918500Z INFO:     Application startup complete.
+2026-08-12T10:50:00.357651900Z INFO:     Uvicorn running on http://0.0.0.0:9201 (Press CTRL+C to quit)
+2026-08-12T10:50:05.477822400Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "environment": "production", "service": "node-agent", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:50:05.477576Z", "module": "main"}
+2026-08-12T10:50:09.868574500Z INFO:     127.0.0.1:41000 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:50:19.934963700Z INFO:     127.0.0.1:51730 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:50:20.488845800Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "environment": "production", "service": "node-agent", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:50:20.488668Z", "module": "main"}
+2026-08-12T10:50:30.003081316Z INFO:     127.0.0.1:41634 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:50:35.497652019Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "environment": "production", "service": "node-agent", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:50:35.497454Z", "module": "main"}
+2026-08-12T10:50:40.062659006Z INFO:     127.0.0.1:58206 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:50:50.128718579Z INFO:     127.0.0.1:52908 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:50:50.504058737Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "environment": "production", "service": "node-agent", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:50:50.503690Z", "module": "main"}
+2026-08-12T10:51:00.191966750Z INFO:     127.0.0.1:56860 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:51:05.518288932Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "environment": "production", "service": "node-agent", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:51:05.518013Z", "module": "main"}
+2026-08-12T10:51:10.257298524Z INFO:     127.0.0.1:57650 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:51:20.327539309Z INFO:     127.0.0.1:44290 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:51:20.525014643Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "environment": "production", "service": "node-agent", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:51:20.524832Z", "module": "main"}
+2026-08-12T10:51:30.393975157Z INFO:     127.0.0.1:39210 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:51:35.533945768Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "environment": "production", "service": "node-agent", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:51:35.533522Z", "module": "main"}
+2026-08-12T10:51:40.454817173Z INFO:     127.0.0.1:34362 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:51:50.532184929Z INFO:     127.0.0.1:49606 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:51:50.540991419Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "environment": "production", "service": "node-agent", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:51:50.540846Z", "module": "main"}
+2026-08-12T10:52:00.590932744Z INFO:     127.0.0.1:42868 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:52:05.559232281Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "environment": "production", "service": "node-agent", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:52:05.558803Z", "module": "main"}
+2026-08-12T10:52:10.667325329Z INFO:     127.0.0.1:60942 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:52:20.570295751Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "environment": "production", "service": "node-agent", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:52:20.569969Z", "module": "main"}
+2026-08-12T10:52:20.731730697Z INFO:     127.0.0.1:56858 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:52:30.791913707Z INFO:     127.0.0.1:56158 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:52:35.579940058Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "environment": "production", "service": "node-agent", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:52:35.579638Z", "module": "main"}
+2026-08-12T10:52:40.849667148Z INFO:     127.0.0.1:43756 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:52:50.589627631Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "environment": "production", "service": "node-agent", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:52:50.589305Z", "module": "main"}
+2026-08-12T10:52:50.927470892Z INFO:     127.0.0.1:48442 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:53:00.991046760Z INFO:     127.0.0.1:52590 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:53:05.611324750Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "environment": "production", "service": "node-agent", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:53:05.610968Z", "module": "main"}
+2026-08-12T10:53:11.066842447Z INFO:     127.0.0.1:53574 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:53:20.619967482Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "environment": "production", "service": "node-agent", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:53:20.619780Z", "module": "main"}
+2026-08-12T10:53:21.134241011Z INFO:     127.0.0.1:33850 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:53:31.191135683Z INFO:     127.0.0.1:52530 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:53:35.628817478Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "environment": "production", "service": "node-agent", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:53:35.628540Z", "module": "main"}
+2026-08-12T10:53:41.259056695Z INFO:     127.0.0.1:38718 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:53:50.639949954Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "environment": "production", "service": "node-agent", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:53:50.639639Z", "module": "main"}
+2026-08-12T10:53:51.318499476Z INFO:     127.0.0.1:42824 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:53:54.034660382Z INFO:     Shutting down
+2026-08-12T10:53:54.135165207Z INFO:     Waiting for application shutdown.
+2026-08-12T10:53:54.135398909Z INFO:     Application shutdown complete.
+2026-08-12T10:53:54.135406509Z INFO:     Finished server process [1]
+2026-08-12T10:56:19.616145800Z INFO:     Started server process [1]
+2026-08-12T10:56:19.617391000Z INFO:     Waiting for application startup.
+2026-08-12T10:56:19.619530300Z INFO:     Application startup complete.
+2026-08-12T10:56:19.622502500Z INFO:     Uvicorn running on http://0.0.0.0:9201 (Press CTRL+C to quit)
+2026-08-12T10:56:24.756189000Z {"node_id": "worker-4070ti-animation-host-01", "error_type": "URLError", "event": "node.heartbeat_failed", "environment": "production", "service": "node-agent", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "warning", "timestamp": "2026-08-12T10:56:24.755968Z", "module": "main"}
+2026-08-12T10:56:28.329946300Z INFO:     172.24.0.1:10709 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:56:29.133955200Z INFO:     127.0.0.1:43736 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:56:29.533026600Z INFO:     172.24.0.1:10711 - "GET /v1/identity HTTP/1.1" 503 Service Unavailable
+2026-08-12T10:56:29.545653600Z INFO:     172.24.0.1:10713 - "GET /v1/identity HTTP/1.1" 503 Service Unavailable
+2026-08-12T10:56:33.545440000Z INFO:     172.24.0.1:10739 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:56:34.775127000Z {"node_id": "worker-4070ti-animation-host-01", "source_ip": "10.3.34.238", "base_url": "http://10.3.34.238:8188", "event": "node.heartbeat_accepted", "environment": "production", "service": "node-agent", "request_id": null, "trace_id": null, "job_id": null, "tenant_id": null, "workflow_key": null, "workflow_version": null, "prompt_id": null, "attempt": null, "duration_ms": null, "error_code": null, "level": "info", "timestamp": "2026-08-12T10:56:34.774830Z", "module": "main"}
+2026-08-12T10:56:35.067969300Z INFO:     172.24.0.1:10742 - "GET /v1/identity HTTP/1.1" 200 OK
+2026-08-12T10:56:39.192719300Z INFO:     127.0.0.1:57092 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:56:40.300849100Z INFO:     172.24.0.1:10755 - "GET /v1/identity HTTP/1.1" 200 OK
+2026-08-12T10:56:40.301819900Z INFO:     172.24.0.1:10757 - "GET /v1/system-metrics HTTP/1.1" 200 OK
+2026-08-12T10:56:40.324097600Z INFO:     172.24.0.1:10756 - "GET /v1/gpu-metrics HTTP/1.1" 200 OK
+2026-08-12T10:56:46.060994884Z INFO:     172.24.0.1:10765 - "GET /v1/identity HTTP/1.1" 200 OK
+2026-08-12T10:56:46.080558321Z INFO:     172.24.0.1:10767 - "GET /v1/gpu-metrics HTTP/1.1" 200 OK
+2026-08-12T10:56:47.113706630Z INFO:     172.24.0.1:10773 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:56:49.259811262Z INFO:     127.0.0.1:59010 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:56:51.707047169Z INFO:     172.24.0.1:10778 - "GET /v1/identity HTTP/1.1" 200 OK
+2026-08-12T10:56:51.709623991Z INFO:     172.24.0.1:10782 - "GET /v1/system-metrics HTTP/1.1" 200 OK
+2026-08-12T10:56:51.728291150Z INFO:     172.24.0.1:10781 - "GET /v1/gpu-metrics HTTP/1.1" 200 OK
+2026-08-12T10:56:57.070945124Z INFO:     172.24.0.1:10789 - "GET /v1/identity HTTP/1.1" 200 OK
+2026-08-12T10:56:57.093128485Z INFO:     172.24.0.1:10788 - "GET /v1/gpu-metrics HTTP/1.1" 200 OK
+2026-08-12T10:56:59.324039588Z INFO:     127.0.0.1:43984 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:57:02.151663830Z INFO:     172.24.0.1:10793 - "GET /v1/identity HTTP/1.1" 200 OK
+2026-08-12T10:57:02.153160640Z INFO:     172.24.0.1:10796 - "GET /v1/system-metrics HTTP/1.1" 200 OK
+2026-08-12T10:57:02.174201390Z INFO:     172.24.0.1:10795 - "GET /v1/gpu-metrics HTTP/1.1" 200 OK
+2026-08-12T10:57:07.967203105Z INFO:     172.24.0.1:10807 - "GET /v1/identity HTTP/1.1" 200 OK
+2026-08-12T10:57:07.992611532Z INFO:     172.24.0.1:10810 - "GET /v1/gpu-metrics HTTP/1.1" 200 OK
+2026-08-12T10:57:09.394838964Z INFO:     127.0.0.1:52186 - "GET /health/ready HTTP/1.1" 200 OK
+2026-08-12T10:57:13.057148867Z INFO:     172.24.0.1:10812 - "GET /v1/identity HTTP/1.1" 200 OK
+2026-08-12T10:57:13.059277883Z INFO:     172.24.0.1:10815 - "GET /v1/system-metrics HTTP/1.1" 200 OK
+2026-08-12T10:57:13.084796172Z INFO:     172.24.0.1:10813 - "GET /v1/gpu-metrics HTTP/1.1" 200 OK
+2026-08-12T10:57:18.511937445Z INFO:     172.24.0.1:10822 - "GET /v1/identity HTTP/1.1" 200 OK
+2026-08-12T10:57:18.532270097Z INFO:     172.24.0.1:10824 - "GET /v1/gpu-metrics HTTP/1.1" 200 OK
+2026-08-12T10:57:19.452731262Z INFO:     127.0.0.1:55624 - "GET /health/ready HTTP/1.1" 200 OK
+---DXG---
+[Wed Aug 12 18:56:17 2026] hv_vmbus: registering driver dxgkrnl
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_is_feature_enabled: Ioctl failed: -22
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -22
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -22
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -22
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -2
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -2
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -2
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -2
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -2
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -2
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -2
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -2
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -2
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -2
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -2
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -2
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -2
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -2
+[Wed Aug 12 18:56:17 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -2
+[Wed Aug 12 18:56:18 2026] misc dxg: dxgk: dxgkio_query_adapter_info: Ioctl failed: -2
+[Wed Aug 12 18:56:22 2026] misc dxg: dxgk: dxgkio_is_feature_enabled: Ioctl failed: -75
+[Wed Aug 12 18:56:22 2026] memcpy: detected field-spanning write (size 4) of single field "current_pos" at drivers/hv/dxgkrnl/dxgvmbus.c:3095 (size 0)
+[Wed Aug 12 18:56:22 2026] WARNING: CPU: 1 PID: 1020 at drivers/hv/dxgkrnl/dxgvmbus.c:3095 dxgvmb_send_wait_sync_object_gpu+0x271/0x290
+[Wed Aug 12 18:56:22 2026] RIP: 0010:dxgvmb_send_wait_sync_object_gpu+0x271/0x290
+[Wed Aug 12 18:56:22 2026]  dxgkio_wait_sync_object_gpu+0x296/0x3f0
+[Wed Aug 12 18:56:22 2026]  dxgk_ioctl+0x66/0x110
+[Wed Aug 12 18:56:22 2026]  dxgk_unlocked_ioctl+0x12/0x20

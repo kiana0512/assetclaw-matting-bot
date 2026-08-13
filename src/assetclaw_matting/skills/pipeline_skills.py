@@ -254,7 +254,7 @@ def preview_run_start_confirmation(arguments: dict[str, Any], confirmation_id: s
     preview = run_preview(**arguments)
     lines = [
         "请确认是否开始动画自动化流程：",
-        "步骤：抽帧 -> ComfyUI 抠图 -> Cherry 平滑",
+        "步骤：抽帧 -> GPU Control 抠图 -> Cherry 平滑",
         f"工作区：{preview['workspace_root']}",
         f"视频下载：{preview['input_dir']}",
         f"抽帧输出：{preview['frame_output_dir']}",
@@ -460,7 +460,7 @@ def _worker(run_id: str) -> None:
 
             matte_size = _workflow_output_size(row["workflow_path"])
             size_line = f"本次抠图输出尺寸：{matte_size}" if matte_size else "本次抠图输出尺寸：未能从 workflow 自动识别"
-            _notify(run_id, f"动画自动化流程：抽帧完成，开始 ComfyUI 抠图\n已登记视频：{status.get('manifest_count', 0)} 条\n{size_line}\n工作流：{row['workflow_path']}")
+            _notify(run_id, f"动画自动化流程：抽帧完成，开始 GPU Control 抠图\n已登记视频：{status.get('manifest_count', 0)} 条\n{size_line}\n工作流：{row['workflow_path']}")
             for route_index, route in enumerate(comfy_routes):
                 frames_dir = route / "frames" if (route / "frames").is_dir() else Path(row["frame_output_dir"])
                 matte_dir = route / "matte" if (route / "matte").parent.exists() else Path(row["matte_output_dir"])

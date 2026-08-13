@@ -807,7 +807,7 @@ def _run_comfyui(run: dict[str, Any]) -> None:
     requested_stage = str(run.get("stage") or "matting")
     if not local_pipeline_serialization_required():
         _mark(run, "RUNNING", requested_stage)
-        _append_log(run, "混合抠图路由已启用：本业务任务保持完整，按本机/集群容量分配")
+        _append_log(run, "GPU Control 统一抠图已启用：本业务任务保持完整并由集群调度")
         _save(run)
         _run_comfyui_unlocked(run)
         return
@@ -847,7 +847,7 @@ def _run_comfyui_unlocked(run: dict[str, Any]) -> None:
         children.setdefault("comfyui_run_ids", []).append(child_id)
         _append_log(
             run,
-            f"{'GPU 失败帧补算' if repair_attempt else 'ComfyUI 抠图任务'}已启动：{child_id}",
+            f"{'GPU 失败帧补算' if repair_attempt else 'GPU Control 抠图任务'}已启动：{child_id}",
         )
         _save(run)
         while True:

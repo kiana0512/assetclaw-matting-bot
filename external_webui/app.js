@@ -399,7 +399,7 @@ function closeCommandPalette() {
 
 function seedAgentFlowPrompt() {
   switchView("chat");
-  els.chatInput.value = "请帮我生成一个自定义动画自动化流程 JSON：步骤包括抽帧并剔除关键帧、ComfyUI 抠图、Cherry 平滑；每一步都要给 skill 和 arguments，路径使用 ${videos}/${frames}/${matte}/${smooth} 变量，并说明哪些参数建议我在 WebUI 里手动改。";
+  els.chatInput.value = "请帮我生成一个自定义动画自动化流程 JSON：步骤包括抽帧并剔除关键帧、GPU Control 集群抠图、Cherry 平滑；每一步都要给 skill 和 arguments，路径使用 ${videos}/${frames}/${matte}/${smooth} 变量，并说明哪些参数建议我在 WebUI 里手动改。";
   els.chatInput.focus();
   toast("已把流程生成提示放到对话框", "ok");
 }
@@ -666,7 +666,7 @@ function renderTimeline(run = {}) {
   const status = run.status || "";
   const steps = [
     ["frame", "1. 抽帧 / 下载", run.frame_run_id || run.frame?.run_id],
-    ["comfyui", "2. ComfyUI 抠图", run.comfyui_run_id || run.comfyui?.run_id],
+    ["comfyui", "2. GPU Control 抠图", run.comfyui_run_id || run.comfyui?.run_id],
     ["cherry", "3. Cherry 平滑", run.cherry_run_id || run.cherry?.run_id],
     ["done", "4. 输出 / 复核", status],
   ];

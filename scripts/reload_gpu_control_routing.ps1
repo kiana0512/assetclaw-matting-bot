@@ -81,5 +81,5 @@ if (@($workerChecks | Where-Object { -not $_.alive }).Count -gt 0) {
     feishu_ws = "running"
     detached_workers_checked = @($workerChecks).Count
     detached_workers_alive = @($workerChecks | Where-Object { $_.alive }).Count
-    matting_backend_mode = "hybrid"
+    matting_backend_mode = "gpu_control"
 }

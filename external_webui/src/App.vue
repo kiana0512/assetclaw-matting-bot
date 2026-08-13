@@ -13,7 +13,7 @@ const FINISHED = new Set(["DONE", "FAILED", "CANCELED", "BLOCKED", "DONE_WITH_ER
 const STAGE_LABELS = {
   feishu_download: "飞书下载",
   frame_extract: "抽帧",
-  matting: "ComfyUI 抠图",
+  matting: "GPU Control 抠图",
   local_oom_gpu_fallback_queued: "GPU 集群接管中",
   waiting_character: "等待角色确认",
   cherry_smooth: "Cherry 平滑",
@@ -1334,7 +1334,7 @@ function directStageProgress(run, isImage) {
       };
     }
     return {
-      label: remote ? "GPU Control 抠图" : "ComfyUI 抠图",
+      label: "GPU Control 抠图",
       progress,
       overall: Math.min(60, overall),
       count: `${comfyDone}/${comfyTotal || "-"}`,

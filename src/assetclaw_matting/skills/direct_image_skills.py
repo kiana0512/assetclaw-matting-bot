@@ -455,9 +455,6 @@ def _worker(run_id: str) -> None:
                     return
                 if _finish_after_confirmed_delivery(run):
                     return
-                if _prepare_local_oom_gpu_fallback(run, exc):
-                    _WORKERS.add(run_id)
-                    continue
                 if not _prepare_full_pipeline_retry(run, exc):
                     run["status"] = "FAILED"
                     run["stage"] = "recovery_exhausted"
@@ -475,101 +472,6 @@ def _worker(run_id: str) -> None:
         if hasattr(_RUN_CONTEXT, "failed_run"):
             delattr(_RUN_CONTEXT, "failed_run")
         _WORKERS.discard(run_id)
-
-
-_GPU_OOM_MARKERS = (
-    "torch.outofmemoryerror",
-    "cuda out of memory",
-    "cuda error: out of memory",
-    "cudnn_status_alloc_failed",
-    "cublas_status_alloc_failed",
-    "allocation on device",
-    "ran out of memory",
-)
-
-
-def _is_local_gpu_oom(run: dict[str, Any], error: Exception | str) -> bool:
-    """Return true only for a local ComfyUI GPU-memory failure during matting."""
-
-    if str(run.get("stage") or "").strip().lower() != "matting":
-        return False
-    children = run.get("children") if isinstance(run.get("children"), dict) else {}
-    child = children.get("comfyui") if isinstance(children.get("comfyui"), dict) else {}
-    selected_backend = str(
-        child.get("backend") or run.get("matting_backend") or "local"
-    ).strip().lower()
-    if selected_backend not in {"local", "comfyui"}:
-        return False
-    if str(child.get("last_error_kind") or "").strip().upper() == "GPU_OOM":
-        return True
-    detail_payload = child.get("last_error_detail") if isinstance(child.get("last_error_detail"), dict) else {}
-    if str(detail_payload.get("kind") or "").strip().upper() == "GPU_OOM":
-        return True
-    detail = " ".join(
-        str(value or "")
-        for value in (
-            error,
-            child.get("last_error"),
-            child.get("error"),
-            detail_payload.get("exception_type"),
-            detail_payload.get("message"),
-        )
-    ).casefold()
-    return any(marker in detail for marker in _GPU_OOM_MARKERS)
-
-
-def _prepare_local_oom_gpu_fallback(run: dict[str, Any], error: Exception | str) -> bool:
-    """Move one local OOM task to GPU Control without changing normal routing."""
-
-    if not _is_local_gpu_oom(run, error):
-        return False
-    fallback = run.setdefault("local_oom_gpu_fallback", {})
-    if bool(fallback.get("attempted")):
-        return False
-
-    fallback.update(
-        {
-            "attempted": True,
-            "triggered_at": _now(),
-            "from_backend": "local",
-            "to_backend": "gpu_control",
-            "trigger_stage": str(run.get("stage") or ""),
-            "error": str(error),
-        }
-    )
-    try:
-        fallback["source_recovery"] = _ensure_original_images(run)
-        _reset_outputs_for_full_retry(run)
-    except Exception as recovery_error:
-        fallback["preparation_error"] = str(recovery_error)
-        _append_log(run, f"本机显存不足，但切换 GPU 集群前的原图恢复失败：{recovery_error}")
-        _save(run)
-        return False
-
-    previous_children = run.get("children") if isinstance(run.get("children"), dict) else {}
-    fallback["previous_comfyui_run_id"] = str(previous_children.get("comfyui_run_id") or "")
-    run["children"] = {}
-    run["matting_backend"] = "gpu_control"
-    run["status"] = "QUEUED"
-    run["stage"] = "local_oom_gpu_fallback_queued"
-    run["error"] = ""
-    run["worker_pid"] = os.getpid()
-    for item in run.get("images") or []:
-        for key in (
-            "matte_result_path",
-            "postprocessed_result_path",
-            "comparison_path",
-            "result_path",
-            "cherry_sequence_group",
-            "color_correction_run_id",
-        ):
-            item[key] = ""
-        item["color_correction_status"] = "READY" if item.get("color_reference_path") else ""
-        item["position_alignment_status"] = "READY" if item.get("position_alignment_enabled") else ""
-        item["reference_postprocess_status"] = "READY" if item.get("color_reference_path") else ""
-    _append_log(run, "检测到本机 4070 Ti 显存不足；本任务自动切换至 GPU 集群重新抠图。")
-    _save(run)
-    return True
 
 
 def _prepare_full_pipeline_retry(run: dict[str, Any], error: Exception) -> bool:
@@ -973,7 +875,7 @@ def _run_comfyui(run: dict[str, Any]) -> None:
         children = run.setdefault("children", {})
         children["comfyui_run_id"] = child_id
         children.setdefault("comfyui_run_ids", []).append(child_id)
-        _append_log(run, f"{'GPU 失败图片补算' if repair_attempt else 'ComfyUI 抠图任务'}已启动：{child_id}")
+        _append_log(run, f"{'GPU 失败图片补算' if repair_attempt else 'GPU Control 抠图任务'}已启动：{child_id}")
         _save(run)
         while True:
             if _is_canceled(run):

@@ -280,7 +280,7 @@ def format_skill_results(results: list[dict[str, Any]], max_items: int = 8) -> s
             lines.extend(_format_pipeline_preview(payload))
         elif skill == "pipeline.run_start":
             lines.append(f"动画自动化流程已启动：{payload.get('run_id')}")
-            lines.append("步骤：抽帧 -> ComfyUI 抠图 -> Cherry 平滑")
+            lines.append("步骤：抽帧 -> GPU Control 抠图 -> Cherry 平滑")
             if payload.get("workspace_root"):
                 lines.append(f"工作区：{payload.get('workspace_root')}")
             lines.append(f"最终输出：{payload.get('smooth_output_dir')}")
@@ -630,7 +630,7 @@ def _format_frame_list(payload: dict[str, Any], max_items: int) -> list[str]:
 def _format_pipeline_preview(payload: dict[str, Any]) -> list[str]:
     lines = [
         "动画自动化流程预览：",
-        "步骤：抽帧 -> ComfyUI 抠图 -> Cherry 平滑",
+        "步骤：抽帧 -> GPU Control 抠图 -> Cherry 平滑",
     ]
     if payload.get("workspace_root"):
         lines.append(f"工作区：{payload.get('workspace_root')}")

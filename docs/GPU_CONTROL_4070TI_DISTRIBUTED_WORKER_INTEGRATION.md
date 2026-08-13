@@ -1,9 +1,12 @@
 # 4070 Ti 接入 GPU Control 全分布式抠图集群对接合同
 
+> **已被正式手册与实施回执取代。** 本草案中的 Worker Pull、双向租约/心跳等提议不得用于实现。正式协议为：Node Agent 向 4090 上报 HMAC 心跳，4090 Scheduler 主动向节点 ComfyUI 推送任务，NodeLease 由控制面内部管理。请以 `115_2026-08-12_4070TI_WSL2_PREPARATION_AND_INTEGRATION_HANDOFF.md` 和 `docs/GPU_CONTROL_4070TI_HOST_PREPARATION_RECEIPT_2026-08-12.md` 为准。
+
 > 文档状态：`DRAFT_FOR_JOINT_REVIEW`  
 > 文档日期：2026-08-12  
 > AssetClaw 基线：`main@8cf1442c20e4`  
-> GPU Control 已知基线：`1.5.10@d504a820239797dd66d5ffe11178127743b99d6d`  
+> GPU Control 当前实测基线：`1.5.12@093ae8b7966ae5beb86990c7881c11d4c24d4e51`
+> GPU Control 历史兼容基线：`1.5.10@d504a820239797dd66d5ffe11178127743b99d6d`
 > 目标节点：`DAC3OZhangqichao / RTX 4070 Ti / Windows + WSL2 + Docker`  
 > 说明：本文既是架构合同，也是双方实施、验收和回滚清单。带有 `GPU Control 回填` 的项目在回填前不得进入正式生产。
 
@@ -74,16 +77,17 @@ flowchart LR
 | Windows 域 DNS 后缀 | `lilithgames.net` | 当前主机主 DNS 后缀 |
 | Windows 防火墙 | Domain / Private / Public 均启用 | 只按最小端口增加规则 |
 | 4090 主控 | `https://10.3.34.11:443` | AssetClaw 当前默认控制面地址 |
-| WSL Windows 功能 | 2026-08-12 已成功启用 | DISM 返回 `3010`，必须重启后生效 |
-| VirtualMachinePlatform | 2026-08-12 已成功启用 | DISM 返回 `3010`，必须重启后生效 |
-| 新版 WSL 运行时 | Appx `2.7.11.0` 已安装 | 重启后用 `wsl --version` 复核生效版本 |
-| Windows inbox `wsl.exe` | `10.0.19041.3636` | 重启前仍调用旧入口行为，不能据此判断最终 Kernel |
-| WSL 默认发行版版本 | 已执行 `wsl --set-default-version 2` 且成功 | 后续新发行版默认创建为 WSL2 |
+| WSL Windows 功能 | `Enabled`，重启后已复核 | 已生效 |
+| VirtualMachinePlatform | `Enabled`，Hypervisor 已检测 | 已生效 |
+| WSL 运行时 | `2.7.11.0` | 2026-08-12 重启后实测 |
+| WSL Kernel | `6.18.33.2-2` | 2026-08-12 重启后实测 |
+| WSLg | `1.0.73.2` | Worker 不依赖 GUI |
+| WSL 默认发行版版本 | `2` | 后续发行版默认创建为 WSL2 |
 | Linux 发行版 | 未安装 | 等 GPU Control 按 3090-B 基线指定 |
 | Docker | 未安装 | 等重启及发行版基线确认后安装 |
 | NVIDIA Container Toolkit | 未安装 | 与 Docker Engine 一并安装、验收 |
 | 秋叶 ComfyUI | 保留 | 不修改、不纳管、不开放给集群 |
-| 系统盘 | C: NTFS，约 931.12 GiB；2026-08-12 清理后空闲约 360.64 GiB | 已释放约 78.48 GiB；WSL VHDX/Docker/模型必须设配额和水位线 |
+| 系统盘 | C: NTFS，约 931.12 GiB；重启及临时文件收敛后空闲约 376.90 GiB | WSL VHDX/Docker/模型必须设配额和水位线 |
 
 重要：当前“未安装 Docker”不是遗漏。为了避免出现第四套运行环境，4070 Ti 必须复用 3090-B 已验证的 WSL2 发行版、Docker Engine 和启动方式。GPU Control 团队应先回填第 22 节，再继续安装。
 
@@ -111,12 +115,13 @@ wsl.exe --list --verbose
 nvidia-smi
 ```
 
-通过标准：
+2026-08-12 已完成重启和验收，结果：
 
-- `wsl --version` 能输出 WSL 与 Kernel 版本，而不是旧帮助页。
+- `wsl --version` 正常输出 WSL `2.7.11.0` 与 Kernel `6.18.33.2-2`。
 - 默认版本为 WSL2。
-- Windows `nvidia-smi` 正常识别 4070 Ti，驱动仍为预期版本。
-- 不出现 `Virtual Machine Platform`、虚拟化或内核缺失错误。
+- 两个 Windows 功能均为 `Enabled`，系统已检测到 Hypervisor。
+- Windows `nvidia-smi` 正常识别 4070 Ti，驱动仍为 `576.52`。
+- 当前尚无 Linux 发行版；这是等待 3090-B 精确基线的有意状态。
 
 ### 4.3 发行版与容器运行时
 
@@ -269,14 +274,48 @@ GPU-70c028e4-dd91-4337-8f96-29daa437d1c3
 
 Worker Credential 与上述 AssetClaw API Key 必须分开。建议 Worker 使用短期 mTLS 客户端证书或可轮换 token，并把凭证约束到唯一 `worker_id/GPU UUID`。
 
+### 5.6 2026-08-12 重启后连通性实测
+
+| 检查 | 结果 |
+|---|---|
+| 本机地址 | `10.3.34.238/24`，DHCP，重启后未漂移 |
+| 本机 MAC | `34-5A-60-47-C6-1D`，重启后未漂移 |
+| 4090 TCP | `10.3.34.11:443` 成功 |
+| 路由 | 同网段直达，首跳即 `10.3.34.11`，小于 1 ms |
+| Python/httpx + LAN CA `/health/live` | 200，`live` |
+| Python/httpx + LAN CA `/health/ready` | 200，database/redis 均 ok |
+| Python/httpx + LAN CA `/api/v1/scheduler/capacity` | 200，3 compatible nodes、3 available slots、queue 0 |
+| Windows curl/Schannel + LAN CA | 失败：`CERT_TRUST_REVOCATION_STATUS_UNKNOWN` |
+
+Schannel 失败不能用 `-k/--insecure` 绕过。AssetClaw 当前 Python TLS 栈验证证书链成功，所以生产客户端可用；但 GPU Control 团队仍应提供可访问的 CRL/OCSP、规范的 LAN 证书或书面说明吊销策略，使 Windows 原生 TLS 工具也能完整验证。
+
+当前主控 `/api/v1/version` 实测：
+
+```json
+{
+  "component": "api",
+  "version": "1.5.12",
+  "package_version": "1.5.12",
+  "build_version": "1.5.12",
+  "source_revision": "093ae8b7966ae5beb86990c7881c11d4c24d4e51",
+  "version_aligned": true,
+  "provenance_complete": true
+}
+```
+
+这取代 1.5.10 作为本次接入的目标控制面基线。1.5.10 仅作为已验证历史协议参考，不能据此选择 4070 Worker镜像。
+
+控制台静态资源显示节点管理面存在 `/admin/nodes` 及 `mode/free/interrupt/restart/start/stop` 操作；匿名只读访问 `/admin/nodes` 返回 401 `AUTH_FAILED`，符合管理面保护要求。当前没有公开 Worker注册、双向心跳和租约 schema，因此必须由 GPU Control 团队交付 1.5.12 配套 Worker部署包和凭证，不允许客户端猜测管理接口。
+
 ## 6. 版本与供应链合同
 
 ### 6.1 已知业务协议基线
 
 | 项目 | 锁定值 |
 |---|---|
-| GPU Control | `1.5.10` |
-| GPU Control commit | `d504a820239797dd66d5ffe11178127743b99d6d` |
+| GPU Control current | `1.5.12` |
+| GPU Control current commit | `093ae8b7966ae5beb86990c7881c11d4c24d4e51` |
+| GPU Control historical verified baseline | `1.5.10@d504a820239797dd66d5ffe11178127743b99d6d` |
 | AssetClaw commit | `8cf1442c20e4` |
 | `workflow_key` | `imageclip-rgba` |
 | `workflow_version` | `2026.07.30-691770c-r1` |
@@ -868,7 +907,9 @@ acceptance:
 ## 25. 双方签字前最终检查
 
 - [ ] 4090 团队完整回填第 22 节。
-- [ ] Windows 已人工重启，WSL2 状态复核通过。
+- [x] Windows 已人工重启，WSL2 `2.7.11.0` / Kernel `6.18.33.2-2` 状态复核通过。
+- [x] 本机 MAC/IP/GPU UUID 复核通过，`10.3.34.11:443` 和 Python TLS 健康接口通过。
+- [x] 只读预检脚本可重复执行：`scripts/check_4070_worker_host_preflight.ps1`。
 - [ ] 4070 已安装与 3090-B 一致的发行版、Docker 和 NVIDIA Container Toolkit。
 - [ ] Worker 镜像、模型、workflow 的完整 SHA 清单一致。
 - [ ] 4070 只允许 4090 控制 WSL Worker，不允许控制 Windows 业务面。

@@ -155,7 +155,7 @@ def _should_send(reply_text: str) -> bool:
         "动画处理已",
         "图片处理已",
         "抽帧完成",
-        "ComfyUI 抠图完成",
+        "GPU Control 抠图完成",
         "Cherry 后处理完成",
         "开始抽帧",
         "开始 ComfyUI",
