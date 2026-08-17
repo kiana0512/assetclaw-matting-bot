@@ -165,10 +165,10 @@ def main() -> int:
             "external_batch_id_template": external_batch_id,
             "workflow_identity": {
                 "workflow_key": "imageclip-rgba",
-                "workflow_version": "2026.08.12-c39ed0b-fp8-r1",
+                "workflow_version": "2026.08.17-c39ed0b-colorfix-r1",
                 "pipeline_commit": "c39ed0b3b637f0a1435bbe10e5a3acf6bfca07bd",
                 "pipeline_sha256": "07928d57852ed56ed37527960ec9955d867c0090456fda687fbcd12fecf1775c",
-                "output_node": "SaveImage #102",
+                "output_node": "SaveImage #109",
             },
             "frames": frame_facts,
         }

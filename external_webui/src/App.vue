@@ -9,13 +9,16 @@ import {
 } from "./domain/task-performance.js";
 
 const POLL_MS = 12000;
-const FINISHED = new Set(["DONE", "FAILED", "CANCELED", "BLOCKED", "DONE_WITH_ERRORS"]);
+const CHARACTER_CONFIRMATION_TIMEOUT = "CHARACTER_CONFIRMATION_TIMEOUT";
+const ATTENTION_STATUSES = new Set(["FAILED", "BLOCKED", "DONE_WITH_ERRORS", CHARACTER_CONFIRMATION_TIMEOUT]);
+const FINISHED = new Set(["DONE", "FAILED", "CANCELED", "BLOCKED", "DONE_WITH_ERRORS", CHARACTER_CONFIRMATION_TIMEOUT]);
 const STAGE_LABELS = {
   feishu_download: "飞书下载",
   frame_extract: "抽帧",
   matting: "GPU Control 抠图",
   local_oom_gpu_fallback_queued: "GPU 集群接管中",
   waiting_character: "等待角色确认",
+  character_confirmation_timeout: "用户确认超时",
   cherry_smooth: "Cherry 平滑",
   done_matte_only: "抠图结果已交付",
   unity_ready: "unity_ready",
@@ -171,7 +174,7 @@ const taskSummary = computed(() => ({
   total: allTasks.value.length,
   active: allTasks.value.filter((task) => isActiveStatus(task.status)).length,
   done: allTasks.value.filter((task) => task.status === "DONE").length,
-  attention: allTasks.value.filter((task) => ["FAILED", "BLOCKED", "DONE_WITH_ERRORS"].includes(task.status)).length,
+  attention: allTasks.value.filter((task) => ATTENTION_STATUSES.has(task.status)).length,
 }));
 const filteredTasks = computed(() => {
   const query = state.taskQuery.trim().toLocaleLowerCase();
@@ -179,7 +182,7 @@ const filteredTasks = computed(() => {
     if (state.taskFilter !== "all" && task.category !== state.taskFilter) return false;
     if (state.taskStatusFilter === "active" && !isActiveStatus(task.status)) return false;
     if (state.taskStatusFilter === "done" && task.status !== "DONE") return false;
-    if (state.taskStatusFilter === "attention" && !["FAILED", "BLOCKED", "DONE_WITH_ERRORS"].includes(task.status)) return false;
+    if (state.taskStatusFilter === "attention" && !ATTENTION_STATUSES.has(task.status)) return false;
     if (!query) return true;
     return [task.name, task.id, task.label, task.stageLabel, task.user?.displayName]
       .some((value) => String(value || "").toLocaleLowerCase().includes(query));
@@ -206,7 +209,7 @@ const queueSummary = computed(() => {
 const primaryTask = computed(() => {
   return unifiedQueue.value[0] || null;
 });
-const failedTasks = computed(() => allTasks.value.filter((task) => ["FAILED", "BLOCKED", "DONE_WITH_ERRORS"].includes(task.status)));
+const failedTasks = computed(() => allTasks.value.filter((task) => ATTENTION_STATUSES.has(task.status)));
 const workspaceCards = computed(() => buildWorkspaceCards());
 const stageCards = computed(() => buildStageCards(currentFlow.value));
 const childRuns = computed(() => buildChildRuns(currentFlow.value));
@@ -1038,6 +1041,7 @@ function statusClass(status) {
   const normalized = String(status || "").toUpperCase();
   if (["DONE", "DONE_WITH_ERRORS", "CONFIRMED"].includes(normalized)) return "ok";
   if (["FAILED", "BLOCKED"].includes(normalized)) return "bad";
+  if (normalized === CHARACTER_CONFIRMATION_TIMEOUT) return "warning";
   if (["CANCELED"].includes(normalized)) return "muted";
   if (["RUNNING", "QUEUED", "PAUSED", "WAITING_CHARACTER", "READY_P4", "LATE_RESULT"].includes(normalized)) return "live";
   return "idle";
@@ -1047,6 +1051,7 @@ function statusLabel(status) {
   const normalized = String(status || "").toUpperCase();
   return {
     WAITING_CHARACTER: "等待角色",
+    CHARACTER_CONFIRMATION_TIMEOUT: "用户确认超时",
     DONE_WITH_ERRORS: "完成但有错误",
     CANCELED: "已取消",
     RUNNING: "处理中",
@@ -1128,8 +1133,12 @@ function normalizeDirectTask(module, raw) {
   const sourcePaths = items.map((item) => item.source_path || item.original_path || item.name).filter(Boolean);
   const sourceNames = items.map((item) => item.source_name || item.name).filter(Boolean);
   const displayName = raw.run_label || sourceNames.join("、") || raw.run_id || raw.id || "未命名任务";
-  const status = String(raw.status || "UNKNOWN").toUpperCase();
   const stage = String(raw.stage || raw.current_stage || "");
+  const rawStatus = String(raw.status || "UNKNOWN").toUpperCase();
+  const status = stage.toLowerCase() === "character_confirmation_timeout"
+    || String(raw.failure_kind || "").toLowerCase() === "character_confirmation_timeout"
+    ? CHARACTER_CONFIRMATION_TIMEOUT
+    : rawStatus;
   const stageInfo = directStageProgress(raw, isImage);
   const created = raw.created_at || raw.updated_at || "";
   return {
@@ -1248,6 +1257,8 @@ function directStageProgress(run, isImage) {
     : Math.min(cherryTotal, Number(children.cherry?.completed || 0));
   const cherryCurrent = cherryRuns.find((item) => isActiveStatus(item?.status)) || children.cherry || {};
   const runStatus = String(run.status || "").toUpperCase();
+  const characterConfirmationTimedOut = stage === "character_confirmation_timeout"
+    || String(run.failure_kind || "").toLowerCase() === "character_confirmation_timeout";
   const doneStatus = String(run.status || "").toUpperCase() === "DONE";
   const matteOnly = String(run.result_mode || "").toLowerCase() === "matte_only"
     || stage === "done_matte_only"
@@ -1269,6 +1280,16 @@ function directStageProgress(run, isImage) {
       overall: 100,
       count: `${expected}/${expected}`,
       position: "已完成抠图、角色校色与位置矫正",
+      raw: run,
+    };
+  }
+  if (characterConfirmationTimedOut) {
+    return {
+      label: "用户确认超时",
+      progress: 100,
+      overall: isImage ? 50 : 60,
+      count: `${comfyDone}/${comfyTotal || expected || "-"}`,
+      position: "抠图已完成，等待用户确认角色；确认后继续 Cherry 后处理",
       raw: run,
     };
   }

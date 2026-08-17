@@ -72,7 +72,13 @@ def _request_full_rerun_locked(kind: Kind, run_id: str | None) -> dict[str, Any]
             "in_place": True,
         }
         module._append_log(run, "已确认完整重跑：保留任务 ID 与历史记录，并从原始素材重新执行全部阶段。")
-        module._save(run)
+        saved = module._save(
+            run,
+            expected_statuses={current_status},
+            allow_canceled_restart=current_status == "CANCELED",
+        )
+        if not saved:
+            raise RuntimeError("任务状态已变化，请刷新后重试完整重跑")
 
         started = module._start_worker(str(run["id"]))
         if started is False:
@@ -134,10 +140,7 @@ def _preflight_latest_workflow(run: dict[str, Any]) -> dict[str, Any]:
     from assetclaw_matting.config import settings
     from assetclaw_matting.skills import matting_pipeline_skills
 
-    workflow_path = str(run.get("workflow_path") or settings.comfyui_workflow_path or "")
-    if Path(workflow_path).name != settings.matting_pipeline_workflow_name:
-        return {}
-    result = matting_pipeline_skills.ensure_latest_for_task()
+    result = matting_pipeline_skills.ensure_latest_cherry_for_task()
     if not result.get("ok"):
         raise RuntimeError(matting_pipeline_skills.preflight_error(result))
     return result

@@ -96,7 +96,10 @@ class CdpClient:
         self._pending[msg_id] = fut
         await self._ws.send(json.dumps({"id": msg_id, "method": method, "params": params or {}}))
         try:
-            result = await asyncio.wait_for(fut, timeout=timeout)
+            try:
+                result = await asyncio.wait_for(fut, timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                raise TimeoutError(f"CDP {method} timed out after {timeout:.1f}s") from exc
         finally:
             # The reader normally removes completed requests.  A timeout must
             # also release its Future or repeated CDP failures leak memory.
@@ -121,16 +124,28 @@ class CdpClient:
                 raise TimeoutError(f"timed out waiting for {method}")
             await asyncio.wait_for(self._event.wait(), timeout=remain)
 
-    async def evaluate(self, expression: str, timeout: float = 30.0) -> Any:
-        result = await self.send(
-            "Runtime.evaluate",
-            {
-                "expression": expression,
-                "awaitPromise": True,
-                "returnByValue": True,
-            },
-            timeout=timeout,
-        )
+    async def evaluate(
+        self,
+        expression: str,
+        timeout: float = 30.0,
+        *,
+        await_promise: bool = True,
+    ) -> Any:
+        try:
+            result = await self.send(
+                "Runtime.evaluate",
+                {
+                    "expression": expression,
+                    "awaitPromise": await_promise,
+                    "returnByValue": True,
+                },
+                timeout=timeout,
+            )
+        except TimeoutError as exc:
+            compact = " ".join(expression.split())
+            raise TimeoutError(
+                f"CDP Runtime.evaluate timed out after {timeout:.1f}s; expression={compact[:160]}"
+            ) from exc
         payload = result.get("result") or {}
         if payload.get("subtype") == "error":
             raise RuntimeError(payload.get("description") or payload.get("value") or "Runtime.evaluate failed")
@@ -168,6 +183,7 @@ def run_cherry_html(
     storage_dir: Path | None = None,
 ) -> CherryHtmlResult:
     async def run_with_overall_deadline() -> CherryHtmlResult:
+        started = time.monotonic()
         try:
             return await asyncio.wait_for(
                 _run_cherry_html_async(
@@ -188,7 +204,16 @@ def run_cherry_html(
                 timeout=max(0.1, float(timeout_seconds)),
             )
         except asyncio.TimeoutError as exc:
-            raise TimeoutError(f"Cherry HTML run exceeded the overall {timeout_seconds}s deadline") from exc
+            elapsed = time.monotonic() - started
+            # asyncio.TimeoutError is also raised by nested CDP/event waits.
+            # Do not relabel a short operation timeout as the 900-second
+            # overall deadline; preserving the original message is required
+            # for correct retries and diagnosis.
+            if elapsed + 1.0 < float(timeout_seconds):
+                raise
+            raise TimeoutError(
+                f"Cherry HTML run exceeded the overall {timeout_seconds}s deadline"
+            ) from exc
 
     return asyncio.run(
         run_with_overall_deadline()
@@ -370,7 +395,16 @@ async def _run_cherry_html_async(
                 forced = await _force_reference_steps_disabled(cdp)
                 expected_alignment = None
             preset["steps"] = [str(step) for step in (forced.get("configuredSteps") or [])]
-            await cdp.evaluate("document.getElementById('btn-process').click();", timeout=10.0)
+            # Cherry performs CPU-heavy synchronous work from the click handler.
+            # Invoking click() directly keeps Runtime.evaluate open until that
+            # handler returns, so a healthy large batch can be misclassified as
+            # a 10-second CDP failure. Schedule the click and return immediately;
+            # _wait_processing_done below owns the real processing deadline.
+            await cdp.evaluate(
+                "setTimeout(() => document.getElementById('btn-process').click(), 0); true;",
+                timeout=10.0,
+                await_promise=False,
+            )
             await _wait_processing_done(cdp, timeout_seconds)
             report = await _read_processing_report(cdp)
             _validate_processing_report(
@@ -714,6 +748,30 @@ async def _install_fixed_alignment_transform(cdp: CdpClient, transform: dict[str
           buildAlignTransform=function(){{
             return {{s:fixed.s,tx:fixed.tx,ty:fixed.ty,assetclawFixed:true}};
           }};
+          // The stock non-identity transform walks every output pixel in
+          // JavaScript and performs four bilinear samples.  On 1080x1440
+          // animation frames that alone can triple Cherry latency. Canvas2D
+          // performs the same premultiplied-alpha smoothed transform in the
+          // browser's native raster pipeline while keeping the canvas size,
+          // transparent background, scale, and offset contract unchanged.
+          if(typeof applyAlignTransform === 'function' && typeof imageDataToCanvas === 'function'){{
+            window.__assetclawOriginalApplyAlignTransform ||= applyAlignTransform;
+            applyAlignTransform=function(image,tr){{
+              if(!tr)return image;
+              const s=Number(tr.s),tx=Number(tr.tx),ty=Number(tr.ty);
+              if(Math.abs(s-1)<1e-4&&Math.abs(tx)<1e-3&&Math.abs(ty)<1e-3)return image;
+              const canvas=document.createElement('canvas');
+              canvas.width=image.width;canvas.height=image.height;
+              const ctx=canvas.getContext('2d',{{alpha:true,willReadFrequently:true}});
+              ctx.clearRect(0,0,canvas.width,canvas.height);
+              ctx.imageSmoothingEnabled=true;
+              ctx.imageSmoothingQuality='high';
+              ctx.setTransform(s,0,0,s,tx,ty);
+              ctx.drawImage(imageDataToCanvas(image),0,0);
+              ctx.setTransform(1,0,0,1,0,0);
+              return ctx.getImageData(0,0,canvas.width,canvas.height);
+            }};
+          }}
           return {{ok:true,fixed}};
         }})()
         """,
@@ -844,22 +902,30 @@ def _validate_reference_image(reference_path: Path) -> None:
 async def _wait_processing_done(cdp: CdpClient, timeout_seconds: int) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        state = await cdp.evaluate(
-            """
-            (()=>{
-              const err=document.getElementById('error-msg');
-              const progress=document.getElementById('progress-text');
-              const button=document.getElementById('btn-process');
-              return {
-                done: !!resultBlob,
-                error: err && err.style.display !== 'none' ? err.textContent : '',
-                progress: progress ? progress.textContent : '',
-                processing: !!(button && button.disabled)
-              };
-            })()
-            """,
-            timeout=10.0,
-        )
+        try:
+            state = await cdp.evaluate(
+                """
+                (()=>{
+                  const err=document.getElementById('error-msg');
+                  const progress=document.getElementById('progress-text');
+                  const button=document.getElementById('btn-process');
+                  return {
+                    done: !!resultBlob,
+                    error: err && err.style.display !== 'none' ? err.textContent : '',
+                    progress: progress ? progress.textContent : '',
+                    processing: !!(button && button.disabled)
+                  };
+                })()
+                """,
+                timeout=10.0,
+            )
+        except TimeoutError:
+            # Cherry's canvas pipeline is synchronous and can occupy the page's
+            # main thread for longer than the CDP polling timeout.  That means
+            # "browser busy", not "processing failed".  Keep the real overall
+            # deadline below as the sole timeout for a healthy large batch.
+            await asyncio.sleep(0.5)
+            continue
         if state and state.get("done"):
             return
         # Some Cherry HTML revisions reuse error-msg for non-fatal notices
@@ -1007,6 +1073,24 @@ def _start_chrome(
 
 def _stop_chrome(proc: subprocess.Popen[Any]) -> None:
     if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        # A headless Chrome launch owns a renderer/crashpad/utility process
+        # tree. Terminating only the launcher leaves those children alive
+        # after a CDP timeout; repeated retries then steal CPU and several GB
+        # of RAM from the next healthy batch. taskkill /T scopes cleanup to
+        # this exact live launcher tree.
+        subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
         return
     proc.terminate()
     try:

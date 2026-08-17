@@ -15,7 +15,6 @@ from typing import Any
 from assetclaw_matting.comfyui.output_resolver import inspect_local_png, resolve_best_output
 from assetclaw_matting.comfyui.workflow_patch import find_primary_save_image_node_id, inspect_workflow, patch_load_image, patch_node_input, prepare_api_prompt_for_run
 from assetclaw_matting.ops_trace import trace as ops_trace
-from assetclaw_matting.skills import matting_pipeline_skills
 from assetclaw_matting.skills.media_skills import IMAGE_EXTS
 from assetclaw_matting.skills.security import validate_path
 
@@ -162,12 +161,10 @@ def run_start(
         raise ValueError("input_dir and output_dir are required")
     selected_workflow = _selected_workflow_path()
     pipeline_notice = ""
-    if not workflow_path and not selected_workflow and Path(settings.comfyui_workflow_path).name == settings.matting_pipeline_workflow_name:
-        pipeline = matting_pipeline_skills.ensure_latest_for_task()
-        if not pipeline.get("ok"):
-            raise RuntimeError(str(pipeline.get("error") or "matting pipeline preflight failed"))
-        workflow_path = str(pipeline.get("workflow_path") or "")
-        pipeline_notice = str(pipeline.get("message") or "")
+    # GPU Control owns ImageClip workflow rollout and pins the workflow
+    # identity per batch. Never pull/sync the local ImageClip repository from
+    # this remote matting entry point; Cherry refresh is performed by the
+    # parent animation/image task before processing starts.
     workflow_file = _resolve_workflow_path(workflow_path or selected_workflow or str(settings.comfyui_workflow_path))
     src = validate_path(input_dir, must_exist=True)
     dst = validate_path(output_dir, must_exist=False)

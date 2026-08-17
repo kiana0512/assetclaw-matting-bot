@@ -27,18 +27,20 @@ $Settings = New-ScheduledTaskSettingsSet `
   -RestartCount 999 `
   -RestartInterval (New-TimeSpan -Minutes 1)
 
+$StartupTrigger = New-ScheduledTaskTrigger -AtStartup
 $LogonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $UserId
 $MaintainerTask = New-ScheduledTask `
   -Action $Action `
-  -Trigger $LogonTrigger `
+  -Trigger @($StartupTrigger, $LogonTrigger) `
   -Principal $Principal `
   -Settings $Settings `
-  -Description 'Hidden long-running maintainer: keep the per-user Ubuntu WSL instance alive and repair only the 4070 SSH portproxy when eth0 changes.'
+  -Description 'Boot-persistent 4070 Ti maintainer: start and keep Ubuntu WSL2 alive, then repair SSH, ComfyUI, node-exporter and node-agent portproxies when eth0 changes.'
 
 Stop-ScheduledTask -TaskName 'GPUControl-4070-WSL-Start' -ErrorAction SilentlyContinue
 Stop-ScheduledTask -TaskName 'GPUControl-4070-WSL-Watchdog' -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName 'GPUControl-4070-WSL-Start' -Confirm:$false -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName 'GPUControl-4070-WSL-Watchdog' -Confirm:$false -ErrorAction SilentlyContinue
+Stop-ScheduledTask -TaskName 'GPUControl-4070-WSL-Maintainer' -ErrorAction SilentlyContinue
 
 Register-ScheduledTask `
   -TaskName 'GPUControl-4070-WSL-Maintainer' `

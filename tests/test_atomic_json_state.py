@@ -51,6 +51,36 @@ def test_canceled_status_cannot_be_resurrected_by_stale_worker(tmp_path: Path) -
     assert stale["status"] == "CANCELED"
 
 
+def test_confirmed_rerun_can_atomically_restart_a_canceled_task(tmp_path: Path) -> None:
+    path = tmp_path / "status.json"
+    atomic_save_task_json(path, {"id": "IMG_TEST", "status": "CANCELED", "stage": "canceled"})
+    rerun = {"id": "IMG_TEST", "status": "QUEUED", "stage": "full_rerun_queued"}
+
+    saved = atomic_save_task_json(
+        path,
+        rerun,
+        expected_statuses={"CANCELED"},
+        allow_canceled_restart=True,
+    )
+
+    assert saved is True
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "QUEUED"
+    assert persisted["stage"] == "full_rerun_queued"
+
+
+def test_canceled_restart_override_requires_compare_and_swap(tmp_path: Path) -> None:
+    path = tmp_path / "status.json"
+    atomic_save_task_json(path, {"id": "IMG_TEST", "status": "CANCELED", "stage": "canceled"})
+    unsafe = {"id": "IMG_TEST", "status": "QUEUED", "stage": "full_rerun_queued"}
+
+    atomic_save_task_json(path, unsafe, allow_canceled_restart=True)
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "CANCELED"
+    assert persisted["stage"] == "canceled"
+
+
 def test_windows_atomic_replace_retries_transient_access_denied(monkeypatch, tmp_path: Path) -> None:
     path = tmp_path / "status.json"
     real_replace = os.replace

@@ -82,6 +82,8 @@ def test_fixed_alignment_transform_is_injected_and_verified() -> None:
     asyncio.run(cherry_html_runner._install_fixed_alignment_transform(cdp, fixed))  # type: ignore[arg-type]
 
     assert "buildAlignTransform=function" in cdp.expression
+    assert "applyAlignTransform=function" in cdp.expression
+    assert "ctx.drawImage(imageDataToCanvas(image),0,0)" in cdp.expression
     cherry_html_runner._validate_processing_report(_valid_report(), expected_alignment_transform=fixed)
 
 

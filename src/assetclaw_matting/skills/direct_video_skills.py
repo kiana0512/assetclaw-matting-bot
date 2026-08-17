@@ -47,13 +47,10 @@ def start(
     if not video_paths:
         raise ValueError("video_paths is required")
     videos = [_validate_video(path) for path in video_paths]
-    pipeline_notice = ""
-    if not workflow_path and Path(settings.comfyui_workflow_path).name == settings.matting_pipeline_workflow_name:
-        pipeline = matting_pipeline_skills.ensure_latest_for_task()
-        if not pipeline.get("ok"):
-            raise RuntimeError(matting_pipeline_skills.preflight_error(pipeline))
-        workflow_path = str(pipeline.get("workflow_path") or "")
-        pipeline_notice = str(pipeline.get("message") or "")
+    pipeline = matting_pipeline_skills.ensure_latest_cherry_for_task()
+    if not pipeline.get("ok"):
+        raise RuntimeError(matting_pipeline_skills.preflight_error(pipeline))
+    pipeline_notice = str(pipeline.get("message") or "")
     names = list(source_names or [])
     evidence_sets = list(character_evidence or [])
     run_id = "VID_" + uuid.uuid4().hex[:12].upper()
@@ -453,6 +450,10 @@ def resume_from_postprocess(run_id: str, resend: bool = True) -> dict[str, Any]:
     try:
         if not _prepare_character_gate(run):
             return {"ok": True, "run_id": run_id, **_public(run)}
+        # A valid late role selection supersedes an earlier matte-only result.
+        # Reuse verified mattes; regenerate postprocessing, package and delivery.
+        run["result_mode"] = "full"
+        run["postprocess_skipped"] = {}
         for item in run.get("videos") or []:
             validate_matte_sequence(item["frame_dir"], item["matte_dir"])
         run["status"] = "RUNNING"
@@ -892,10 +893,25 @@ def _run_comfyui_unlocked(run: dict[str, Any]) -> None:
 
 
 def _run_cherry(run: dict[str, Any]) -> None:
+    from assetclaw_matting.services.cherry_postprocess_lock import cherry_postprocess_lock
+
+    with cherry_postprocess_lock():
+        _run_cherry_unlocked(run)
+
+
+def _run_cherry_unlocked(run: dict[str, Any]) -> None:
     from assetclaw_matting.skills.cherry_skills import run_start, run_status
 
+    children = run.setdefault("children", {})
+    existing_ids = [
+        str(value)
+        for value in (children.get("cherry_run_ids") or [])
+        if str(value).strip()
+    ]
+    if not existing_ids and str(children.get("cherry_run_id") or "").strip():
+        existing_ids = [str(children["cherry_run_id"])]
     run.setdefault("children", {})["cherry_run_ids"] = []
-    for item in run["videos"]:
+    for item_position, item in enumerate(run["videos"]):
         matte_dir = Path(str(item["matte_dir"]))
         smooth_dir = Path(str(item["smooth_dir"]))
         if not any(matte_dir.rglob("*.png")):
@@ -908,26 +924,39 @@ def _run_cherry(run: dict[str, Any]) -> None:
         if not reference_path or not reference_sha256:
             raise RuntimeError(f"character reference binding is incomplete for video item: {item.get('item_id') or item.get('index')}")
         item["cherry_output_size"] = item.get("cherry_output_size") or _cherry_output_size(profile)
-        result = run_start(
-            input_dir=str(matte_dir),
-            output_dir=str(smooth_dir),
-            recursive=True,
-            skip_existing=False,
-            notify_interval_seconds=run["notify_interval_seconds"],
-            profile=profile,
-            expected_profile=profile,
-            reference_path=reference_path,
-            reference_sha256=reference_sha256,
-            color_match_required=True,
-            alignment_enabled=True,
+        child_id = existing_ids[item_position] if item_position < len(existing_ids) else ""
+        payload = run_status(child_id, include_gpu=False) if child_id else {}
+        reusable = (
+            str(payload.get("status") or "").upper() in {"RUNNING", "DONE"}
+            and Path(str(payload.get("input_dir") or "")).resolve() == matte_dir.resolve()
+            and Path(str(payload.get("output_dir") or "")).resolve() == smooth_dir.resolve()
         )
-        options = result.get("options") if isinstance(result.get("options"), dict) else {}
-        if options.get("resize_width") and options.get("resize_height"):
-            item["cherry_output_size"] = f"{options.get('resize_width')}x{options.get('resize_height')}"
-        child_id = result["run_id"]
+        if reusable:
+            _append_log(
+                run,
+                f"重新挂接已有 Cherry 子任务：{child_id}，保留 {int(payload.get('completed') or 0)}/{int(payload.get('total') or 0)} 帧进度",
+            )
+        else:
+            result = run_start(
+                input_dir=str(matte_dir),
+                output_dir=str(smooth_dir),
+                recursive=True,
+                skip_existing=False,
+                notify_interval_seconds=run["notify_interval_seconds"],
+                profile=profile,
+                expected_profile=profile,
+                reference_path=reference_path,
+                reference_sha256=reference_sha256,
+                color_match_required=True,
+                alignment_enabled=True,
+            )
+            options = result.get("options") if isinstance(result.get("options"), dict) else {}
+            if options.get("resize_width") and options.get("resize_height"):
+                item["cherry_output_size"] = f"{options.get('resize_width')}x{options.get('resize_height')}"
+            child_id = result["run_id"]
+            _append_log(run, f"Cherry 后处理任务已启动：{child_id}，video={item['index']}，profile={profile}")
         run["children"]["cherry_run_id"] = child_id
         run["children"].setdefault("cherry_run_ids", []).append(child_id)
-        _append_log(run, f"Cherry 后处理任务已启动：{child_id}，video={item['index']}，profile={profile}")
         _save(run)
         while True:
             if _is_canceled(run):
@@ -962,7 +991,9 @@ def _prepare_character_gate(run: dict[str, Any]) -> bool:
         _append_log(run, "角色参考图已逐视频冻结；Cherry 将在流程末尾依次执行校色和位置矫正。")
         _save(run)
         return True
-    unavailable = list(result.get("missing_profiles") or []) + list(result.get("missing") or [])
+    # An unresolved character must wait for user confirmation. Matte-only
+    # delivery is allowed only when a frozen character lacks the exact profile.
+    unavailable = list(result.get("missing_profiles") or [])
     if unavailable:
         _append_log(
             run,
@@ -1402,11 +1433,9 @@ def _user_failure_notice(run_id: str, error: Exception | str) -> str:
 
 
 def _close_failed_character_resolution(run: dict[str, Any]) -> None:
-    from assetclaw_matting.services.character_resolution import fail_run_resolutions
+    """Keep role replies durable across recoverable processing failures."""
 
-    fail_run_resolutions("direct_video", str(run.get("id") or ""))
-    run["character_question"] = ""
-    run.setdefault("character_resolution", {})["pending"] = 0
+    run.setdefault("character_resolution", {})["preserved_after_failure"] = True
 
 
 def _cancel_child_runs(run: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1735,11 +1764,21 @@ def _find_run_by_text(value: str) -> dict[str, Any] | None:
     return fallback
 
 
-def _save(run: dict[str, Any], *, expected_statuses: set[str] | None = None) -> bool:
+def _save(
+    run: dict[str, Any],
+    *,
+    expected_statuses: set[str] | None = None,
+    allow_canceled_restart: bool = False,
+) -> bool:
     from assetclaw_matting.services.atomic_json_state import atomic_save_task_json
 
     path = _run_dir(run) / "status.json"
-    return atomic_save_task_json(path, run, expected_statuses=expected_statuses)
+    return atomic_save_task_json(
+        path,
+        run,
+        expected_statuses=expected_statuses,
+        allow_canceled_restart=allow_canceled_restart,
+    )
 
 
 def _run_dir(run: dict[str, Any]) -> Path:

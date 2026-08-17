@@ -85,13 +85,10 @@ def run_start(
     **_: Any,
 ) -> dict[str, Any]:
     selected_mode = _normalize_unity_import_mode(import_mode or unity_import_mode)
-    pipeline_notice = ""
-    if not workflow_path and Path(settings.comfyui_workflow_path).name == settings.matting_pipeline_workflow_name:
-        pipeline = matting_pipeline_skills.ensure_latest_for_task()
-        if not pipeline.get("ok"):
-            raise RuntimeError(str(pipeline.get("error") or "matting pipeline preflight failed"))
-        workflow_path = str(pipeline.get("workflow_path") or "")
-        pipeline_notice = str(pipeline.get("message") or "")
+    pipeline = matting_pipeline_skills.ensure_latest_cherry_for_task()
+    if not pipeline.get("ok"):
+        raise RuntimeError(matting_pipeline_skills.preflight_error(pipeline))
+    pipeline_notice = str(pipeline.get("message") or "")
     workflow = _production_workflow_path(workflow_path)
     preview = run_preview(
         date_root=date_root,

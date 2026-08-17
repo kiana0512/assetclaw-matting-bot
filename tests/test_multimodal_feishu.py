@@ -1347,6 +1347,11 @@ def test_direct_image_start_uses_exact_square_rule(monkeypatch) -> None:
 
     monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", root / "runs")
     monkeypatch.setattr(direct_image_skills, "_start_worker", lambda _run_id: None)
+    monkeypatch.setattr(
+        direct_image_skills.matting_pipeline_skills,
+        "ensure_latest_cherry_for_task",
+        lambda: {"ok": True, "message": "Cherry 已确认最新"},
+    )
 
     result = direct_image_skills.start(
         [str(square), str(near_square)],

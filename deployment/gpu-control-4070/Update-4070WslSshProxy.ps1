@@ -2,13 +2,16 @@ $ErrorActionPreference = 'Stop'
 
 $Distro = 'Ubuntu'
 $ListenAddress = '10.3.34.238'
-$ListenPort = 2222
 $ControlAddress = '10.3.34.11'
-$FirewallName = 'GPUControl-4070-SSH-From-4090'
-$FirewallDisplayName = 'GPU Control SSH 2222 from 4090'
 $WslExe = "$env:SystemRoot\System32\wsl.exe"
 $LogDirectory = 'C:\ProgramData\GPUControl\logs'
 $LogPath = Join-Path $LogDirectory 'wsl-ssh-proxy.log'
+$Mappings = @(
+  [pscustomobject]@{ Name = 'SSH'; ListenPort = 2222; ConnectPort = 22 },
+  [pscustomobject]@{ Name = 'ComfyUI'; ListenPort = 8188; ConnectPort = 8188 },
+  [pscustomobject]@{ Name = 'NodeExporter'; ListenPort = 9100; ConnectPort = 9100 },
+  [pscustomobject]@{ Name = 'NodeAgent'; ListenPort = 9201; ConnectPort = 9201 }
+)
 
 function Write-ChangeLog([string]$Message) {
   New-Item -ItemType Directory -Force -Path $LogDirectory | Out-Null
@@ -16,7 +19,30 @@ function Write-ChangeLog([string]$Message) {
   Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
 }
 
-wsl.exe -d $Distro -u root -- systemctl start ssh
+function Test-FirewallRule(
+  [string]$RuleName,
+  [string[]]$ExpectedPorts
+) {
+  $Rule = Get-NetFirewallRule -Name $RuleName -ErrorAction SilentlyContinue
+  if (-not $Rule) {
+    return $false
+  }
+  $AddressFilter = $Rule | Get-NetFirewallAddressFilter
+  $PortFilter = $Rule | Get-NetFirewallPortFilter
+  $ActualPorts = @($PortFilter.LocalPort | ForEach-Object { [string]$_ })
+  $MissingPorts = @($ExpectedPorts | Where-Object { $ActualPorts -notcontains [string]$_ })
+  return (
+    $Rule.Enabled -eq 'True' -and
+    $Rule.Direction -eq 'Inbound' -and
+    $Rule.Action -eq 'Allow' -and
+    $AddressFilter.LocalAddress -contains $ListenAddress -and
+    $AddressFilter.RemoteAddress -contains $ControlAddress -and
+    $PortFilter.Protocol -eq 'TCP' -and
+    $MissingPorts.Count -eq 0
+  )
+}
+
+& $WslExe -d $Distro -u root -- systemctl start ssh
 if ($LASTEXITCODE -ne 0) {
   throw "Unable to start ssh in WSL distribution: $Distro"
 }
@@ -40,63 +66,87 @@ if ($WslIp -eq $ListenAddress -or $WslIp.StartsWith('127.')) {
 Set-Service iphlpsvc -StartupType Automatic
 Start-Service iphlpsvc
 
+$ProxyChanged = $false
 $ExistingProxyLines = & netsh interface portproxy show v4tov4
-$ExpectedMappingExists = $false
-foreach ($line in $ExistingProxyLines) {
-  $fields = @($line.Trim() -split '\s+' | Where-Object { $_ })
-  if ($fields.Count -eq 4 -and
-      $fields[0] -eq $ListenAddress -and
-      $fields[1] -eq [string]$ListenPort -and
-      $fields[2] -eq $WslIp -and
-      $fields[3] -eq '22') {
-    $ExpectedMappingExists = $true
-    break
+foreach ($Mapping in $Mappings) {
+  $ExpectedMappingExists = $false
+  foreach ($Line in $ExistingProxyLines) {
+    $Fields = @($Line.Trim() -split '\s+' | Where-Object { $_ })
+    if (
+      $Fields.Count -eq 4 -and
+      $Fields[0] -eq $ListenAddress -and
+      $Fields[1] -eq [string]$Mapping.ListenPort -and
+      $Fields[2] -eq $WslIp -and
+      $Fields[3] -eq [string]$Mapping.ConnectPort
+    ) {
+      $ExpectedMappingExists = $true
+      break
+    }
+  }
+
+  if (-not $ExpectedMappingExists) {
+    & netsh interface portproxy delete v4tov4 `
+      listenaddress=$ListenAddress listenport=$($Mapping.ListenPort) | Out-Null
+    & netsh interface portproxy add v4tov4 `
+      listenaddress=$ListenAddress listenport=$($Mapping.ListenPort) `
+      connectaddress=$WslIp connectport=$($Mapping.ConnectPort) protocol=tcp
+    if ($LASTEXITCODE -ne 0) {
+      throw "Failed to create Windows portproxy rule for $($Mapping.Name)"
+    }
+    $ProxyChanged = $true
+    Write-ChangeLog (
+      "portproxy_updated service=$($Mapping.Name) " +
+      "listen=${ListenAddress}:$($Mapping.ListenPort) " +
+      "target=${WslIp}:$($Mapping.ConnectPort)"
+    )
   }
 }
 
-if (-not $ExpectedMappingExists) {
-  & netsh interface portproxy delete v4tov4 `
-    listenaddress=$ListenAddress listenport=$ListenPort | Out-Null
-  & netsh interface portproxy add v4tov4 `
-    listenaddress=$ListenAddress listenport=$ListenPort `
-    connectaddress=$WslIp connectport=22 protocol=tcp
-  if ($LASTEXITCODE -ne 0) {
-    throw 'Failed to create Windows portproxy rule'
-  }
-  Write-ChangeLog "portproxy_updated listen=${ListenAddress}:${ListenPort} target=${WslIp}:22"
-}
-
-$FirewallIsCorrect = $false
-$ExistingFirewall = Get-NetFirewallRule -Name $FirewallName -ErrorAction SilentlyContinue
-if ($ExistingFirewall) {
-  $AddressFilter = $ExistingFirewall | Get-NetFirewallAddressFilter
-  $PortFilter = $ExistingFirewall | Get-NetFirewallPortFilter
-  $FirewallIsCorrect = (
-    $ExistingFirewall.Enabled -eq 'True' -and
-    $ExistingFirewall.Direction -eq 'Inbound' -and
-    $ExistingFirewall.Action -eq 'Allow' -and
-    $AddressFilter.LocalAddress -contains $ListenAddress -and
-    $AddressFilter.RemoteAddress -contains $ControlAddress -and
-    $PortFilter.Protocol -eq 'TCP' -and
-    $PortFilter.LocalPort -contains [string]$ListenPort
-  )
-}
-
-if (-not $FirewallIsCorrect) {
-  $ExistingFirewall | Remove-NetFirewallRule
+$SshFirewallName = 'GPUControl-4070-SSH-From-4090'
+$SshFirewallDisplayName = 'GPU Control SSH 2222 from 4090'
+$SshFirewallChanged = -not (Test-FirewallRule $SshFirewallName @('2222'))
+if ($SshFirewallChanged) {
+  Get-NetFirewallRule -Name $SshFirewallName -ErrorAction SilentlyContinue |
+    Remove-NetFirewallRule
   New-NetFirewallRule `
-    -Name $FirewallName `
-    -DisplayName $FirewallDisplayName `
+    -Name $SshFirewallName `
+    -DisplayName $SshFirewallDisplayName `
     -Direction Inbound `
     -Action Allow `
     -Protocol TCP `
     -LocalAddress $ListenAddress `
-    -LocalPort $ListenPort `
+    -LocalPort 2222 `
     -RemoteAddress $ControlAddress `
     -Profile Any | Out-Null
-  Write-ChangeLog "firewall_updated local=${ListenAddress}:${ListenPort} remote=${ControlAddress}"
+  Write-ChangeLog "firewall_updated service=SSH local=${ListenAddress}:2222 remote=${ControlAddress}"
+}
+
+$RuntimeFirewallName = 'GPUControl-4070-Runtime-From-4090'
+$RuntimeFirewallDisplayName = 'GPU Control Runtime 8188 9100 9201 from 4090'
+$RuntimeFirewallChanged = -not (
+  Test-FirewallRule $RuntimeFirewallName @('8188', '9100', '9201')
+)
+if ($RuntimeFirewallChanged) {
+  Get-NetFirewallRule -Name $RuntimeFirewallName -ErrorAction SilentlyContinue |
+    Remove-NetFirewallRule
+  Get-NetFirewallRule -DisplayName $RuntimeFirewallDisplayName -ErrorAction SilentlyContinue |
+    Remove-NetFirewallRule
+  New-NetFirewallRule `
+    -Name $RuntimeFirewallName `
+    -DisplayName $RuntimeFirewallDisplayName `
+    -Direction Inbound `
+    -Action Allow `
+    -Protocol TCP `
+    -LocalAddress $ListenAddress `
+    -LocalPort 8188,9100,9201 `
+    -RemoteAddress $ControlAddress `
+    -Profile Any | Out-Null
+  Write-ChangeLog (
+    "firewall_updated service=Runtime local=${ListenAddress}:8188,9100,9201 " +
+    "remote=${ControlAddress}"
+  )
 }
 
 Write-Output "WSL_IPV4=$WslIp"
-Write-Output "PORTPROXY_CHANGED=$(-not $ExpectedMappingExists)"
-Write-Output "FIREWALL_CHANGED=$(-not $FirewallIsCorrect)"
+Write-Output "PORTPROXY_CHANGED=$ProxyChanged"
+Write-Output "FIREWALL_CHANGED=$($SshFirewallChanged -or $RuntimeFirewallChanged)"

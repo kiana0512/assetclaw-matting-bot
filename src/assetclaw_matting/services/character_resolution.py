@@ -282,7 +282,10 @@ def _prune_terminal_pending_for_actor(conversation_id: str, user_id: str) -> Non
         if status == "CANCELED":
             cancel_run_resolutions(kind, run_id)
         elif status in {"FAILED", "BLOCKED", "DONE_WITH_ERRORS"}:
-            fail_run_resolutions(kind, run_id)
+            # A processing failure must not consume the user's role question.
+            # The task may be recovered from persisted mattes/batches, and a
+            # role reply received during the outage must still be durable.
+            continue
         elif status == "DONE":
             # A completed run cannot legitimately retain a blocking question.
             cancel_run_resolutions(kind, run_id)
@@ -316,6 +319,15 @@ def try_resolve_reply(
                 "handled": True,
                 "ok": False,
                 "message": "任务已因等待角色确认超时失败，请重新提交素材发起任务。",
+                "affected_runs": [],
+            }
+        # Do not let the LLM fabricate a stale "role mapped" acknowledgement
+        # for a bare canonical role name when no DB row was actually updated.
+        if _exact_answer_reference(_registry(), str(text or "").strip()):
+            return {
+                "handled": True,
+                "ok": False,
+                "message": "当前没有待确认的角色任务，本次未执行任何绑定。",
                 "affected_runs": [],
             }
         return {"handled": False}

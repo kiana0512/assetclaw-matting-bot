@@ -97,6 +97,35 @@ def test_full_rerun_is_idempotent_while_same_task_is_active(monkeypatch, tmp_pat
     assert result["run_id"] == "IMG_SOURCE"
 
 
+def test_canceled_image_full_rerun_transitions_to_queued(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", tmp_path / "runs")
+    _skip_pipeline_preflight(monkeypatch)
+    original = direct_image_skills.RUNS_ROOT / "IMG_CANCELED" / "original_images" / "image_01" / "01.png"
+    _png(original)
+    direct_image_skills._save(
+        {
+            "id": "IMG_CANCELED",
+            "status": "CANCELED",
+            "stage": "canceled",
+            "images": [{"index": 1, "original_path": str(original), "source_name": "01.png"}],
+            "children": {},
+            "sent_files": [],
+            "log": [],
+        }
+    )
+    started: list[str] = []
+    monkeypatch.setattr(direct_image_skills, "_start_worker", lambda run_id: started.append(run_id))
+
+    result = task_rerun_service.request_full_rerun("image", "IMG_CANCELED", confirmed=True)
+    run = direct_image_skills._load("IMG_CANCELED")
+
+    assert result["ok"] is True
+    assert started == ["IMG_CANCELED"]
+    assert run["status"] == "QUEUED"
+    assert run["stage"] == "full_rerun_queued"
+    assert run["rerun_history"][-1]["status"] == "CANCELED"
+
+
 def test_video_full_rerun_preserves_task_id_and_frame_parameters(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", tmp_path / "runs")
     _skip_pipeline_preflight(monkeypatch)

@@ -545,6 +545,13 @@ h3 {
   border-color: color-mix(in srgb, var(--teal) 34%, transparent);
 }
 
+.status-pill.warning,
+.badge.warning {
+  color: #f2c96d;
+  background: rgba(242, 201, 109, 0.1);
+  border-color: rgba(242, 201, 109, 0.36);
+}
+
 .status-pill.bad,
 .badge.bad,
 .status-pill.failed,

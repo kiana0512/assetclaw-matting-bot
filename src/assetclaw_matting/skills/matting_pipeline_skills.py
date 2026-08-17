@@ -14,6 +14,7 @@ from assetclaw_matting.comfyui.workflow_patch import inspect_workflow
 from assetclaw_matting.config import settings
 
 _PREFLIGHT_CACHE: dict[str, Any] = {}
+_CHERRY_PREFLIGHT_CACHE: dict[str, Any] = {}
 _PREFLIGHT_CACHE_SECONDS = 15
 _PREFLIGHT_LOCK = threading.Lock()
 
@@ -190,6 +191,118 @@ def ensure_latest_for_task(force_copy: bool = False, **_: Any) -> dict[str, Any]
         if cached:
             return cached
         return _ensure_latest_for_task_locked(force_copy=force_copy)
+
+
+def ensure_latest_cherry_for_task(**_: Any) -> dict[str, Any]:
+    """Fetch and validate only the local Cherry HTML used by a new task.
+
+    ImageClip matting is owned by GPU Control and has its own frozen rollout
+    protocol.  A local animation task must therefore never sync/validate the
+    Aki workflow or custom nodes as a side effect of refreshing Cherry.
+    """
+
+    requested_at = time.monotonic()
+    with _PREFLIGHT_LOCK:
+        cached = _cached_cherry_preflight(not_before=requested_at)
+        if cached:
+            return cached
+        result = _ensure_latest_cherry_for_task_locked()
+        _remember_cherry_preflight(result)
+        return result
+
+
+def _ensure_latest_cherry_for_task_locked() -> dict[str, Any]:
+    from assetclaw_matting.progress import notify_progress
+
+    notify_progress("正在更新 Cherry 后处理")
+    repo = _repo_dir()
+    before = _git_commit(repo) if (repo / ".git").exists() else {}
+    git_output = _sync_repo(repo)
+    after = _git_commit(repo)
+    source = Path(settings.cherry_postprocess_html_path)
+    if not source.is_file():
+        return {
+            "ok": False,
+            "repo_dir": str(repo),
+            "commit": after.get("commit", ""),
+            "git_output": git_output[-4000:],
+            "errors": [f"Cherry 唯一算法 HTML 缺失：{source}"],
+        }
+    try:
+        from assetclaw_matting.services.character_identity import CharacterReferenceCatalog
+
+        catalog = CharacterReferenceCatalog.discover(
+            settings.cherry_character_full_reference_dir,
+            settings.cherry_character_emoji_reference_dir,
+        )
+        character_assets = {
+            "catalog_revision": catalog.catalog_revision,
+            "full_count": len(catalog.full_registry.references),
+            "emoji_count": len(catalog.half_registry.references),
+            "full_dir": str(settings.cherry_character_full_reference_dir),
+            "emoji_dir": str(settings.cherry_character_emoji_reference_dir),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "repo_dir": str(repo),
+            "commit": after.get("commit", ""),
+            "git_output": git_output[-4000:],
+            "errors": [f"Cherry 角色校色/矫正图片目录无效：{exc}"],
+        }
+    cherry_release = _verify_cherry_release()
+    if not cherry_release.get("ok"):
+        return {
+            "ok": False,
+            "repo_dir": str(repo),
+            "commit": after.get("commit", ""),
+            "git_output": git_output[-4000:],
+            "cherry_release": cherry_release,
+            "errors": [str(cherry_release.get("candidate_error") or "Cherry canary failed")],
+        }
+    changed = before.get("commit") != after.get("commit")
+    fallback = bool(cherry_release.get("fallback"))
+    commit = str(after.get("commit") or "")
+    if fallback:
+        message = (
+            f"Cherry 仓库已检查 {commit[:12] or '-'}；最新 HTML canary 未通过，"
+            "本任务使用上一份验证版本。"
+        )
+    elif changed or cherry_release.get("promoted"):
+        message = f"Cherry 已更新并验证最新 HTML（{commit[:12] or '-'}）。"
+    else:
+        message = f"Cherry 已确认使用最新验证 HTML（{commit[:12] or '-'}）。"
+    return {
+        "ok": True,
+        "repo_url": settings.matting_pipeline_repo_url,
+        "repo_dir": str(repo),
+        "branch": after.get("branch", ""),
+        "commit": commit,
+        "commit_time": after.get("commit_time", ""),
+        "commit_subject": after.get("subject", ""),
+        "git_output": git_output[-4000:],
+        "updated": changed,
+        "cherry_html_path": str(source),
+        "cherry_release": cherry_release,
+        "character_assets": character_assets,
+        "message": message,
+    }
+
+
+def _cached_cherry_preflight(not_before: float | None = None) -> dict[str, Any] | None:
+    if not _CHERRY_PREFLIGHT_CACHE:
+        return None
+    checked_at = float(_CHERRY_PREFLIGHT_CACHE.get("ts") or 0)
+    if not_before is not None and checked_at < not_before:
+        return None
+    if time.monotonic() - checked_at > _PREFLIGHT_CACHE_SECONDS:
+        return None
+    return dict(_CHERRY_PREFLIGHT_CACHE.get("value") or {})
+
+
+def _remember_cherry_preflight(result: dict[str, Any]) -> None:
+    _CHERRY_PREFLIGHT_CACHE["ts"] = time.monotonic()
+    _CHERRY_PREFLIGHT_CACHE["value"] = dict(result)
 
 
 def _ensure_latest_for_task_locked(force_copy: bool = False) -> dict[str, Any]:
@@ -372,8 +485,9 @@ def _comfyui_queue_activity() -> dict[str, Any]:
 
 
 def _git(args: list[str], cwd: Path) -> str:
+    safe_directory = str(Path(cwd).resolve()).replace("\\", "/")
     proc = subprocess.run(
-        ["git", *args],
+        ["git", "-c", f"safe.directory={safe_directory}", *args],
         cwd=str(cwd),
         text=True,
         encoding="utf-8",

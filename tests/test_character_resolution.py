@@ -39,6 +39,7 @@ def _setup(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
     emoji_refs.mkdir()
 
     _write_reference(full_refs / "huggy.png", (384, 512), (10, 20, 230, 255))
+    _write_reference(full_refs / "jennifer.png", (384, 512), (120, 80, 210, 255))
     _write_reference(full_refs / "tasha.png", (384, 512), (220, 20, 30, 255))
     _write_reference(emoji_refs / "tasha.png", (256, 256), (20, 220, 30, 255))
 
@@ -227,7 +228,7 @@ def test_recoverable_failure_reopens_original_character_question(monkeypatch, tm
     assert resolution["status"] == "FROZEN"
 
 
-def test_legacy_terminal_status_file_is_pruned_before_reply(monkeypatch, tmp_path: Path) -> None:
+def test_processing_failure_does_not_discard_pending_role_reply(monkeypatch, tmp_path: Path) -> None:
     _setup(monkeypatch, tmp_path)
     failed_dir = tmp_path / "runs" / "IMG_LEGACY_FAILED"
     active_dir = tmp_path / "runs" / "IMG_ACTIVE"
@@ -260,7 +261,62 @@ def test_legacy_terminal_status_file_is_pruned_before_reply(monkeypatch, tmp_pat
     )
 
     assert result["ok"] is True
-    assert get_run_resolutions("direct_image", "IMG_LEGACY_FAILED")[0]["status"] == "FAILED"
+    assert get_run_resolutions("direct_image", "IMG_LEGACY_FAILED")[0]["status"] == "PENDING"
+
+
+def test_three_bare_role_replies_consume_three_pending_tasks_without_fake_ack(monkeypatch, tmp_path: Path) -> None:
+    _setup(monkeypatch, tmp_path)
+    run_ids = ["VID_BATCH_1", "VID_BATCH_2", "VID_BATCH_3"]
+    for index, run_id in enumerate(run_ids, start=1):
+        run_dir = tmp_path / "runs" / run_id
+        initialize_run_resolutions(
+            run_kind="direct_video",
+            run_id=run_id,
+            run_dir=run_dir,
+            conversation_id="feishu:chat:user",
+            chat_id="chat",
+            user_id="user",
+            units=[{
+                "unit_id": f"{run_id}:video:01",
+                "item_index": 1,
+                "source_name": f"{index}.mp4",
+                "evidence": [f"{index}.mp4"],
+            }],
+        )
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "status.json").write_text(
+            json.dumps({"id": run_id, "status": "FAILED", "stage": "matting"}),
+            encoding="utf-8",
+        )
+
+    for sequence in range(1, 4):
+        result = try_resolve_reply(
+            conversation_id="feishu:chat:user",
+            user_id="user",
+            message_id=f"om_jennifer_{sequence}",
+            text="jennifer",
+        )
+        assert result["handled"] is True
+        assert result["ok"] is True
+        frozen = sum(
+            get_run_resolutions("direct_video", run_id)[0]["status"] == "FROZEN"
+            for run_id in run_ids
+        )
+        assert frozen == sequence
+
+    extra = try_resolve_reply(
+        conversation_id="feishu:chat:user",
+        user_id="user",
+        message_id="om_jennifer_extra",
+        text="jennifer",
+    )
+    assert extra["handled"] is True
+    assert extra["ok"] is False
+    assert extra["affected_runs"] == []
+    for run_id in run_ids:
+        row = get_run_resolutions("direct_video", run_id)[0]
+        assert row["status"] == "FROZEN"
+        assert row["character_id"] == "jennifer"
 
 
 def test_pending_legacy_evidence_is_reconciled_without_user_reply(monkeypatch, tmp_path: Path) -> None:

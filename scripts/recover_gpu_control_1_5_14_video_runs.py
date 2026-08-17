@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from assetclaw_matting.config import settings
 from assetclaw_matting.db.schema import create_tables
 from assetclaw_matting.db.sqlite import get_connection, init_db
+from assetclaw_matting.services.character_resolution import reopen_failed_run_resolutions
 from assetclaw_matting.skills import direct_video_skills
 
 
@@ -22,6 +23,10 @@ def recover(run_id: str) -> dict[str, object]:
     child_id = str(children.get("comfyui_run_id") or "")
     if not child_id:
         raise RuntimeError(f"matting child is missing: {run_id}")
+
+    # Technical matting failures close role questions. Reopen them before
+    # recovery reaches the postprocess gate so valid user choices survive.
+    reopened_character_units = reopen_failed_run_resolutions("direct_video", run_id)
 
     with get_connection() as conn:
         row = conn.execute(
@@ -74,6 +79,7 @@ def recover(run_id: str) -> dict[str, object]:
         "previous_backend": previous_backend,
         "status": "RUNNING",
         "worker_started": started,
+        "reopened_character_units": reopened_character_units,
     }
 
 

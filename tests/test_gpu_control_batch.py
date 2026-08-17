@@ -305,6 +305,9 @@ def test_remote_progress_merge_is_monotonic_and_keeps_v3_identity() -> None:
 
 
 def test_current_gpu_control_identity_is_approved_and_mismatch_fails_closed() -> None:
+    assert APPROVED_WORKFLOW_VERSION == "2026.08.17-c39ed0b-colorfix-r1"
+    assert APPROVED_OUTPUT_NODE == "SaveImage #109"
+
     approved = validate_workflow_identity(
         {
             "workflow_key": APPROVED_WORKFLOW_KEY,
@@ -331,7 +334,7 @@ def test_current_gpu_control_identity_is_approved_and_mismatch_fails_closed() ->
         validate_workflow_identity(
             {
                 "workflow_key": APPROVED_WORKFLOW_KEY,
-                "workflow_version": "unexpected-version",
+                "workflow_version": "2026.08.12-c39ed0b-fp8-r1",
             }
         )
 
@@ -342,7 +345,7 @@ def test_current_gpu_control_identity_is_approved_and_mismatch_fails_closed() ->
                 "workflow_version": APPROVED_WORKFLOW_VERSION,
                 "pipeline_commit": APPROVED_PIPELINE_COMMIT,
                 "pipeline_sha256": APPROVED_PIPELINE_SHA256,
-                "output_node": "SaveImage #99",
+                "output_node": "SaveImage #102",
             }
         )
 

@@ -2,6 +2,7 @@ from pathlib import Path
 import asyncio
 import hashlib
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -213,6 +214,62 @@ def test_wait_processing_raises_error_after_processing_stops() -> None:
 
     with pytest.raises(RuntimeError, match="decode failed"):
         asyncio.run(cherry_html_runner._wait_processing_done(FakeCdp(), 5))  # type: ignore[arg-type]
+
+
+def test_wait_processing_treats_cdp_timeout_as_busy_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeCdp:
+        calls = 0
+
+        async def evaluate(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise TimeoutError("page main thread is processing canvas frames")
+            return {"done": True, "error": "", "processing": False}
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    cdp = FakeCdp()
+    monkeypatch.setattr(cherry_html_runner.asyncio, "sleep", no_sleep)
+    asyncio.run(cherry_html_runner._wait_processing_done(cdp, 5))  # type: ignore[arg-type]
+    assert cdp.calls == 2
+
+
+def test_process_click_is_scheduled_without_awaiting_page_handler() -> None:
+    source = Path(cherry_html_runner.__file__).read_text(encoding="utf-8")
+
+    assert "setTimeout(() => document.getElementById('btn-process').click(), 0); true;" in source
+    assert "await_promise=False" in source
+
+
+def test_windows_chrome_cleanup_terminates_the_process_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    class FakeProcess:
+        pid = 4321
+
+        @staticmethod
+        def poll():
+            return None
+
+        @staticmethod
+        def wait(*, timeout: float):
+            assert timeout == 5
+            return 0
+
+        @staticmethod
+        def kill():
+            raise AssertionError("taskkill completed; fallback kill is not expected")
+
+    def fake_run(args, **_kwargs):
+        calls.append(list(args))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(cherry_html_runner, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(cherry_html_runner.subprocess, "run", fake_run)
+    cherry_html_runner._stop_chrome(FakeProcess())  # type: ignore[arg-type]
+
+    assert calls == [["taskkill", "/PID", "4321", "/T", "/F"]]
 
 
 def test_verified_release_is_scoped_to_configured_source(tmp_path: Path) -> None:

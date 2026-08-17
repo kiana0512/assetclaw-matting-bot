@@ -45,13 +45,10 @@ def start(
     if not image_paths:
         raise ValueError("image_paths is required")
     images = [_validate_image(path) for path in image_paths]
-    pipeline_notice = ""
-    if not workflow_path and Path(settings.comfyui_workflow_path).name == settings.matting_pipeline_workflow_name:
-        pipeline = matting_pipeline_skills.ensure_latest_for_task()
-        if not pipeline.get("ok"):
-            raise RuntimeError(matting_pipeline_skills.preflight_error(pipeline))
-        workflow_path = str(pipeline.get("workflow_path") or "")
-        pipeline_notice = str(pipeline.get("message") or "")
+    pipeline = matting_pipeline_skills.ensure_latest_cherry_for_task()
+    if not pipeline.get("ok"):
+        raise RuntimeError(matting_pipeline_skills.preflight_error(pipeline))
+    pipeline_notice = str(pipeline.get("message") or "")
     names = list(source_names or [])
     group_keys = list(character_group_keys or [])
     evidence_sets = list(character_evidence or [])
@@ -913,6 +910,13 @@ def _run_comfyui(run: dict[str, Any]) -> None:
 
 
 def _run_cherry(run: dict[str, Any]) -> None:
+    from assetclaw_matting.services.cherry_postprocess_lock import cherry_postprocess_lock
+
+    with cherry_postprocess_lock():
+        _run_cherry_unlocked(run)
+
+
+def _run_cherry_unlocked(run: dict[str, Any]) -> None:
     from assetclaw_matting.skills.cherry_skills import run_start, run_status
 
     run.setdefault("children", {})["cherry_run_ids"] = []
@@ -1072,7 +1076,9 @@ def _prepare_character_gate(run: dict[str, Any]) -> bool:
         _append_log(run, "角色参考图已逐项冻结；Cherry 将在流程末尾依次执行校色和位置矫正。")
         _save(run)
         return True
-    unavailable = list(result.get("missing_profiles") or []) + list(result.get("missing") or [])
+    # An unresolved character must wait for user confirmation. Matte-only
+    # delivery is allowed only when a frozen character lacks the exact profile.
+    unavailable = list(result.get("missing_profiles") or [])
     if unavailable:
         _append_log(
             run,
@@ -1688,11 +1694,9 @@ def _user_failure_notice(run_id: str, error: Exception | str, *, retries_exhaust
 
 
 def _close_failed_character_resolution(run: dict[str, Any]) -> None:
-    from assetclaw_matting.services.character_resolution import fail_run_resolutions
+    """Keep role replies durable across recoverable processing failures."""
 
-    fail_run_resolutions("direct_image", str(run.get("id") or ""))
-    run["character_question"] = ""
-    run.setdefault("character_resolution", {})["pending"] = 0
+    run.setdefault("character_resolution", {})["preserved_after_failure"] = True
 
 
 def _cancel_child_runs(run: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2084,11 +2088,21 @@ def _find_run_by_text(value: str) -> dict[str, Any] | None:
     return fallback
 
 
-def _save(run: dict[str, Any], *, expected_statuses: set[str] | None = None) -> bool:
+def _save(
+    run: dict[str, Any],
+    *,
+    expected_statuses: set[str] | None = None,
+    allow_canceled_restart: bool = False,
+) -> bool:
     from assetclaw_matting.services.atomic_json_state import atomic_save_task_json
 
     path = _run_dir(run) / "status.json"
-    return atomic_save_task_json(path, run, expected_statuses=expected_statuses)
+    return atomic_save_task_json(
+        path,
+        run,
+        expected_statuses=expected_statuses,
+        allow_canceled_restart=allow_canceled_restart,
+    )
 
 
 def _run_dir(run: dict[str, Any]) -> Path:

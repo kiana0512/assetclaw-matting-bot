@@ -20,6 +20,7 @@ function statusClass(status) {
   const value = String(status || "").toLowerCase();
   if (["done", "done_with_errors"].includes(value)) return "ok";
   if (["failed", "blocked"].includes(value)) return "bad";
+  if (value === "character_confirmation_timeout") return "warning";
   if (["running", "queued", "waiting_character"].includes(value)) return "live";
   return "muted";
 }
@@ -94,6 +95,7 @@ function statusClass(status) {
 .detail-status { padding: 6px 10px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); font-size: 11px; font-weight: 700; }
 .detail-status.ok { color: #8ce9a5; border-color: rgba(140,233,165,.35); }
 .detail-status.live { color: color-mix(in srgb, var(--teal) 70%, var(--text)); border-color: color-mix(in srgb, var(--teal) 38%, var(--line)); }
+.detail-status.warning { color: #f2c96d; border-color: rgba(242,201,109,.4); }
 .detail-status.bad { color: #ffc0c5; border-color: rgba(255,120,130,.4); }
 .detail-body { display: grid; gap: 16px; padding: 18px 20px 22px; }
 .detail-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }

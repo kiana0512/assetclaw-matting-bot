@@ -50,11 +50,15 @@ def atomic_save_task_json(
     payload: dict[str, Any],
     *,
     expected_statuses: Iterable[str] | None = None,
+    allow_canceled_restart: bool = False,
 ) -> bool:
     """Atomically save status, optionally as a compare-and-swap transition.
 
-    ``CANCELED`` is irreversible: a stale worker may still persist progress,
-    but it can never resurrect a canceled task.
+    ``CANCELED`` is irreversible for ordinary saves: a stale worker may still
+    persist progress, but it can never resurrect a canceled task. A confirmed
+    full rerun may perform one compare-and-swap transition from ``CANCELED``
+    to ``QUEUED`` by setting ``allow_canceled_restart`` and expecting the
+    canceled state explicitly.
     """
 
     path = Path(path)
@@ -71,7 +75,13 @@ def atomic_save_task_json(
         if expected and existing_status not in expected:
             return False
         incoming_status = str(payload.get("status") or "").upper()
-        if existing_status == "CANCELED" and incoming_status != "CANCELED":
+        controlled_restart = (
+            allow_canceled_restart
+            and existing_status == "CANCELED"
+            and incoming_status == "QUEUED"
+            and "CANCELED" in expected
+        )
+        if existing_status == "CANCELED" and incoming_status != "CANCELED" and not controlled_restart:
             payload["status"] = "CANCELED"
             payload["stage"] = str(existing.get("stage") or "canceled")
             payload["error"] = str(existing.get("error") or payload.get("error") or "")

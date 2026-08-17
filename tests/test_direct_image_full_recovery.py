@@ -109,15 +109,21 @@ def test_full_pipeline_retry_skips_deterministic_missing_node_error() -> None:
     assert run["full_pipeline_recovery"]["retry_disabled_reason"] == "deterministic_workflow_error"
 
 
-def test_unknown_image_character_is_delivered_as_matte_only(monkeypatch) -> None:
+def test_unknown_image_character_waits_for_confirmation(monkeypatch) -> None:
     run = {"id": "IMG_UNKNOWN", "images": [{"item_id": "image:1"}], "log": []}
     calls: list[tuple[str, bool, bool]] = []
+    waiting: list[tuple[str, str]] = []
     monkeypatch.setattr(
         character_resolution,
         "bind_run_items",
         lambda *_args, **_kwargs: {"ready": False, "missing": ["image:1"], "missing_profiles": []},
     )
     monkeypatch.setattr(direct_image_skills, "_save", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        character_resolution,
+        "mark_run_waiting",
+        lambda kind, run_id: waiting.append((kind, run_id)) or True,
+    )
     monkeypatch.setattr(
         direct_image_skills,
         "deliver_matte_only",
@@ -127,11 +133,13 @@ def test_unknown_image_character_is_delivered_as_matte_only(monkeypatch) -> None
     )
 
     assert direct_image_skills._prepare_character_gate(run) is False
-    assert calls == [("IMG_UNKNOWN", True, True)]
-    assert run.get("status") != "WAITING_CHARACTER"
+    assert calls == []
+    assert waiting == [("direct_image", "IMG_UNKNOWN")]
+    assert run["status"] == "WAITING_CHARACTER"
+    assert run["character_resolution"]["pending"] == 1
 
 
-def test_unknown_video_character_is_delivered_as_matte_only(monkeypatch) -> None:
+def test_selected_video_character_without_required_profile_is_delivered_as_matte_only(monkeypatch) -> None:
     run = {"id": "VID_UNKNOWN", "videos": [{"item_id": "video:1"}], "log": []}
     calls: list[tuple[str, bool, bool]] = []
     monkeypatch.setattr(
@@ -151,6 +159,35 @@ def test_unknown_video_character_is_delivered_as_matte_only(monkeypatch) -> None
     assert direct_video_skills._prepare_character_gate(run) is False
     assert calls == [("VID_UNKNOWN", True, True)]
     assert run.get("status") != "WAITING_CHARACTER"
+
+
+def test_unknown_video_character_waits_for_confirmation(monkeypatch) -> None:
+    run = {"id": "VID_WAIT_ROLE", "videos": [{"item_id": "video:1"}], "log": []}
+    deliveries: list[str] = []
+    waiting: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        character_resolution,
+        "bind_run_items",
+        lambda *_args, **_kwargs: {"ready": False, "missing": ["2-1.mp4"], "missing_profiles": []},
+    )
+    monkeypatch.setattr(direct_video_skills, "_save", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        direct_video_skills,
+        "deliver_matte_only",
+        lambda run_id, **_kwargs: deliveries.append(run_id) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        character_resolution,
+        "mark_run_waiting",
+        lambda kind, run_id: waiting.append((kind, run_id)) or True,
+    )
+
+    assert direct_video_skills._prepare_character_gate(run) is False
+    assert deliveries == []
+    assert waiting == [("direct_video", "VID_WAIT_ROLE")]
+    assert run["status"] == "WAITING_CHARACTER"
+    assert run["stage"] == "waiting_character"
+    assert run["character_resolution"]["pending"] == 1
 
 
 def test_video_partial_gpu_result_retries_only_missing_frames(monkeypatch, tmp_path: Path) -> None:

@@ -1,4 +1,4 @@
-const TERMINAL = new Set(["DONE", "FAILED", "CANCELED", "BLOCKED", "DONE_WITH_ERRORS"]);
+const TERMINAL = new Set(["DONE", "FAILED", "CANCELED", "BLOCKED", "DONE_WITH_ERRORS", "CHARACTER_CONFIRMATION_TIMEOUT"]);
 const DONE = new Set(["DONE", "DONE_WITH_ERRORS"]);
 
 export function buildTaskPerformance(task, nowMs = Date.now()) {

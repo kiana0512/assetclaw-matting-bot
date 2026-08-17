@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PIL import Image
+
 
 def test_sync_repo_overwrites_local_changes(monkeypatch, tmp_path: Path) -> None:
     from assetclaw_matting.config import settings
@@ -89,6 +91,59 @@ def test_preflight_cache_cannot_skip_a_later_task_check(monkeypatch) -> None:
 
     assert matting_pipeline_skills._cached_preflight(not_before=checked_at) is not None
     assert matting_pipeline_skills._cached_preflight(not_before=checked_at + 0.001) is None
+
+
+def test_cherry_task_preflight_updates_only_local_postprocess_assets(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.config import settings
+    from assetclaw_matting.skills import matting_pipeline_skills
+
+    repo = tmp_path / "imageclip"
+    (repo / ".git").mkdir(parents=True)
+    html = repo / "cherry-postprocess.html"
+    html.write_text("verified cherry", encoding="utf-8")
+    full = repo / "CharactorFull"
+    emoji = repo / "CharactorEmoji"
+    full.mkdir()
+    emoji.mkdir()
+    Image.new("RGBA", (384, 512), (255, 0, 0, 255)).save(full / "jennifer.png")
+    Image.new("RGBA", (256, 256), (255, 0, 0, 255)).save(emoji / "jennifer.png")
+
+    monkeypatch.setattr(settings, "matting_pipeline_repo_dir", repo)
+    monkeypatch.setattr(settings, "cherry_postprocess_html_path", html)
+    monkeypatch.setattr(settings, "cherry_character_full_reference_dir", full)
+    monkeypatch.setattr(settings, "cherry_character_emoji_reference_dir", emoji)
+    monkeypatch.setattr(matting_pipeline_skills, "_sync_repo", lambda _repo: "fetched origin/main")
+    monkeypatch.setattr(
+        matting_pipeline_skills,
+        "_git_commit",
+        lambda _repo: {
+            "branch": "main",
+            "commit": "latest-html-commit",
+            "commit_time": "2026-08-13",
+            "subject": "update cherry and references",
+        },
+    )
+    monkeypatch.setattr(
+        matting_pipeline_skills,
+        "_verify_cherry_release",
+        lambda: {"ok": True, "promoted": True, "sha256": "abc", "path": str(html)},
+    )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Cherry-only preflight must not inspect or sync local ComfyUI")
+
+    monkeypatch.setattr(matting_pipeline_skills, "_asset_plan", forbidden)
+    monkeypatch.setattr(matting_pipeline_skills, "verify", forbidden)
+    monkeypatch.setattr(matting_pipeline_skills, "_comfyui_queue_activity", forbidden)
+
+    result = matting_pipeline_skills._ensure_latest_cherry_for_task_locked()
+
+    assert result["ok"] is True
+    assert result["commit"] == "latest-html-commit"
+    assert result["character_assets"]["full_count"] == 1
+    assert result["character_assets"]["emoji_count"] == 1
+    assert "workflow_path" not in result
+    assert "assets" not in result
 
 
 def test_runtime_node_check_ignores_frontend_and_disabled_nodes(monkeypatch) -> None:
