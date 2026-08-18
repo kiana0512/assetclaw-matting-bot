@@ -1309,7 +1309,19 @@ function directStageProgress(run, isImage) {
   if (stage.includes("send") || stage.includes("pack") || stage.includes("zip") || stage.includes("delivery")) {
     return { label: "打包与发送", progress: 50, overall: 98, count: "处理中", raw: run };
   }
-  if (stage.includes("cherry") || stage.includes("smooth") || cherryRuns.length) {
+  const waitingForCherrySlot = stage.includes("postprocess")
+    && !cherryRuns.some((item) => isActiveStatus(item?.status));
+  if (waitingForCherrySlot) {
+    return {
+      label: "Cherry 后处理",
+      progress: 0,
+      overall: isImage ? 50 : 60,
+      count: "等待处理槽位",
+      position: "复用已完成的抠图结果，等待本机 Cherry 处理槽位",
+      raw: run,
+    };
+  }
+  if (stage.includes("cherry") || stage.includes("smooth") || stage.includes("postprocess") || cherryRuns.length) {
     const progress = cherryTotal > 0 ? Math.round((cherryDone / cherryTotal) * 100) : progressFrom(cherryCurrent);
     const overall = isImage ? 50 + Math.round(progress * 0.46) : 60 + Math.round(progress * 0.36);
     return { label: "Cherry 后处理", progress, overall: Math.min(96, overall), count: `${cherryDone}/${cherryTotal || "-"}`, position: taskPosition("CHERRY", cherryCurrent), raw: cherryCurrent };

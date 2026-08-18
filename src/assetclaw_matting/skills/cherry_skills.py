@@ -398,6 +398,7 @@ def _run_worker_html(run_id: str, row: Any) -> None:
     if _sha256_path(source_path) != expected_source_sha256:
         raise RuntimeError("pinned Cherry HTML snapshot changed before processing")
     saved_group_transforms = options.setdefault("sequence_alignment_transforms", {})
+    saved_group_color_transforms = options.setdefault("sequence_color_transforms", {})
 
     for group_files in groups:
         latest = _get_run(run_id)
@@ -405,10 +406,14 @@ def _run_worker_html(run_id: str, row: Any) -> None:
             return
         group_key = str(group_files[0].parent.relative_to(src)).replace("\\", "/") if group_files else "."
         group_alignment_transform = saved_group_transforms.get(group_key)
+        group_color_transform = saved_group_color_transforms.get(group_key)
         pending = [path for path in group_files if str(path) not in done]
         if not pending:
             continue
-        if reference_steps_required and not group_alignment_transform and len(pending) != len(group_files):
+        missing_frozen_sequence_state = not group_alignment_transform or (
+            str(options.get("color_api") or "") == "sequence_transform_v2" and not group_color_transform
+        )
+        if reference_steps_required and missing_frozen_sequence_state and len(pending) != len(group_files):
             # A pre-upgrade/interrupted run may have partial outputs without
             # the frozen transform. Re-run this one group so all frames share
             # one verifiable transform instead of mixing two alignments.
@@ -442,6 +447,7 @@ def _run_worker_html(run_id: str, row: Any) -> None:
                     options,
                     reference_path=reference_path,
                     alignment_transform=group_alignment_transform,
+                    color_transform=group_color_transform,
                     html_path=source_path,
                     expected_source_sha256=expected_source_sha256,
                     expected_reference_sha256=expected_reference_sha256,
@@ -458,6 +464,13 @@ def _run_worker_html(run_id: str, row: Any) -> None:
                 if reference_steps_required and group_alignment_transform is None:
                     group_alignment_transform = dict(result.alignment_transform or {})
                     saved_group_transforms[group_key] = group_alignment_transform
+                if (
+                    reference_steps_required
+                    and str(result.color_api or "") == "sequence_transform_v2"
+                    and group_color_transform is None
+                ):
+                    group_color_transform = dict(result.color_transform or {})
+                    saved_group_color_transforms[group_key] = group_color_transform
                 width, height = _parse_resize(result.resize)
                 if width and height:
                     options["resize_width"] = width
@@ -470,6 +483,8 @@ def _run_worker_html(run_id: str, row: Any) -> None:
                 options["reference_loaded"] = result.reference_loaded
                 options["reference_sha256"] = result.reference_sha256
                 options["color_match_stats"] = result.color_match_stats
+                options["color_api"] = result.color_api
+                options["sequence_color_transform"] = group_color_transform
                 options["position_alignment_enabled"] = result.alignment_enabled
                 options["sequence_alignment_transform"] = group_alignment_transform
                 options.setdefault("html_runs", []).append(
@@ -485,6 +500,8 @@ def _run_worker_html(run_id: str, row: Any) -> None:
                         "reference_loaded": result.reference_loaded,
                         "reference_sha256": result.reference_sha256,
                         "color_match_stats": result.color_match_stats,
+                        "color_api": result.color_api,
+                        "color_transform": result.color_transform,
                         "position_alignment_enabled": result.alignment_enabled,
                         "alignment_transform": result.alignment_transform,
                         "source_sha256": result.source_sha256,
@@ -542,6 +559,7 @@ def _run_html_group_with_retries(
     *,
     reference_path: Path | None,
     alignment_transform: dict[str, Any] | None = None,
+    color_transform: dict[str, Any] | None = None,
     html_path: Path,
     expected_source_sha256: str,
     expected_reference_sha256: str,
@@ -567,6 +585,7 @@ def _run_html_group_with_retries(
                 reference_path=reference_path,
                 reference_steps_required=reference_steps_required,
                 alignment_transform=alignment_transform,
+                color_transform=color_transform,
                 expected_profile=expected_output[0] if expected_output else None,
                 expected_width=expected_output[1] if expected_output else None,
                 expected_height=expected_output[2] if expected_output else None,
@@ -985,6 +1004,19 @@ def _validate_html_result(
     insufficient = int(color_stats.get("insufficient") or 0)
     if insufficient or calls != int(result.total) or applied != calls:
         raise RuntimeError("Cherry color matching did not apply to every frame")
+    if str(getattr(result, "color_api", "") or "") == "sequence_transform_v2":
+        color_transform = result.color_transform or {}
+        if str(color_transform.get("method") or "") not in {"rgb", "lab", "lab_L"}:
+            raise RuntimeError("Cherry returned an invalid sequence color transform")
+        for key in ("A", "B"):
+            values = color_transform.get(key)
+            if not isinstance(values, (list, tuple)) or len(values) != 3:
+                raise RuntimeError("Cherry returned an invalid sequence color transform")
+            try:
+                if not all(math.isfinite(float(value)) for value in values):
+                    raise RuntimeError("Cherry returned an invalid sequence color transform")
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("Cherry returned an invalid sequence color transform") from exc
     transform = result.alignment_transform or {}
     for key in ("s", "tx", "ty"):
         try:

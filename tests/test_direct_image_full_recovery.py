@@ -392,6 +392,78 @@ def test_verified_gpu_result_resumes_parent_even_after_retry_budget_is_exhausted
     assert saved[-1]["error"] == ""
 
 
+def test_image_preparing_run_is_recovered_after_service_restart(monkeypatch, tmp_path: Path) -> None:
+    run_id = "IMG_PREPARING_RECOVERY"
+    run_dir = tmp_path / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "status.json").write_text(
+        json.dumps(
+            {
+                "id": run_id,
+                "status": "PREPARING",
+                "stage": "pipeline_preflight",
+                "children": {},
+                "log": [],
+                "worker_pid": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    saved: list[dict] = []
+    started: list[str] = []
+    monkeypatch.setattr(direct_image_skills, "RUNS_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(direct_image_skills, "_save", lambda value, **_kwargs: saved.append(dict(value)) or True)
+    monkeypatch.setattr(
+        direct_image_skills,
+        "_start_recovery_worker",
+        lambda recovered_id: started.append(recovered_id) or True,
+    )
+
+    result = direct_image_skills.recover_incomplete_runs()
+
+    assert result["closed"] == [run_id]
+    assert started == [run_id]
+    assert saved[-1]["status"] == "QUEUED"
+    assert saved[-1]["stage"] == "recovery_queued"
+    assert saved[-1]["recovery_from_stage"] == "pipeline_preflight"
+
+
+def test_video_preparing_run_is_recovered_after_service_restart(monkeypatch, tmp_path: Path) -> None:
+    run_id = "VID_PREPARING_RECOVERY"
+    run_dir = tmp_path / "video-runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "status.json").write_text(
+        json.dumps(
+            {
+                "id": run_id,
+                "status": "PREPARING",
+                "stage": "pipeline_preflight",
+                "children": {},
+                "log": [],
+                "worker_pid": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    saved: list[dict] = []
+    started: list[tuple[str, bool]] = []
+    monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", tmp_path / "video-runs")
+    monkeypatch.setattr(direct_video_skills, "_save", lambda value, **_kwargs: saved.append(dict(value)) or True)
+    monkeypatch.setattr(
+        direct_video_skills,
+        "_start_worker",
+        lambda recovered_id, recover=False: started.append((recovered_id, recover)) or True,
+    )
+
+    result = direct_video_skills.recover_incomplete_runs()
+
+    assert result["recovered"] == [run_id]
+    assert started == [(run_id, True)]
+    assert saved[-1]["status"] == "QUEUED"
+    assert saved[-1]["stage"] == "recovery_queued"
+    assert saved[-1]["recovery_from_stage"] == "pipeline_preflight"
+
+
 def test_video_manifest_recovery_reopens_role_gate_and_refreshes_child_snapshot(monkeypatch, tmp_path: Path) -> None:
     run_id = "VID_MANIFEST_RECOVERY"
     child_id = "COMFY_VIDEO_RECOVERY"

@@ -49,14 +49,22 @@ def _request_full_rerun_locked(kind: Kind, run_id: str | None) -> dict[str, Any]
     requested_at = _now()
     try:
         _validate_originals(kind, run)
-        workflow = _preflight_latest_workflow(run)
         history = list(run.get("rerun_history") or [])
         history.append(_history_entry(run, request_id, requested_at))
         run["rerun_history"] = history[-20:]
         _reset_run(kind, module, run)
-        if workflow:
-            run["workflow_path"] = str(workflow.get("workflow_path") or run.get("workflow_path") or "")
-            run["pipeline_notice"] = str(workflow.get("message") or "")
+        run_items = run.get("images" if kind == "image" else "videos") or []
+        if any(str(item.get("character_unit_id") or "") for item in run_items):
+            from assetclaw_matting.services.character_resolution import reactivate_run_resolutions
+
+            character_state = reactivate_run_resolutions(f"direct_{kind}", str(run["id"]))
+            if character_state.get("found"):
+                run["character_question"] = str(character_state.get("prompt") or "")
+                run["character_resolution"] = {
+                    "question_id": str(character_state.get("question_id") or ""),
+                    "total": int(character_state.get("total") or 0),
+                    "pending": int(character_state.get("pending") or 0),
+                }
         run["status"] = "QUEUED"
         run["stage"] = "full_rerun_queued"
         run["error"] = ""

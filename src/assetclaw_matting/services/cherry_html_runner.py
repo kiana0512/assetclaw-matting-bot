@@ -37,6 +37,8 @@ class CherryHtmlResult:
     alignment_enabled: bool = False
     alignment_transform: dict[str, Any] = field(default_factory=dict)
     color_match_stats: dict[str, int] = field(default_factory=dict)
+    color_api: str = ""
+    color_transform: dict[str, Any] = field(default_factory=dict)
 
 
 def validate_cherry_html_runtime(html_path: Path, chrome_path: Path | None = None) -> dict[str, str]:
@@ -52,14 +54,24 @@ def validate_cherry_html_runtime(html_path: Path, chrome_path: Path | None = Non
         "colormatch",
         "align",
         "buildAlignTransform",
-        "colorMatchToRef",
         "buildDiagnosticLog",
     )
     missing = [marker for marker in required_markers if marker not in html]
+    color_api = _detect_color_api(html)
+    if not color_api:
+        missing.append("colorMatchToRef or buildColorTransform+colorMatchWithTransform")
     if missing:
         raise ValueError(f"Cherry algorithm HTML is missing required controls: {', '.join(missing)}")
     browser = _resolve_chrome(chrome_path)
-    return {"html_path": str(source), "browser_path": str(browser)}
+    return {"html_path": str(source), "browser_path": str(browser), "color_api": color_api}
+
+
+def _detect_color_api(html: str) -> str:
+    if "buildColorTransform" in html and "colorMatchWithTransform" in html:
+        return "sequence_transform_v2"
+    if "colorMatchToRef" in html:
+        return "per_frame_v1"
+    return ""
 
 
 class CdpClient:
@@ -175,6 +187,7 @@ def run_cherry_html(
     reference_path: Path | None = None,
     reference_steps_required: bool = True,
     alignment_transform: dict[str, Any] | None = None,
+    color_transform: dict[str, Any] | None = None,
     expected_profile: str | None = None,
     expected_width: int | None = None,
     expected_height: int | None = None,
@@ -194,6 +207,7 @@ def run_cherry_html(
                     reference_path=reference_path,
                     reference_steps_required=reference_steps_required,
                     alignment_transform=alignment_transform,
+                    color_transform=color_transform,
                     expected_profile=expected_profile,
                     expected_width=expected_width,
                     expected_height=expected_height,
@@ -229,6 +243,7 @@ async def _run_cherry_html_async(
     reference_path: Path | None,
     reference_steps_required: bool,
     alignment_transform: dict[str, Any] | None,
+    color_transform: dict[str, Any] | None,
     expected_profile: str | None,
     expected_width: int | None,
     expected_height: int | None,
@@ -391,9 +406,13 @@ async def _run_cherry_html_async(
                 expected_alignment = _normalize_alignment_transform(alignment_transform) if alignment_transform else None
                 if expected_alignment:
                     await _install_fixed_alignment_transform(cdp, expected_alignment)
+                expected_color_transform = _normalize_color_transform(color_transform) if color_transform else None
+                if expected_color_transform:
+                    await _install_fixed_color_transform(cdp, expected_color_transform)
             else:
                 forced = await _force_reference_steps_disabled(cdp)
                 expected_alignment = None
+                expected_color_transform = None
             preset["steps"] = [str(step) for step in (forced.get("configuredSteps") or [])]
             # Cherry performs CPU-heavy synchronous work from the click handler.
             # Invoking click() directly keeps Runtime.evaluate open until that
@@ -410,6 +429,7 @@ async def _run_cherry_html_async(
             _validate_processing_report(
                 report,
                 expected_alignment_transform=expected_alignment,
+                expected_color_transform=expected_color_transform,
                 reference_steps_required=reference_steps_required,
                 expected_frames=len(files),
             )
@@ -454,6 +474,8 @@ async def _run_cherry_html_async(
                 key: int((report.get("colorMatchStats") or {}).get(key) or 0)
                 for key in ("calls", "applied", "insufficient")
             },
+            color_api=str(report.get("colorApi") or ""),
+            color_transform=dict(report.get("colorTransform") or {}),
         )
     finally:
         _stop_chrome(proc)
@@ -577,15 +599,46 @@ async def _install_processing_probe(cdp: CdpClient) -> None:
     state = await cdp.evaluate(
         """
         (()=>{
-          if(typeof buildDiagnosticLog !== 'function' || typeof colorMatchToRef !== 'function'){
+          const hasSequenceApi=typeof buildColorTransform === 'function' && typeof colorMatchWithTransform === 'function';
+          const hasLegacyApi=typeof colorMatchToRef === 'function';
+          if(typeof buildDiagnosticLog !== 'function' || (!hasSequenceApi && !hasLegacyApi)){
             return {installed:false,error:'Cherry diagnostic functions are unavailable'};
           }
-          if(!window.__assetclawOriginalColorMatchToRef){
+          const countSubjectPixels=(image,opts)=>{
+            const threshold=Math.round(Number(opts?.threshold??0.01)*255);
+            let count=0;
+            for(let i=3;i<image.data.length;i+=4){if(image.data[i]>threshold)count++;}
+            return count;
+          };
+          window.__assetclawColorApi=hasSequenceApi?'sequence_transform_v2':'per_frame_v1';
+          if(hasSequenceApi && !window.__assetclawOriginalBuildColorTransform){
+            window.__assetclawOriginalBuildColorTransform=buildColorTransform;
+            buildColorTransform=function(sample,reference,opts){
+              window.__assetclawColorMatchStats.transformCalls++;
+              const transform=window.__assetclawOriginalBuildColorTransform.call(this,sample,reference,opts);
+              if(transform){
+                window.__assetclawColorMatchStats.transformsBuilt++;
+                window.__assetclawObservedColorTransform=transform;
+              }else{
+                window.__assetclawColorMatchStats.transformFailures++;
+              }
+              return transform;
+            };
+          }
+          if(hasSequenceApi && !window.__assetclawOriginalColorMatchWithTransform){
+            window.__assetclawOriginalColorMatchWithTransform=colorMatchWithTransform;
+            colorMatchWithTransform=function(image,transform,opts){
+              const subjectPixels=countSubjectPixels(image,opts);
+              window.__assetclawColorMatchStats.calls++;
+              if(!transform || subjectPixels<64)window.__assetclawColorMatchStats.insufficient++;
+              else window.__assetclawColorMatchStats.applied++;
+              return window.__assetclawOriginalColorMatchWithTransform.call(this,image,transform,opts);
+            };
+          }
+          if(hasLegacyApi && !hasSequenceApi && !window.__assetclawOriginalColorMatchToRef){
             window.__assetclawOriginalColorMatchToRef=colorMatchToRef;
             colorMatchToRef=function(image,ref,opts){
-              const threshold=Math.round(Number(opts?.threshold??0.01)*255);
-              let subjectPixels=0;
-              for(let i=3;i<image.data.length;i+=4){if(image.data[i]>threshold)subjectPixels++;}
+              const subjectPixels=countSubjectPixels(image,opts);
               window.__assetclawColorMatchStats.calls++;
               if(subjectPixels<64)window.__assetclawColorMatchStats.insufficient++;
               else window.__assetclawColorMatchStats.applied++;
@@ -607,12 +660,15 @@ async def _install_processing_probe(cdp: CdpClient) -> None:
                   ty:Number(stats.alignInfo.ty),
                   anchor:String(stats.alignInfo.anchor||'')
                 } : null,
+                colorApi:String(window.__assetclawColorApi||''),
+                colorTransform:window.__assetclawObservedColorTransform||window.__assetclawFixedColorTransform||null,
                 colorMatchStats:{...window.__assetclawColorMatchStats}
               };
               return window.__assetclawOriginalBuildDiagnosticLog.call(this,stats,order,...rest);
             };
           }
-          window.__assetclawColorMatchStats={calls:0,applied:0,insufficient:0};
+          window.__assetclawColorMatchStats={calls:0,applied:0,insufficient:0,transformCalls:0,transformsBuilt:0,transformFailures:0};
+          window.__assetclawObservedColorTransform=null;
           window.__assetclawCherryReport=null;
           return {installed:true};
         })()
@@ -782,6 +838,36 @@ async def _install_fixed_alignment_transform(cdp: CdpClient, transform: dict[str
         raise RuntimeError(f"Cherry fixed alignment transform could not be installed: {detail}")
 
 
+async def _install_fixed_color_transform(cdp: CdpClient, transform: dict[str, Any]) -> None:
+    """Reuse the first micro-batch's sequence color transform for later batches."""
+
+    payload = json.dumps(_normalize_color_transform(transform), ensure_ascii=True)
+    state = await cdp.evaluate(
+        f"""
+        (()=>{{
+          if(typeof buildColorTransform !== 'function' || typeof colorMatchWithTransform !== 'function'){{
+            return {{ok:false,error:'Cherry sequence color-transform API is unavailable'}};
+          }}
+          const fixed={payload};
+          window.__assetclawFixedColorTransform=fixed;
+          window.__assetclawObservedColorTransform=fixed;
+          window.__assetclawOriginalBuildColorTransformForFixed ||= buildColorTransform;
+          buildColorTransform=function(){{
+            window.__assetclawColorMatchStats.transformCalls++;
+            window.__assetclawColorMatchStats.transformsBuilt++;
+            window.__assetclawObservedColorTransform=fixed;
+            return fixed;
+          }};
+          return {{ok:true,fixed}};
+        }})()
+        """,
+        timeout=10.0,
+    )
+    if not isinstance(state, dict) or not state.get("ok"):
+        detail = state.get("error") if isinstance(state, dict) else "unknown error"
+        raise RuntimeError(f"Cherry fixed color transform could not be installed: {detail}")
+
+
 async def _read_processing_report(cdp: CdpClient) -> dict[str, Any]:
     report = await cdp.evaluate(
         """
@@ -798,6 +884,12 @@ async def _read_processing_report(cdp: CdpClient) -> dict[str, Any]:
               tx:Number(report.alignmentTransform.tx),
               ty:Number(report.alignmentTransform.ty),
               anchor:String(report.alignmentTransform.anchor||'')
+            } : null,
+            colorApi:String(report.colorApi||''),
+            colorTransform:report.colorTransform ? {
+              method:String(report.colorTransform.method||''),
+              A:Array.from(report.colorTransform.A||[],Number),
+              B:Array.from(report.colorTransform.B||[],Number)
             } : null,
             colorMatchStats:report.colorMatchStats ? {
               calls:Number(report.colorMatchStats.calls||0),
@@ -818,6 +910,7 @@ def _validate_processing_report(
     report: dict[str, Any],
     *,
     expected_alignment_transform: dict[str, Any] | None = None,
+    expected_color_transform: dict[str, Any] | None = None,
     reference_steps_required: bool = True,
     expected_frames: int | None = None,
 ) -> None:
@@ -847,6 +940,19 @@ def _validate_processing_report(
         raise RuntimeError("Cherry color matching was a no-op for one or more frames")
     if expected_frames is not None and calls != int(expected_frames):
         raise RuntimeError(f"Cherry color matching covered {calls}/{int(expected_frames)} frames")
+    color_api = str(report.get("colorApi") or ("sequence_transform_v2" if report.get("colorTransform") else "per_frame_v1"))
+    if color_api == "sequence_transform_v2":
+        actual_color_transform = _normalize_color_transform(report.get("colorTransform"))
+        if expected_color_transform:
+            expected_color = _normalize_color_transform(expected_color_transform)
+            if actual_color_transform["method"] != expected_color["method"] or any(
+                abs(float(actual_color_transform[key][index]) - float(expected_color[key][index])) > 1e-9
+                for key in ("A", "B")
+                for index in range(3)
+            ):
+                raise RuntimeError("Cherry did not reuse the frozen sequence color transform")
+    elif color_api != "per_frame_v1":
+        raise RuntimeError("Cherry completed without a recognized color matching API")
     actual_transform = _normalize_alignment_transform(report.get("alignmentTransform"))
     if expected_alignment_transform:
         expected = _normalize_alignment_transform(expected_alignment_transform)
@@ -870,6 +976,30 @@ def _normalize_alignment_transform(value: Any) -> dict[str, Any]:
     return normalized
 
 
+def _normalize_color_transform(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise RuntimeError("Cherry completed without a verifiable color transform")
+    method = str(value.get("method") or "")
+    if method not in {"rgb", "lab", "lab_L"}:
+        raise RuntimeError("Cherry returned an invalid color transform method")
+    normalized: dict[str, Any] = {"method": method}
+    for key in ("A", "B"):
+        raw = value.get(key)
+        if not isinstance(raw, (list, tuple)) or len(raw) != 3:
+            raise RuntimeError("Cherry returned an invalid color transform")
+        numbers: list[float] = []
+        for item in raw:
+            try:
+                number = float(item)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("Cherry returned an invalid color transform") from exc
+            if not math.isfinite(number):
+                raise RuntimeError("Cherry returned an invalid color transform")
+            numbers.append(number)
+        normalized[key] = numbers
+    return normalized
+
+
 async def _wait_ready(cdp: CdpClient) -> None:
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
@@ -877,8 +1007,9 @@ async def _wait_ready(cdp: CdpClient) -> None:
             "document.readyState === 'complete' && !!document.getElementById('file-input') && "
             "!!document.getElementById('ref-input') && typeof setFiles === 'function' && "
             "typeof setRefFromFile === 'function' && typeof setModuleState === 'function' && "
-            "typeof buildDiagnosticLog === 'function' && typeof buildAlignTransform === 'function'"
-            " && typeof colorMatchToRef === 'function'",
+            "typeof buildDiagnosticLog === 'function' && typeof buildAlignTransform === 'function' && "
+            "((typeof buildColorTransform === 'function' && typeof colorMatchWithTransform === 'function') || "
+            "typeof colorMatchToRef === 'function')",
             timeout=5.0,
         )
         if value is True:
@@ -1241,6 +1372,11 @@ def verified_cherry_html_path(source_path: Path, storage_dir: Path) -> Path:
         release_source = Path(str(payload.get("source_path") or "")).resolve()
         if release_source != configured_source:
             return Path(source_path)
+        source_digest = _sha256_file(configured_source)
+        if str(payload.get("sha256") or "") != source_digest:
+            # A release is valid only for the exact currently configured
+            # source bytes. Never route a newer task back to an older HTML.
+            return Path(source_path)
         active = Path(str(payload.get("path") or ""))
         if active.is_file() and str(payload.get("sha256") or "") == _sha256_file(active):
             return active
@@ -1266,15 +1402,6 @@ def verify_and_promote_cherry_html(
         validate_cherry_html_runtime(source, chrome_path)
         digest = _sha256_file(source)
     except Exception as exc:
-        if active_before.is_file() and active_before.resolve() != source:
-            return {
-                "ok": True,
-                "promoted": False,
-                "sha256": digest,
-                "path": str(active_before),
-                "fallback": True,
-                "candidate_error": str(exc),
-            }
         return {"ok": False, "promoted": False, "sha256": digest, "path": "", "candidate_error": str(exc)}
     try:
         current = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -1313,15 +1440,6 @@ def verify_and_promote_cherry_html(
         if result.total != 1:
             raise RuntimeError(f"Cherry canary returned total={result.total}, expected 1")
     except Exception as exc:
-        if active_before.is_file() and active_before.resolve() != source:
-            return {
-                "ok": True,
-                "promoted": False,
-                "sha256": digest,
-                "path": str(active_before),
-                "fallback": True,
-                "candidate_error": str(exc),
-            }
         return {"ok": False, "promoted": False, "sha256": digest, "path": "", "candidate_error": str(exc)}
 
     release_dir = release_root / digest

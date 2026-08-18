@@ -151,37 +151,11 @@ class FeishuClient:
         return data["data"]["file_key"]
 
     def send_file_to_chat(self, chat_id: str, path: Path, file_name: str | None = None) -> dict[str, str]:
-        # Large one-shot message uploads can spend the whole 60-second timeout
-        # writing the request body. Route them straight to Drive's chunked API.
-        if path.stat().st_size > DIRECT_MESSAGE_UPLOAD_MAX_BYTES:
-            return self._send_drive_file_to_chat(chat_id, path, file_name)
-        try:
-            file_key = self.upload_file(path, file_name)
-        except requests.HTTPError as exc:
-            if not _is_message_file_size_error(exc):
-                raise
-            return self._send_drive_file_to_chat(chat_id, path, file_name, cause=exc)
-        except (requests.Timeout, requests.ConnectionError) as exc:
-            log.warning("message file upload failed, switching to Drive: file=%s error=%s", path, exc)
-            return self._send_drive_file_to_chat(chat_id, path, file_name, cause=exc)
-        payload = {
-            "receive_id": chat_id,
-            "msg_type": _feishu_message_type(file_name or path.name),
-            "content": json.dumps({"file_key": file_key}, ensure_ascii=False),
-        }
-        response = self._post_with_retry(
-            f"{FEISHU_BASE}/im/v1/messages?receive_id_type=chat_id",
-            headers=self._headers(),
-            json=payload,
-            timeout=15,
-        )
-        self._raise_for_api_error(response, "send_file_to_chat")
-        data = response.json()
-        if data.get("code") != 0:
-            raise RuntimeError(f"send_file_to_chat failed: code={data.get('code')} msg={data.get('msg')} error={data.get('error')}")
-        receipt = _message_receipt(data, delivery_method="message_attachment")
-        receipt["file_key"] = file_key
-        return receipt
+        # Message attachments inherit the original conversation's permission.
+        # Forwarding that message to another user does not reliably grant the
+        # recipient download access.  Deliver every result as a tenant-readable
+        # Drive link so a forwarded result remains downloadable.
+        return self._send_drive_file_to_chat(chat_id, path, file_name)
 
     def _send_drive_file_to_chat(
         self,
@@ -193,6 +167,7 @@ class FeishuClient:
         drive_file = self.upload_drive_file(path, file_name)
         file_token = str(drive_file.get("file_token") or "")
         if file_token:
+            self.set_drive_file_link_share(file_token, link_share_entity="tenant_readable")
             self.grant_drive_file_to_chat(file_token, chat_id, perm="full_access")
         url = str(drive_file.get("url") or "")
         if not url:
@@ -204,6 +179,7 @@ class FeishuClient:
         if isinstance(receipt, dict):
             drive_file.update({key: str(value) for key, value in receipt.items() if value})
         drive_file["delivery_method"] = "drive_link"
+        drive_file["link_share_entity"] = "tenant_readable"
         return drive_file
 
     def upload_drive_file(self, path: Path, file_name: str | None = None) -> dict[str, str]:
@@ -353,6 +329,51 @@ class FeishuClient:
                 f"grant_drive_file_to_chat failed: code={data.get('code')} "
                 f"msg={data.get('msg')} error={data.get('error')}"
             )
+
+    def set_drive_file_link_share(
+        self,
+        file_token: str,
+        *,
+        link_share_entity: str = "tenant_readable",
+    ) -> None:
+        if not file_token:
+            return
+        allowed = {"tenant_readable", "tenant_editable", "anyone_readable", "anyone_editable", "closed"}
+        if link_share_entity not in allowed:
+            raise ValueError(f"unsupported Drive link sharing mode: {link_share_entity}")
+        response = self._patch_with_retry(
+            f"{FEISHU_BASE}/drive/v1/permissions/{file_token}/public",
+            headers={**self._headers(), "Content-Type": "application/json"},
+            params={"type": "file"},
+            json={"link_share_entity": link_share_entity},
+            timeout=60,
+        )
+        self._raise_for_api_error(response, "set_drive_file_link_share")
+        data = response.json()
+        if data.get("code") != 0:
+            raise RuntimeError(
+                f"set_drive_file_link_share failed: code={data.get('code')} "
+                f"msg={data.get('msg')} error={data.get('error')}"
+            )
+
+    def _patch_with_retry(self, url: str, *, attempts: int = 3, **kwargs) -> requests.Response:
+        last_error: Exception | None = None
+        for attempt in range(1, max(1, attempts) + 1):
+            try:
+                response = requests.patch(url, **kwargs)
+                if response.status_code not in RETRYABLE_HTTP_STATUSES or attempt >= attempts:
+                    return response
+                last_error = requests.HTTPError(
+                    f"retryable HTTP status {response.status_code} for {url}",
+                    response=response,
+                )
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_error = exc
+                if attempt >= attempts:
+                    raise
+            time.sleep(min(2 ** (attempt - 1), 4))
+        assert last_error is not None
+        raise last_error
 
     def download_message_resource(
         self,

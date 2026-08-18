@@ -14,7 +14,9 @@ from assetclaw_matting.services.character_resolution import (
     _parse_assignments,
     all_run_units_frozen,
     bind_run_items,
+    cancel_run_resolutions,
     fail_run_resolutions,
+    reactivate_run_resolutions,
     reopen_failed_run_resolutions,
     get_run_resolutions,
     initialize_run_resolutions,
@@ -91,6 +93,45 @@ def test_filename_match_freezes_reference_and_binds_item(monkeypatch, tmp_path: 
     assert item["position_alignment_enabled"] is True
     assert Path(item["color_reference_path"]).is_file()
     assert item["color_reference_sha256"] == _sha256(Path(item["color_reference_path"]))
+
+
+def test_cancelled_character_bindings_are_reactivated_for_rerun(monkeypatch, tmp_path: Path) -> None:
+    _setup(monkeypatch, tmp_path)
+    initialize_run_resolutions(
+        run_kind="direct_video",
+        run_id="VID_RERUN",
+        run_dir=tmp_path / "runs" / "VID_RERUN",
+        conversation_id="feishu:chat:user",
+        chat_id="chat",
+        user_id="user",
+        units=[
+            {
+                "unit_id": "VID_RERUN:video:01",
+                "item_index": 1,
+                "group_key": "video:1",
+                "source_name": "tasha.mp4",
+                "evidence": ["tasha.mp4"],
+            },
+            {
+                "unit_id": "VID_RERUN:video:02",
+                "item_index": 2,
+                "group_key": "video:2",
+                "source_name": "unknown.mp4",
+                "evidence": ["unknown.mp4"],
+            },
+        ],
+    )
+    cancel_run_resolutions("direct_video", "VID_RERUN")
+
+    state = reactivate_run_resolutions("direct_video", "VID_RERUN")
+    rows = get_run_resolutions("direct_video", "VID_RERUN")
+
+    assert state["found"] is True
+    assert state["pending"] == 1
+    assert [row["status"] for row in rows] == ["FROZEN", "PENDING"]
+    assert rows[0]["character_id"] == "tasha"
+    assert state["question_id"]
+    assert "C-" in state["prompt"]
 
 
 def test_multiple_pending_units_require_tokens_and_allow_reverse_order(monkeypatch, tmp_path: Path) -> None:

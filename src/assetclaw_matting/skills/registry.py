@@ -2121,6 +2121,7 @@ SKILLS: list[dict[str, Any]] = [
         {
             "image_paths": "array[string]",
             "source_names": "array[string] optional",
+            "source_relative_paths": "array[string] optional",
             "workflow_path": "string optional",
             "notify_interval_seconds": "integer optional",
             "matting_backend": "string optional",

@@ -279,7 +279,7 @@ def test_verified_release_is_scoped_to_configured_source(tmp_path: Path) -> None
     source_b.write_text("b", encoding="utf-8")
     release = tmp_path / "storage" / "cherry_html_releases" / "release.html"
     release.parent.mkdir(parents=True)
-    release.write_text("verified", encoding="utf-8")
+    release.write_text("a", encoding="utf-8")
     (release.parent / "active.json").write_text(
         json.dumps(
             {
@@ -295,7 +295,7 @@ def test_verified_release_is_scoped_to_configured_source(tmp_path: Path) -> None
     assert cherry_html_runner.verified_cherry_html_path(source_b, tmp_path / "storage") == source_b
 
 
-def test_invalid_candidate_falls_back_to_last_verified_release(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_invalid_candidate_does_not_fall_back_to_last_verified_release(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     source = tmp_path / "cherry-postprocess.html"
     source.write_text("candidate", encoding="utf-8")
     release = tmp_path / "storage" / "cherry_html_releases" / "old" / "cherry-postprocess.html"
@@ -320,7 +320,83 @@ def test_invalid_candidate_falls_back_to_last_verified_release(monkeypatch: pyte
 
     result = cherry_html_runner.verify_and_promote_cherry_html(source, tmp_path / "storage")
 
-    assert result["ok"] is True
-    assert result["fallback"] is True
-    assert Path(result["path"]) == release.resolve()
+    assert result["ok"] is False
+    assert result["path"] == ""
+    assert "fallback" not in result
     assert "missing process button" in result["candidate_error"]
+def _runtime_html(color_source: str) -> str:
+    return "\n".join(
+        [
+            "file-input ref-input btn-process btn-download colormatch align",
+            "function buildAlignTransform(){}",
+            "function buildDiagnosticLog(){}",
+            color_source,
+        ]
+    )
+
+
+def test_runtime_validation_accepts_sequence_color_transform_api(tmp_path: Path) -> None:
+    html = tmp_path / "cherry.html"
+    browser = tmp_path / "chrome.exe"
+    html.write_text(
+        _runtime_html("function buildColorTransform(){} function colorMatchWithTransform(){}"),
+        encoding="utf-8",
+    )
+    browser.write_bytes(b"")
+
+    result = cherry_html_runner.validate_cherry_html_runtime(html, browser)
+
+    assert result["color_api"] == "sequence_transform_v2"
+
+
+def test_runtime_validation_keeps_legacy_color_api_compatibility(tmp_path: Path) -> None:
+    html = tmp_path / "cherry.html"
+    browser = tmp_path / "chrome.exe"
+    html.write_text(_runtime_html("function colorMatchToRef(){}"), encoding="utf-8")
+    browser.write_bytes(b"")
+
+    result = cherry_html_runner.validate_cherry_html_runtime(html, browser)
+
+    assert result["color_api"] == "per_frame_v1"
+
+
+def test_runtime_validation_rejects_incomplete_color_api(tmp_path: Path) -> None:
+    html = tmp_path / "cherry.html"
+    browser = tmp_path / "chrome.exe"
+    html.write_text(_runtime_html("function buildColorTransform(){}"), encoding="utf-8")
+    browser.write_bytes(b"")
+
+    with pytest.raises(ValueError, match=r"buildColorTransform\+colorMatchWithTransform"):
+        cherry_html_runner.validate_cherry_html_runtime(html, browser)
+
+
+def test_fixed_sequence_color_transform_is_injected_and_verified() -> None:
+    class FakeCdp:
+        expression = ""
+
+        async def evaluate(self, expression: str, **_kwargs):
+            self.expression = expression
+            return {"ok": True, "fixed": {"method": "lab", "A": [1, 1, 1], "B": [0, 0, 0]}}
+
+    fixed = {"method": "lab", "A": [1.0, 1.0, 1.0], "B": [0.0, 0.0, 0.0]}
+    cdp = FakeCdp()
+
+    asyncio.run(cherry_html_runner._install_fixed_color_transform(cdp, fixed))  # type: ignore[arg-type]
+
+    assert "__assetclawFixedColorTransform" in cdp.expression
+    assert "buildColorTransform=function" in cdp.expression
+    cherry_html_runner._validate_processing_report(
+        {
+            "referenceLoaded": True,
+            "executedSteps": ["colormatch", "align"],
+            "skippedNoRef": [],
+            "colormatchEnabled": True,
+            "alignEnabled": True,
+            "alignmentTransform": {"s": 1, "tx": 0, "ty": 0},
+            "colorApi": "sequence_transform_v2",
+            "colorTransform": fixed,
+            "colorMatchStats": {"calls": 2, "applied": 2, "insufficient": 0},
+        },
+        expected_color_transform=fixed,
+        expected_frames=2,
+    )

@@ -9,12 +9,13 @@ import time
 import uuid
 import zipfile
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from assetclaw_matting.config import settings
+from assetclaw_matting.services.zip_filename_compat import zip_member_name
 from assetclaw_matting.runtime_context import get_runtime_context
 from assetclaw_matting.skills import matting_pipeline_skills
 from assetclaw_matting.skills.media_skills import IMAGE_EXTS
@@ -34,6 +35,7 @@ _RUN_CONTEXT = threading.local()
 def start(
     image_paths: list[str],
     source_names: list[str] | None = None,
+    source_relative_paths: list[str] | None = None,
     workflow_path: str | None = None,
     notify_interval_seconds: int = 60,
     run_label: str = "",
@@ -45,11 +47,8 @@ def start(
     if not image_paths:
         raise ValueError("image_paths is required")
     images = [_validate_image(path) for path in image_paths]
-    pipeline = matting_pipeline_skills.ensure_latest_cherry_for_task()
-    if not pipeline.get("ok"):
-        raise RuntimeError(matting_pipeline_skills.preflight_error(pipeline))
-    pipeline_notice = str(pipeline.get("message") or "")
     names = list(source_names or [])
+    relative_paths = list(source_relative_paths or [])
     group_keys = list(character_group_keys or [])
     evidence_sets = list(character_evidence or [])
     run_id = "IMG_" + uuid.uuid4().hex[:12].upper()
@@ -65,11 +64,18 @@ def start(
     group_units: dict[str, str] = {}
     resolution_units: dict[str, dict[str, Any]] = {}
     for index, image in enumerate(images, start=1):
-        name = _safe_name(names[index - 1] if index - 1 < len(names) else image.name)
+        name = _preserved_source_name(names[index - 1] if index - 1 < len(names) else image.name, image.name)
+        source_relative_path = _preserved_relative_path(
+            relative_paths[index - 1] if index - 1 < len(relative_paths) else name,
+            fallback=name,
+        )
         suffix = image.suffix if image.suffix.lower() in IMAGE_EXTS else ".png"
         image_dir = originals_dir / f"image_{index:02d}"
         image_dir.mkdir(parents=True, exist_ok=True)
-        target = image_dir / f"{index:02d}_{Path(name).stem}{suffix}"
+        target_name = Path(name).name
+        if Path(target_name).suffix.lower() not in IMAGE_EXTS:
+            target_name = f"{Path(target_name).stem}{suffix}"
+        target = image_dir / target_name
         shutil.copy2(image, target)
         width, height = _image_size(target)
         profile = _cherry_profile_from_dimensions(width, height)
@@ -87,6 +93,7 @@ def start(
                 "item_index": index,
                 "group_key": group_key,
                 "source_name": name,
+                "source_relative_path": source_relative_path,
                 "evidence": [],
             },
         )
@@ -102,6 +109,7 @@ def start(
                 "character_group_key": group_key,
                 "source_path": str(image),
                 "source_name": name,
+                "source_relative_path": source_relative_path,
                 "source_evidence": [str(value) for value in supplied_evidence if str(value or "").strip()],
                 "source_size_bytes": int(image.stat().st_size),
                 "original_path": str(target),
@@ -136,7 +144,7 @@ def start(
         "images": items,
         "children": {},
         "workflow_path": workflow_path or "",
-        "pipeline_notice": pipeline_notice,
+        "pipeline_notice": "",
         "notify_interval_seconds": max(30, min(int(notify_interval_seconds or 60), 3600)),
         "sent_files": [],
         "error": "",
@@ -265,7 +273,7 @@ def recover_incomplete_runs() -> dict[str, Any]:
                 _start_recovery_worker(run_id)
                 closed.append(run_id)
             continue
-        if current_status not in {"RUNNING", "QUEUED", "PENDING"}:
+        if current_status not in {"RUNNING", "QUEUED", "PENDING", "PREPARING"}:
             continue
         run = _reconcile_terminal_child(run)
         if str(run.get("status") or "").upper() in FINISHED:
@@ -379,6 +387,13 @@ def _worker_once(run_id: str) -> None:
     if not run:
         return
     try:
+        _mark(run, "PREPARING", "pipeline_preflight")
+        pipeline = matting_pipeline_skills.ensure_latest_cherry_for_task()
+        if not pipeline.get("ok"):
+            raise RuntimeError(matting_pipeline_skills.preflight_error(pipeline))
+        run["pipeline_notice"] = str(pipeline.get("message") or "")
+        _save(run)
+
         _ensure_original_images(run)
         _mark(run, "RUNNING", "matting")
         _run_comfyui(run)
@@ -675,8 +690,8 @@ def _restore_from_zip_archive(
                 info
                 for info in archive.infolist()
                 if not info.is_dir()
-                and Path(info.filename).name.casefold() in wanted
-                and Path(info.filename).suffix.lower() in IMAGE_EXTS
+                and Path(zip_member_name(info)).name.casefold() in wanted
+                and Path(zip_member_name(info)).suffix.lower() in IMAGE_EXTS
                 and 0 <= int(info.file_size) <= MAX_SOURCE_RECOVERY_ZIP_MEMBER_BYTES
             ]
             if len(members) != 1:
@@ -692,7 +707,7 @@ def _restore_from_zip_archive(
                 os.replace(temporary, target)
             finally:
                 temporary.unlink(missing_ok=True)
-            return member.filename
+            return zip_member_name(member)
     except (OSError, ValueError, zipfile.BadZipFile):
         return ""
 
@@ -1255,6 +1270,7 @@ def _make_matte_only_zip(
     run: dict[str, Any],
     matte_files: list[tuple[dict[str, Any], Path]],
 ) -> Path:
+    _repair_sequence_source_relative_paths(run)
     name = _safe_name(Path(str(run.get("run_label") or run["id"])).stem) or str(run["id"])
     package = _run_dir(run) / f"{name}_matte_only.zip"
     package.parent.mkdir(parents=True, exist_ok=True)
@@ -1270,22 +1286,28 @@ def _make_matte_only_zip(
     }
     try:
         with zipfile.ZipFile(partial, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as bundle:
+            archive_entries: set[str] = set()
             for position, (item, matte) in enumerate(matte_files):
                 original = Path(str(item.get("original_path") or ""))
                 if not original.is_file() or not matte.is_file():
                     raise RuntimeError(f"matte-only sequence source is missing: original={original}, matte={matte}")
-                original_entry = f"01_original_frames/{position:04d}{original.suffix.lower() or '.png'}"
-                matte_entry = f"02_matte/{position:04d}{matte.suffix.lower() or '.png'}"
+                original_entry = _stage_entry("frames", item, original, preserve_source_extension=True)
+                matte_entry = _stage_entry("matte", item, matte)
+                for entry in (original_entry, matte_entry):
+                    collision_key = entry.casefold()
+                    if collision_key in archive_entries:
+                        raise RuntimeError(f"sequence package contains duplicate original file name: {entry}")
+                    archive_entries.add(collision_key)
                 bundle.write(original, original_entry, compress_type=zipfile.ZIP_STORED)
                 bundle.write(matte, matte_entry, compress_type=zipfile.ZIP_STORED)
                 manifest["files"].append({
                     "index": position,
                     "source_name": item.get("source_name") or item.get("name") or "",
-                    "original_frames": original_entry,
+                    "frames": original_entry,
                     "matte": matte_entry,
                 })
             bundle.writestr(
-                "03_postprocessed/README.txt",
+                "smooth/README.txt",
                 "未生成后处理结果：角色库中暂无对应角色的校色与位置矫正资料。\n",
                 compress_type=zipfile.ZIP_DEFLATED,
             )
@@ -1390,6 +1412,7 @@ def package_and_send(run_id: str | None = None, package_name: str = "", **_: Any
 
 
 def _make_sequence_zip(run: dict[str, Any], package_name: str = "") -> Path:
+    _repair_sequence_source_relative_paths(run)
     items = sorted(run.get("images") or [], key=lambda item: int(item.get("index") or 0))
     if not items:
         raise RuntimeError("sequence run contains no images")
@@ -1410,24 +1433,29 @@ def _make_sequence_zip(run: dict[str, Any], package_name: str = "") -> Path:
         "artifact_kind": "sequence_complete_bundle",
         "frame_count": len(items),
         "ordered": True,
-        "stages": ["original_frames", "matte", "postprocessed"],
+        "stages": ["frames", "matte", "smooth"],
         "files": [],
     }
     partial = zip_path.with_suffix(".zip.part")
     try:
         with zipfile.ZipFile(partial, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+            archive_entries: set[str] = set()
             for position, item in enumerate(items):
                 paths = {
-                    "original_frames": Path(str(item.get("original_path") or "")),
+                    "frames": Path(str(item.get("original_path") or "")),
                     "matte": Path(str(item.get("matte_result_path") or "")),
-                    "postprocessed": Path(str(item.get("postprocessed_result_path") or "")),
+                    "smooth": Path(str(item.get("postprocessed_result_path") or "")),
                 }
                 missing = [f"{kind}:{path}" for kind, path in paths.items() if not path.is_file()]
                 if missing:
                     raise RuntimeError("sequence package missing result files: " + ", ".join(missing))
                 entries: dict[str, str] = {}
-                for order, (kind, path) in enumerate(paths.items(), start=1):
-                    entry = f"{order:02d}_{kind}/{position:04d}{path.suffix.lower() or '.png'}"
+                for kind, path in paths.items():
+                    entry = _stage_entry(kind, item, path, preserve_source_extension=kind == "frames")
+                    collision_key = entry.casefold()
+                    if collision_key in archive_entries:
+                        raise RuntimeError(f"sequence package contains duplicate original file name: {entry}")
+                    archive_entries.add(collision_key)
                     archive.write(path, entry, compress_type=zipfile.ZIP_STORED)
                     entries[kind] = entry
                 manifest["files"].append({
@@ -1447,6 +1475,53 @@ def _make_sequence_zip(run: dict[str, Any], package_name: str = "") -> Path:
     finally:
         partial.unlink(missing_ok=True)
     return zip_path
+
+
+def _repair_sequence_source_relative_paths(run: dict[str, Any]) -> int:
+    """Recover original Unicode member paths from the uploaded source ZIP."""
+
+    items = sorted(run.get("images") or [], key=lambda item: int(item.get("index") or 0))
+    if not items:
+        return 0
+    archive_candidates: list[Path] = []
+    for item in items:
+        archive_candidates.extend(_source_archive_candidates(run, item))
+    for archive_path in _deduplicate_paths(archive_candidates):
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                member_names = [
+                    zip_member_name(info).replace("\\", "/")
+                    for info in archive.infolist()
+                    if not info.is_dir() and Path(zip_member_name(info)).suffix.lower() in IMAGE_EXTS
+                ][: len(items) + 1]
+        except (OSError, ValueError, zipfile.BadZipFile):
+            continue
+        if len(member_names) != len(items):
+            continue
+        if any(
+            Path(member_name).name.casefold()
+            != Path(str(item.get("source_name") or item.get("name") or "")).name.casefold()
+            for item, member_name in zip(items, member_names)
+        ):
+            continue
+        repaired = 0
+        for item, member_name in zip(items, member_names):
+            normalized = _preserved_relative_path(member_name, fallback=Path(member_name).name)
+            if str(item.get("source_relative_path") or "") != normalized:
+                item["source_relative_path"] = normalized
+                repaired += 1
+        if repaired:
+            run.setdefault("source_filename_recovery", []).append(
+                {
+                    "archive_path": str(archive_path),
+                    "repaired": repaired,
+                    "encoding": "infozip_unicode_path_or_gb18030",
+                    "updated_at": _now(),
+                }
+            )
+            _save(run)
+        return repaired
+    return 0
 
 
 def _send_sequence_delivery_artifacts(
@@ -2126,6 +2201,42 @@ def _safe_name(value: str) -> str:
     text = str(value or "").replace("\\", "/").split("/")[-1].strip()
     cleaned = "".join(ch if ch.isalnum() or ch in "._- " else "_" for ch in text).strip(" .")
     return cleaned or "image.png"
+
+
+def _preserved_source_name(value: str, fallback: str = "image.png") -> str:
+    text = str(value or "").replace("\\", "/").split("/")[-1].strip()
+    if not text:
+        text = str(fallback or "image.png").replace("\\", "/").split("/")[-1].strip()
+    # Keep ordinary Unicode, spaces, parentheses and punctuation exactly as
+    # supplied.  Replace only characters Windows cannot materialize locally.
+    cleaned = "".join("_" if ord(ch) < 32 or ch in '<>:"/\\|?*' else ch for ch in text).rstrip(" .")
+    return cleaned or "image.png"
+
+
+def _preserved_relative_path(value: str, *, fallback: str) -> str:
+    raw = str(value or "").replace("\\", "/")
+    parts = [part for part in PurePosixPath(raw).parts if part not in {"", ".", "..", "/"}]
+    if not parts:
+        parts = [_preserved_source_name(fallback)]
+    return PurePosixPath(*parts).as_posix()
+
+
+def _stage_entry(
+    stage: str,
+    item: dict[str, Any],
+    result_path: Path,
+    *,
+    preserve_source_extension: bool = False,
+) -> str:
+    relative = _preserved_relative_path(
+        str(item.get("source_relative_path") or item.get("source_name") or item.get("name") or result_path.name),
+        fallback=result_path.name,
+    )
+    source = PurePosixPath(relative)
+    if not preserve_source_extension:
+        suffix = result_path.suffix.lower() or ".png"
+        source = source.with_suffix(suffix)
+    return (PurePosixPath(stage) / source).as_posix()
 
 
 def _image_size(path: Path) -> tuple[int, int]:

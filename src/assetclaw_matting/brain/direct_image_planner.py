@@ -9,6 +9,7 @@ from typing import Any
 
 from assetclaw_matting.brain.schemas import BrainMessage, ToolCall
 from assetclaw_matting.config import settings
+from assetclaw_matting.services.zip_filename_compat import zip_member_name
 from assetclaw_matting.skills.media_skills import IMAGE_EXTS
 
 ARCHIVE_EXTS = {".zip"}
@@ -46,6 +47,7 @@ def plan_direct_image_task(message: BrainMessage) -> tuple[list[ToolCall], str] 
 
     paths = [str(item["local_path"]) for item in images if item.get("local_path")]
     names = [str(item.get("file_name") or Path(path).name) for item, path in zip(images, paths)]
+    relative_paths = [str(item.get("source_relative_path") or name) for item, name in zip(images, names)]
     character_group_keys: list[str] = []
     character_evidence: list[list[str]] = []
     for index, (item, path, name) in enumerate(zip(images, paths, names), start=1):
@@ -74,6 +76,7 @@ def plan_direct_image_task(message: BrainMessage) -> tuple[list[ToolCall], str] 
                 arguments={
                     "image_paths": paths,
                     "source_names": names,
+                    "source_relative_paths": relative_paths,
                     "run_label": run_label,
                     "package_as_sequence": package_as_sequence,
                     "character_group_keys": character_group_keys,
@@ -126,6 +129,7 @@ def _expand_image_set_attachment(item: dict[str, Any]) -> list[dict[str, Any]]:
             "source_collection": source_name,
             "sequence_source": True,
             "sequence_group": sequence_groups.get(image_path, "root"),
+            "source_relative_path": _relative_source_path(image_path, source_root),
         }
         for image_path in image_paths[:MAX_IMAGE_SET_ITEMS]
     ]
@@ -156,8 +160,6 @@ def _extract_archive_images(path: Path) -> list[Path]:
     except OSError:
         return []
     target_root = _archive_target_root(path, fingerprint=fingerprint)
-    if _image_paths_in_dir(target_root):
-        return _image_paths_in_dir(target_root)
     target_root.mkdir(parents=True, exist_ok=True)
     extracted: list[Path] = []
     try:
@@ -166,7 +168,7 @@ def _extract_archive_images(path: Path) -> list[Path]:
             for member in archive.infolist():
                 if member.is_dir():
                     continue
-                member_path = Path(member.filename.replace("\\", "/"))
+                member_path = Path(zip_member_name(member).replace("\\", "/"))
                 if member_path.suffix.lower() not in IMAGE_EXTS:
                     continue
                 if any(part in {"", ".", ".."} for part in member_path.parts):
@@ -188,7 +190,9 @@ def _extract_archive_images(path: Path) -> list[Path]:
                     break
     except (OSError, zipfile.BadZipFile):
         return []
-    return sorted(extracted, key=lambda item: _natural_path_key(item, target_root))
+    # ZipInfo order is the user's original sequence order.  Do not impose a
+    # natural/alphabetical order on direct image sequences.
+    return extracted
 
 
 def _archive_target_root(path: Path, *, fingerprint: str = "") -> Path:
@@ -213,6 +217,13 @@ def _sequence_groups(image_paths: list[Path], source_root: Path) -> dict[Path, s
         image_path: (relative.parts[0] if split_by_top_folder else "root")
         for image_path, relative in relatives.items()
     }
+
+
+def _relative_source_path(image_path: Path, source_root: Path) -> str:
+    try:
+        return image_path.relative_to(source_root).as_posix()
+    except ValueError:
+        return image_path.name
 
 
 def _natural_path_key(path: Path, root: Path) -> tuple[tuple[tuple[int, object], ...], ...]:

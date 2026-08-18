@@ -153,9 +153,9 @@ def test_image_sequence_full_redelivery_is_one_complete_zip(monkeypatch, tmp_pat
     assert len(sent) == 1
     with zipfile.ZipFile(sent[0]) as archive:
         names = archive.namelist()
-    assert sum(name.startswith("01_original_frames/") for name in names) == 2
-    assert sum(name.startswith("02_matte/") for name in names) == 2
-    assert sum(name.startswith("03_postprocessed/") for name in names) == 2
+    assert sum(name.startswith("frames/") for name in names) == 2
+    assert sum(name.startswith("matte/") for name in names) == 2
+    assert sum(name.startswith("smooth/") for name in names) == 2
 
 
 def test_full_redelivery_skills_are_registered_without_second_confirmation() -> None:

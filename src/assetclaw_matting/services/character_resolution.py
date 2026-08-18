@@ -770,6 +770,72 @@ def cancel_run_resolutions(run_kind: str, run_id: str) -> None:
         )
 
 
+def reactivate_run_resolutions(run_kind: str, run_id: str) -> dict[str, Any]:
+    """Restore role bindings and unanswered questions for an in-place rerun."""
+
+    now = _now()
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM character_resolutions
+            WHERE run_kind = ? AND run_id = ?
+            ORDER BY item_index, unit_id
+            """,
+            (run_kind, run_id),
+        ).fetchall()
+        if not rows:
+            return {
+                "found": False,
+                "question_id": "",
+                "total": 0,
+                "pending": 0,
+                "items": [],
+                "prompt": "",
+            }
+
+        question_ids = {str(row["question_id"] or "") for row in rows if row["question_id"]}
+        for row in rows:
+            character_id = str(row["character_id"] or "").strip()
+            restored_status = "FROZEN" if character_id else "PENDING"
+            conn.execute(
+                """
+                UPDATE character_resolutions
+                SET status = ?, version = version + 1, updated_at = ?,
+                    resolved_at = CASE WHEN ? = 'FROZEN'
+                        THEN COALESCE(resolved_at, ?) ELSE NULL END
+                WHERE unit_id = ?
+                """,
+                (restored_status, now, restored_status, now, str(row["unit_id"])),
+            )
+
+        pending_count = sum(1 for row in rows if not str(row["character_id"] or "").strip())
+        question_status = "PENDING" if pending_count else "RESOLVED"
+        for question_id in question_ids:
+            conn.execute(
+                """
+                UPDATE character_resolution_questions
+                SET status = ?, outbound_message_id = NULL,
+                    waiting_started_at = NULL, next_action_at = NULL,
+                    deadline_at = NULL, reminder_count = 0,
+                    last_reminded_at = NULL, lease_owner = NULL,
+                    lease_until = NULL, failed_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (question_status, now, question_id),
+            )
+
+    current = get_run_resolutions(run_kind, run_id)
+    pending = [item for item in current if str(item.get("status") or "") == "PENDING"]
+    return {
+        "found": True,
+        "question_id": next(iter(question_ids), "") if pending else "",
+        "total": len(current),
+        "pending": len(pending),
+        "items": current,
+        "prompt": format_pending_prompt(current),
+    }
+
+
 def fail_run_resolutions(run_kind: str, run_id: str) -> None:
     """Close role questions when their owning business run fails terminally."""
 

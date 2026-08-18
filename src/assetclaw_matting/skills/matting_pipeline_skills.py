@@ -486,16 +486,22 @@ def _comfyui_queue_activity() -> dict[str, Any]:
 
 def _git(args: list[str], cwd: Path) -> str:
     safe_directory = str(Path(cwd).resolve()).replace("\\", "/")
-    proc = subprocess.run(
-        ["git", "-c", f"safe.directory={safe_directory}", *args],
-        cwd=str(cwd),
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=300,
-    )
+    timeout_seconds = 20 if args and args[0] == "fetch" else 300
+    try:
+        proc = subprocess.run(
+            ["git", "-c", f"safe.directory={safe_directory}", *args],
+            cwd=str(cwd),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(
+            f"git {' '.join(args)} timed out after {timeout_seconds}s"
+        ) from exc
     if proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed:\n{proc.stdout}")
     return proc.stdout.strip()

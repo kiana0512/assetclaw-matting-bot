@@ -209,6 +209,13 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "Initializing database..."
 Invoke-AssetPython -m assetclaw_matting.cli.main init-db 2>&1 | Write-Host
 
+Write-Host "Starting Cherry Real-ESRGAN dependency..."
+& $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File "scripts\start_cherry_realesrgan.ps1"
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "Cherry Real-ESRGAN failed to start; latest Cherry post-processing cannot be released."
+  exit 1
+}
+
 if (-not (Test-Path "logs\conversation.log")) {
   New-Item -ItemType File -Path "logs\conversation.log" -Force | Out-Null
 }

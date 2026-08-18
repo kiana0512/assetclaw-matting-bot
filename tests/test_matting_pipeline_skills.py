@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from PIL import Image
@@ -144,6 +145,22 @@ def test_cherry_task_preflight_updates_only_local_postprocess_assets(monkeypatch
     assert result["character_assets"]["emoji_count"] == 1
     assert "workflow_path" not in result
     assert "assets" not in result
+
+
+def test_git_fetch_has_bounded_timeout(monkeypatch, tmp_path: Path) -> None:
+    from assetclaw_matting.skills import matting_pipeline_skills
+
+    def timeout(*_args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="git fetch", timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(matting_pipeline_skills.subprocess, "run", timeout)
+
+    try:
+        matting_pipeline_skills._git(["fetch", "--prune", "origin"], tmp_path)
+    except TimeoutError as exc:
+        assert "20s" in str(exc)
+    else:
+        raise AssertionError("git fetch timeout must not be ignored")
 
 
 def test_runtime_node_check_ignores_frontend_and_disabled_nodes(monkeypatch) -> None:

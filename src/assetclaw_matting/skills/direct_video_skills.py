@@ -47,10 +47,6 @@ def start(
     if not video_paths:
         raise ValueError("video_paths is required")
     videos = [_validate_video(path) for path in video_paths]
-    pipeline = matting_pipeline_skills.ensure_latest_cherry_for_task()
-    if not pipeline.get("ok"):
-        raise RuntimeError(matting_pipeline_skills.preflight_error(pipeline))
-    pipeline_notice = str(pipeline.get("message") or "")
     names = list(source_names or [])
     evidence_sets = list(character_evidence or [])
     run_id = "VID_" + uuid.uuid4().hex[:12].upper()
@@ -127,7 +123,7 @@ def start(
         "max_frames": int(max_frames or 0),
         "workflow_path": workflow_path or "",
         "matting_backend": str(matting_backend or "").strip().lower(),
-        "pipeline_notice": pipeline_notice,
+        "pipeline_notice": "",
         "notify_interval_seconds": max(30, min(int(notify_interval_seconds or 60), 3600)),
         "zip_path": "",
         "integrity": {},
@@ -251,7 +247,7 @@ def recover_incomplete_runs() -> dict[str, Any]:
                 _start_worker(run_id, recover=True)
                 recovered.append(run_id)
                 continue
-        if current_status not in {"RUNNING", "QUEUED", "PENDING"}:
+        if current_status not in {"RUNNING", "QUEUED", "PENDING", "PREPARING"}:
             continue
         worker_pid = int(run.get("worker_pid") or 0)
         if worker_pid and _process_alive(worker_pid):
@@ -693,6 +689,13 @@ def _worker(run_id: str) -> None:
     if not run:
         return
     try:
+        _mark(run, "PREPARING", "pipeline_preflight")
+        pipeline = matting_pipeline_skills.ensure_latest_cherry_for_task()
+        if not pipeline.get("ok"):
+            raise RuntimeError(matting_pipeline_skills.preflight_error(pipeline))
+        run["pipeline_notice"] = str(pipeline.get("message") or "")
+        _save(run)
+
         _mark(run, "RUNNING", "extract_frames")
         _extract_all(run)
         if _is_canceled(run):

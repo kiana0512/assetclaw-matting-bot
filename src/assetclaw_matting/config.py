@@ -228,7 +228,7 @@ class Settings(BaseSettings):
     # The standalone HTML keeps several full-resolution ImageData snapshots in
     # memory for every input. Bound each browser session so long sequences do
     # not exhaust Chromium's ArrayBuffer heap while still preserving order.
-    cherry_html_batch_max_files: int = 8
+    cherry_html_batch_max_files: int = 16
     cherry_html_batch_max_pixels: int = 12_000_000
     # Character confirmation is intentionally independent from GPU workers.
     # The original question is sent with the start acknowledgement; once

@@ -134,34 +134,24 @@ def test_feishu_upload_file_type_and_mime_for_zip() -> None:
     assert _feishu_message_type("result.zip") == "file"
 
 
-def test_feishu_send_small_mp4_uses_media_message_type(monkeypatch, tmp_path: Path) -> None:
+def test_feishu_send_small_mp4_uses_tenant_readable_drive_link(monkeypatch, tmp_path: Path) -> None:
     from assetclaw_matting.feishu.client import FeishuClient
 
     target = tmp_path / "clip.mp4"
     target.write_bytes(b"video")
-    posted: dict[str, object] = {}
-
-    class Response:
-        status_code = 200
-
-        def json(self):
-            return {"code": 0, "data": {"message_id": "om_media", "chat_id": "oc_test"}}
-
     client = FeishuClient()
-    monkeypatch.setattr(client, "upload_file", lambda *_args, **_kwargs: "file_key")
-    monkeypatch.setattr(client, "_headers", lambda: {})
-
-    def fake_post(_url: str, **kwargs):
-        posted.update(kwargs["json"])
-        return Response()
-
-    monkeypatch.setattr(client, "_post_with_retry", fake_post)
+    monkeypatch.setattr(client, "upload_drive_file", lambda *_args, **_kwargs: {"file_token": "drive_token", "url": "https://example/file"})
+    shared: dict[str, str] = {}
+    monkeypatch.setattr(client, "set_drive_file_link_share", lambda token, link_share_entity="tenant_readable": shared.update({"token": token, "mode": link_share_entity}))
+    monkeypatch.setattr(client, "grant_drive_file_to_chat", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(client, "send_text_to_chat", lambda *_args, **_kwargs: {"message_id": "om_media", "chat_id": "oc_test"})
 
     receipt = client.send_file_to_chat("oc_test", target, target.name)
 
-    assert posted["msg_type"] == "media"
-    assert json.loads(str(posted["content"])) == {"file_key": "file_key"}
     assert receipt["message_id"] == "om_media"
+    assert receipt["delivery_method"] == "drive_link"
+    assert receipt["link_share_entity"] == "tenant_readable"
+    assert shared == {"token": "drive_token", "mode": "tenant_readable"}
 
 
 def test_feishu_send_file_falls_back_to_drive_link_on_size_error(monkeypatch, tmp_path: Path) -> None:
@@ -192,6 +182,7 @@ def test_feishu_send_file_falls_back_to_drive_link_on_size_error(monkeypatch, tm
         "grant_drive_file_to_chat",
         lambda file_token, chat_id, perm="full_access": grants.update({"file_token": file_token, "chat_id": chat_id, "perm": perm}),
     )
+    monkeypatch.setattr(client, "set_drive_file_link_share", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(client, "send_text_to_chat", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}))
 
     client.send_file_to_chat("oc_test", target, target.name)
@@ -218,6 +209,7 @@ def test_feishu_send_large_file_uses_drive_without_message_upload(monkeypatch, t
         lambda path, file_name=None: {"file_token": "drive_token", "url": "https://lilithgames.feishu.cn/file/large"},
     )
     monkeypatch.setattr(client, "grant_drive_file_to_chat", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(client, "set_drive_file_link_share", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(client, "send_text_to_chat", lambda chat_id, text: sent.update({"chat_id": chat_id, "text": text}))
 
     result = client.send_file_to_chat("oc_large", target, target.name)
@@ -226,6 +218,7 @@ def test_feishu_send_large_file_uses_drive_without_message_upload(monkeypatch, t
         "file_token": "drive_token",
         "url": "https://lilithgames.feishu.cn/file/large",
         "delivery_method": "drive_link",
+        "link_share_entity": "tenant_readable",
     }
     assert sent == {"chat_id": "oc_large", "text": "文件已生成：large-result.zip\nhttps://lilithgames.feishu.cn/file/large"}
 
@@ -329,6 +322,31 @@ def test_feishu_drive_request_retries_write_timeout(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert len(attempts) == 2
+
+
+def test_feishu_drive_link_share_is_tenant_readable(monkeypatch) -> None:
+    from assetclaw_matting.feishu.client import FeishuClient
+
+    captured: dict[str, object] = {}
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {"code": 0, "data": {}}
+
+    client = FeishuClient()
+    monkeypatch.setattr(client, "_headers", lambda: {"Authorization": "Bearer token"})
+    monkeypatch.setattr(
+        client,
+        "_patch_with_retry",
+        lambda url, **kwargs: captured.update({"url": url, **kwargs}) or Response(),
+    )
+
+    client.set_drive_file_link_share("file_token")
+
+    assert captured["params"] == {"type": "file"}
+    assert captured["json"] == {"link_share_entity": "tenant_readable"}
 
 
 def test_feishu_client_add_message_reaction(monkeypatch) -> None:
@@ -829,7 +847,7 @@ def test_direct_image_zip_attachment_routes_as_image_set(monkeypatch, tmp_path: 
     assert tool_calls[0].arguments["run_label"].endswith(".zip")
 
 
-def test_direct_image_zip_uses_natural_frame_order_and_stays_a_sequence(monkeypatch, tmp_path: Path) -> None:
+def test_direct_image_zip_preserves_archive_frame_order_and_stays_a_sequence(monkeypatch, tmp_path: Path) -> None:
     import zipfile
     from assetclaw_matting.config import settings
 
@@ -851,7 +869,8 @@ def test_direct_image_zip_uses_natural_frame_order_and_stays_a_sequence(monkeypa
 
     assert planned is not None
     tool_calls, _reason = planned
-    assert [Path(path).name for path in tool_calls[0].arguments["image_paths"]] == ["1.png", "2.png", "10.png"]
+    assert [Path(path).name for path in tool_calls[0].arguments["image_paths"]] == ["10.png", "2.png", "1.png"]
+    assert tool_calls[0].arguments["source_relative_paths"] == ["10.png", "2.png", "1.png"]
     assert tool_calls[0].arguments["package_as_sequence"] is True
 
 
@@ -1496,7 +1515,7 @@ def test_direct_image_sequence_sends_one_complete_bundle(monkeypatch, tmp_path: 
             Image.new("RGBA", (8, 8), (index, 0, 0, 255)).save(path)
         images.append({
             "index": index + 1,
-            "source_name": f"{index:04d}.png",
+            "source_name": ("lisa (idle).png", "ats.png")[index],
             "original_path": str(original),
             "matte_dir": str(matte.parent),
             "smooth_dir": str(smooth.parent),
@@ -1519,9 +1538,9 @@ def test_direct_image_sequence_sends_one_complete_bundle(monkeypatch, tmp_path: 
     with zipfile.ZipFile(complete_bundle) as archive:
         complete_names = set(archive.namelist())
         assert archive.getinfo("manifest.json").compress_type == zipfile.ZIP_DEFLATED
-    for index in range(2):
-        for section in ("01_original_frames", "02_matte", "03_postprocessed"):
-            assert f"{section}/{index:04d}.png" in complete_names
+    for name in ("lisa (idle).png", "ats.png"):
+        for section in ("frames", "matte", "smooth"):
+            assert f"{section}/{name}" in complete_names
     assert run["delivery"]["artifact_count"] == 1
     assert [item["kind"] for item in run["delivery_artifacts"]] == ["complete_bundle"]
     assert [item["status"] for item in run["delivery_artifacts"]] == ["DELIVERED"]
@@ -1547,9 +1566,9 @@ def test_direct_image_matte_only_sequence_keeps_originals_and_stage_contract(mon
         assert archive.testzip() is None
         assert archive.getinfo("manifest.json").compress_type == zipfile.ZIP_DEFLATED
     assert names == {
-        "01_original_frames/0000.png",
-        "02_matte/0000.png",
-        "03_postprocessed/README.txt",
+        "frames/0000.png",
+        "matte/0000.png",
+        "smooth/README.txt",
         "manifest.json",
     }
     assert not package.with_suffix(".zip.part").exists()
@@ -1814,6 +1833,11 @@ def test_direct_video_delivery_failure_keeps_completed_zip_for_resend(monkeypatc
     from assetclaw_matting.skills import direct_video_skills
 
     monkeypatch.setattr(direct_video_skills, "RUNS_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(
+        direct_video_skills.matting_pipeline_skills,
+        "ensure_latest_cherry_for_task",
+        lambda: {"ok": True, "message": "verified"},
+    )
     run = {
         "id": "VID_DELIVERY_TEST",
         "status": "RUNNING",
