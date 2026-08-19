@@ -60,7 +60,7 @@ def run_checks() -> dict[str, Any]:
 
     try:
         cherry = validate_cherry_html_runtime(
-            Path(settings.cherry_postprocess_html_path),
+            settings.resolved_cherry_postprocess_html_path,
             Path(settings.cherry_browser_path) if settings.cherry_browser_path else None,
         )
         checks.append(_check("cherry_html_runtime", True, cherry))

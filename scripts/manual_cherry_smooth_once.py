@@ -35,11 +35,11 @@ def main() -> int:
         raise RuntimeError(f"input dir has no images: {src}")
 
     browser = Path(settings.cherry_browser_path) if settings.cherry_browser_path else None
-    runtime = validate_cherry_html_runtime(Path(settings.cherry_postprocess_html_path), browser)
+    runtime = validate_cherry_html_runtime(settings.resolved_cherry_postprocess_html_path, browser)
     results = []
     for files in groups:
         result = run_cherry_html(
-            Path(settings.cherry_postprocess_html_path),
+            settings.resolved_cherry_postprocess_html_path,
             src,
             dst,
             files,

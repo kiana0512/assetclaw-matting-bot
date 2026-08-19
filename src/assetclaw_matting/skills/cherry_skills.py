@@ -862,7 +862,7 @@ def _tool_source_path() -> Path:
     from assetclaw_matting.services.cherry_html_runner import verified_cherry_html_path
 
     return verified_cherry_html_path(
-        Path(settings.cherry_postprocess_html_path),
+        settings.resolved_cherry_postprocess_html_path,
         Path(settings.storage_dir),
     )
 

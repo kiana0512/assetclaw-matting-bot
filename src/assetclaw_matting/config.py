@@ -10,6 +10,44 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _resolve_cherry_postprocess_html(source_path: Path, pipeline_root: Path) -> Path:
+    """Return a valid Cherry HTML path even if env/config points to a moved file.
+
+    Historical deployments use either:
+    - <pipeline_root>/cherry-postprocess.html
+    - <pipeline_root>/序列帧后处理/cherry-postprocess.html
+    plus user-configured custom paths.
+
+    Prefer the configured path if present, otherwise probe common and in-repo
+    fallbacks so preflight can recover automatically instead of blocking every task.
+    """
+
+    configured = Path(source_path).expanduser()
+    if configured.is_file():
+        return configured
+
+    pipeline_root = Path(pipeline_root).expanduser()
+    candidates: list[Path] = []
+
+    # Common local deployment layouts (ordered by preference).
+    candidates.append(pipeline_root / "cherry-postprocess.html")
+    candidates.append(pipeline_root / "序列帧后处理" / "cherry-postprocess.html")
+    candidates.append(Path("C:") / "imageclip" / "cherry-postprocess.html")
+    candidates.append(configured.parent / "cherry-postprocess.html")
+    candidates.append(configured.parent.parent / "cherry-postprocess.html")
+
+    # Final fallback: any matching file inside the pipeline checkout.
+    if pipeline_root.is_dir():
+        for found in sorted(pipeline_root.rglob("cherry-postprocess.html")):
+            candidates.append(found)
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    return configured
+
+
 def _discover_aki_root(parent: Path, home: Path | None = None) -> Path:
     """Find an Aki/ComfyUI bundle without relying on its machine-specific folder name."""
     user_home = Path.home() if home is None else Path(home)
@@ -305,7 +343,10 @@ class Settings(BaseSettings):
             "comfyui_python_exe": comfy_python_dir / "python.exe",
             "comfyui_workflow_path": comfy_dir / "user" / "default" / "workflows" / "ImageClip.json",
             "matting_pipeline_repo_dir": pipeline_root,
-            "cherry_postprocess_html_path": pipeline_root / "cherry-postprocess.html",
+            "cherry_postprocess_html_path": _resolve_cherry_postprocess_html(
+                Path(data.get("cherry_postprocess_html_path") or (pipeline_root / "cherry-postprocess.html")),
+                pipeline_root,
+            ),
             "cherry_character_full_reference_dir": pipeline_root / "CharactorFull",
             "cherry_character_emoji_reference_dir": pipeline_root / "CharactorEmoji",
             "cherry_character_reference_dir": pipeline_root / "Charactor",
@@ -321,6 +362,10 @@ class Settings(BaseSettings):
         for key, value in defaults.items():
             data.setdefault(key, value)
         return data
+
+    @property
+    def resolved_cherry_postprocess_html_path(self) -> Path:
+        return _resolve_cherry_postprocess_html(self.cherry_postprocess_html_path, self.matting_pipeline_repo_dir)
 
     @property
     def cherry_character_half_reference_dir(self) -> Path:

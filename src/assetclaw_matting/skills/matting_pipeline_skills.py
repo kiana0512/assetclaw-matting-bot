@@ -25,7 +25,7 @@ def status(**_: Any) -> dict[str, Any]:
     remote = _git_remote_state(repo) if (repo / ".git").exists() else {}
     assets = _asset_plan()
     links = [_link_status(item) for item in assets]
-    cherry_html = Path(settings.cherry_postprocess_html_path)
+    cherry_html = settings.resolved_cherry_postprocess_html_path
     return {
         "ok": True,
         "repo_url": settings.matting_pipeline_repo_url,
@@ -79,7 +79,7 @@ def verify(**_: Any) -> dict[str, Any]:
             errors.append(f"工作流 JSON 无法解析：{exc}")
     else:
         errors.append(f"默认工作流缺失：{workflow}")
-    cherry_html = Path(settings.cherry_postprocess_html_path)
+    cherry_html = settings.resolved_cherry_postprocess_html_path
     if not cherry_html.is_file():
         errors.append(f"Cherry 唯一算法 HTML 缺失：{cherry_html}")
     for item in payload["assets"]:
@@ -219,7 +219,7 @@ def _ensure_latest_cherry_for_task_locked() -> dict[str, Any]:
     before = _git_commit(repo) if (repo / ".git").exists() else {}
     git_output = _sync_repo(repo)
     after = _git_commit(repo)
-    source = Path(settings.cherry_postprocess_html_path)
+    source = settings.resolved_cherry_postprocess_html_path
     if not source.is_file():
         return {
             "ok": False,
@@ -463,7 +463,7 @@ def _verify_cherry_release() -> dict[str, Any]:
     from assetclaw_matting.services.cherry_html_runner import verify_and_promote_cherry_html
 
     return verify_and_promote_cherry_html(
-        Path(settings.cherry_postprocess_html_path),
+        settings.resolved_cherry_postprocess_html_path,
         Path(settings.storage_dir),
         chrome_path=Path(settings.cherry_browser_path) if settings.cherry_browser_path else None,
         timeout_seconds=min(180, int(settings.cherry_html_timeout_seconds)),
